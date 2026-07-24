@@ -1,0 +1,44 @@
+"""Tests for durable job handler registry."""
+
+from __future__ import annotations
+
+import pytest
+
+from sports_analytics.core.exceptions import JobRegistryError
+from sports_analytics.jobs.context import JobExecutionContext
+from sports_analytics.jobs.registry import HandlerRegistry, build_default_registry
+from sports_analytics.jobs.types import SYSTEM_NOOP_JOB_TYPE
+
+
+def _handler(context: JobExecutionContext, payload: object) -> dict[str, object]:
+    return {"job_id": context.job_id, "payload": payload}
+
+
+def test_register_get_list_and_freeze() -> None:
+    registry = HandlerRegistry()
+    registry.register("demo.job", _handler)
+    assert registry.get("demo.job") is _handler
+    assert registry.list_job_types() == ("demo.job",)
+    registry.freeze()
+    with pytest.raises(JobRegistryError, match="frozen"):
+        registry.register("demo.other", _handler)
+
+
+def test_duplicate_unknown_and_invalid_job_types_raise_registry_error() -> None:
+    registry = HandlerRegistry()
+    registry.register("demo.job", _handler)
+    with pytest.raises(JobRegistryError, match="already registered"):
+        registry.register("demo.job", _handler)
+    with pytest.raises(JobRegistryError, match="no handler"):
+        registry.get("demo.missing")
+    with pytest.raises(JobRegistryError, match="invalid job type"):
+        registry.register("Bad Job", _handler)
+
+
+def test_default_registry_contains_frozen_system_noop_handler() -> None:
+    registry = build_default_registry()
+    assert registry.list_job_types() == (SYSTEM_NOOP_JOB_TYPE,)
+    handler = registry.get(SYSTEM_NOOP_JOB_TYPE)
+    assert callable(handler)
+    with pytest.raises(JobRegistryError, match="frozen"):
+        registry.register("demo.job", _handler)

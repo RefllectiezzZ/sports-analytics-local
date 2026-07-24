@@ -32,8 +32,10 @@ from sports_analytics.data.migrations import (
 )
 from sports_analytics.data.repositories.application import ApplicationMetadataRepository
 from sports_analytics.data.repositories.audit import AuditEventRepository
+from sports_analytics.data.repositories.job_queue import JobQueueRepository
 from sports_analytics.data.repositories.jobs import JobRepository
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
+from sports_analytics.data.repositories.workers import WorkerRepository
 from sports_analytics.data.types import (
     JobStatus,
     Migration,
@@ -41,8 +43,24 @@ from sports_analytics.data.types import (
     validate_relative_snapshot_path,
     validate_strict_int,
 )
+from sports_analytics.jobs.types import WorkerStatus
 
 FIXED = datetime(2026, 7, 24, 19, 30, 0, tzinfo=UTC)
+WORKER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def _register_running_worker(connection) -> str:
+    worker = WorkerRepository(connection).register_worker(
+        worker_id=WORKER_ID,
+        name="test-worker",
+        process_id=1234,
+        hostname="test-host",
+        started_at=FIXED,
+        heartbeat_at=FIXED,
+        capabilities={"job_types": ["demo.job", "demo.job2"]},
+        status=WorkerStatus.RUNNING,
+    )
+    return worker.id
 
 
 def test_header_inspection_does_not_use_read_bytes(
@@ -164,7 +182,7 @@ def test_job_transition_requires_transaction(tmp_path: Path) -> None:
                 job.id,
                 expected_status=JobStatus.PENDING,
                 expected_version=1,
-                new_status=JobStatus.RUNNING,
+                new_status=JobStatus.CANCELLED,
                 actor="worker",
                 occurred_at=FIXED.replace(microsecond=1),
             )
@@ -174,15 +192,15 @@ def test_job_transition_requires_transaction(tmp_path: Path) -> None:
             == events_before
         )
         with transaction(connection):
-            running = repo.transition_job(
+            cancelled = repo.transition_job(
                 job.id,
                 expected_status=JobStatus.PENDING,
                 expected_version=1,
-                new_status=JobStatus.RUNNING,
+                new_status=JobStatus.CANCELLED,
                 actor="worker",
                 occurred_at=FIXED.replace(microsecond=1),
             )
-        assert running.status is JobStatus.RUNNING
+        assert cancelled.status is JobStatus.CANCELLED
         assert (
             connection.execute("SELECT COUNT(*) AS c FROM job_events").fetchone()["c"]
             == events_before + 1
@@ -316,7 +334,7 @@ def test_create_job_and_transition_atomic_with_events(tmp_path: Path) -> None:
                     job.id,
                     expected_status=JobStatus.PENDING,
                     expected_version=1,
-                    new_status=JobStatus.RUNNING,
+                    new_status=JobStatus.CANCELLED,
                     actor="worker",
                     occurred_at=FIXED.replace(microsecond=1),
                 )
@@ -330,6 +348,7 @@ def test_applied_migration_gap_rejected(tmp_path: Path) -> None:
     ensure_database_ready(db)
     with connect_database(db) as connection:
         with transaction(connection):
+            connection.execute("DELETE FROM schema_migrations WHERE version = 2")
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, checksum, applied_at, "
                 "execution_time_ms) VALUES (3, 'gap', ?, '2026-07-24T00:00:00.000000Z', 1)",
@@ -543,7 +562,9 @@ def test_retry_limits_cannot_create_unstartable_pending_job(tmp_path: Path) -> N
     ensure_database_ready(db)
     with connect_database(db) as connection:
         repo = JobRepository(connection)
+        queue = JobQueueRepository(connection)
         with transaction(connection):
+            _register_running_worker(connection)
             job = repo.create_job(
                 job_type="demo.job",
                 payload={},
@@ -551,42 +572,34 @@ def test_retry_limits_cannot_create_unstartable_pending_job(tmp_path: Path) -> N
                 actor="cli",
                 created_at=FIXED,
             )
-            running = repo.transition_job(
-                job.id,
-                expected_status=JobStatus.PENDING,
-                expected_version=1,
-                new_status=JobStatus.RUNNING,
+            claim = queue.claim_next_job(
+                worker_id=WORKER_ID,
+                claimed_at=FIXED.replace(microsecond=1),
+                lease_duration_seconds=60,
                 actor="worker",
-                occurred_at=FIXED.replace(microsecond=1),
             )
-            with pytest.raises(RepositoryError, match="retry=True"):
+            assert claim is not None
+            with pytest.raises(RepositoryError, match="fail_claimed_job"):
                 repo.transition_job(
-                    running.id,
+                    claim.job.id,
                     expected_status=JobStatus.RUNNING,
                     expected_version=2,
                     new_status=JobStatus.PENDING,
                     actor="worker",
                     occurred_at=FIXED.replace(microsecond=2),
                 )
-            with pytest.raises(RepositoryError, match="maximum_attempts"):
-                repo.transition_job(
-                    running.id,
-                    expected_status=JobStatus.RUNNING,
-                    expected_version=2,
-                    new_status=JobStatus.PENDING,
-                    actor="worker",
-                    occurred_at=FIXED.replace(microsecond=2),
-                    retry=True,
-                )
-            failed = repo.transition_job(
-                running.id,
-                expected_status=JobStatus.RUNNING,
-                expected_version=2,
-                new_status=JobStatus.FAILED,
+            outcome = queue.fail_claimed_job(
+                job_id=claim.job.id,
+                worker_id=WORKER_ID,
+                expected_job_version=claim.job.version,
+                failed_at=FIXED.replace(microsecond=3),
+                error="boom",
+                retryable=True,
                 actor="worker",
-                occurred_at=FIXED.replace(microsecond=3),
-                last_error="boom",
+                retry_backoff_base_seconds=5,
+                retry_backoff_max_seconds=300,
             )
+            failed = outcome.job
             before_events = connection.execute("SELECT COUNT(*) AS c FROM job_events").fetchone()[
                 "c"
             ]
@@ -614,23 +627,25 @@ def test_retry_limits_cannot_create_unstartable_pending_job(tmp_path: Path) -> N
                 actor="cli",
                 created_at=FIXED,
             )
-            running2 = repo.transition_job(
-                job2.id,
-                expected_status=JobStatus.PENDING,
-                expected_version=1,
-                new_status=JobStatus.RUNNING,
+            claim2 = queue.claim_next_job(
+                worker_id=WORKER_ID,
+                claimed_at=FIXED.replace(microsecond=5),
+                lease_duration_seconds=60,
                 actor="worker",
-                occurred_at=FIXED.replace(microsecond=5),
             )
-            failed2 = repo.transition_job(
-                running2.id,
-                expected_status=JobStatus.RUNNING,
-                expected_version=2,
-                new_status=JobStatus.FAILED,
+            assert claim2 is not None and claim2.job.id == job2.id
+            outcome2 = queue.fail_claimed_job(
+                job_id=claim2.job.id,
+                worker_id=WORKER_ID,
+                expected_job_version=claim2.job.version,
+                failed_at=FIXED.replace(microsecond=6),
+                error="once",
+                retryable=False,
                 actor="worker",
-                occurred_at=FIXED.replace(microsecond=6),
-                last_error="once",
+                retry_backoff_base_seconds=5,
+                retry_backoff_max_seconds=300,
             )
+            failed2 = outcome2.job
             pending2 = repo.transition_job(
                 failed2.id,
                 expected_status=JobStatus.FAILED,

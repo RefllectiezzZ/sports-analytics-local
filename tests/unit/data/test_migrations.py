@@ -22,7 +22,7 @@ from sports_analytics.data.migrations import (
     split_sql_statements,
     validate_migration_sql,
 )
-from sports_analytics.data.schema import EXPECTED_INDEXES, OPERATIONAL_TABLES
+from sports_analytics.data.schema import EXPECTED_INDEXES, EXPECTED_TRIGGERS, OPERATIONAL_TABLES
 from sports_analytics.data.types import Migration
 
 
@@ -51,9 +51,17 @@ def test_migration_discovery_deterministic_and_from_package() -> None:
     first = discover_migrations()
     second = discover_migrations()
     assert first == second
-    assert len(first) == 1
-    assert first[0].version == 1
-    assert first[0].filename == "0001_initial.sql"
+    assert [migration.version for migration in first] == [1, 2]
+    assert [migration.filename for migration in first] == [
+        "0001_initial.sql",
+        "0002_worker_runtime.sql",
+    ]
+    assert first[0].checksum == (
+        "404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de"
+    )
+    assert first[1].checksum == (
+        "b3a8d93ae81ce2e21ae9e74a420bf598b345d63fe4ed11d4d84ced6302021faa"
+    )
     packaged = resources.files("sports_analytics.data.sql.migrations").joinpath("0001_initial.sql")
     assert packaged.is_file()
     text = packaged.read_text(encoding="utf-8")
@@ -64,6 +72,11 @@ def test_migration_discovery_deterministic_and_from_package() -> None:
             text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
         ).hexdigest()
     )
+    packaged_0002 = resources.files("sports_analytics.data.sql.migrations").joinpath(
+        "0002_worker_runtime.sql"
+    )
+    assert packaged_0002.is_file()
+    assert "CREATE TABLE worker_instances" in packaged_0002.read_text(encoding="utf-8")
 
 
 def test_malformed_duplicate_gap_and_prohibited(
@@ -114,17 +127,17 @@ def test_malformed_duplicate_gap_and_prohibited(
 def test_fresh_database_migrates_and_is_idempotent(tmp_path: Path) -> None:
     db = tmp_path / "ops.sqlite3"
     first = ensure_database_ready(db)
-    assert first.schema_version == 1
+    assert first.schema_version == 2
     assert first.previous_version == 0
-    assert len(first.migrations_applied) == 1
+    assert [migration.version for migration in first.migrations_applied] == [1, 2]
     second = ensure_database_ready(db)
-    assert second.schema_version == 1
-    assert second.previous_version == 1
+    assert second.schema_version == 2
+    assert second.previous_version == 2
     assert second.migrations_applied == ()
     status = get_migration_status(db)
     assert status.is_up_to_date
     assert status.checksums_valid
-    assert status.current_version == 1
+    assert status.current_version == 2
     assert status.pending == ()
 
 
@@ -148,6 +161,14 @@ def test_schema_tables_indexes_and_constraints(tmp_path: Path) -> None:
         }
         for name in EXPECTED_INDEXES:
             assert name in indexes
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            ).fetchall()
+        }
+        for name in EXPECTED_TRIGGERS:
+            assert name in triggers
 
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -243,7 +264,7 @@ def test_database_newer_and_missing_packaged_rejected(tmp_path: Path) -> None:
         with transaction(connection):
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, checksum, applied_at, "
-                "execution_time_ms) VALUES (2, 'future', ?, '2026-07-24T00:00:00.000000Z', 1)",
+                "execution_time_ms) VALUES (3, 'future', ?, '2026-07-24T00:00:00.000000Z', 1)",
                 ("c" * 64,),
             )
     with pytest.raises(DatabaseMigrationError, match="newer"):
@@ -314,14 +335,14 @@ def test_simultaneous_migration_attempts(tmp_path: Path) -> None:
         thread.join(timeout=30)
     assert not any(thread.is_alive() for thread in threads)
     assert len(results) + len(errors) == 2
-    # Busy errors are acceptable; successful completions must report version 1 once each.
-    assert all(version == 1 for version in results)
+    # Busy errors are acceptable; successful completions must report version 2 once each.
+    assert all(version == 2 for version in results)
     if results:
         status = get_migration_status(db)
-        assert status.current_version == 1
+        assert status.current_version == 2
         with connect_database(db, read_only=True) as connection:
             count = connection.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()
-            assert count is not None and int(count["c"]) == 1
+            assert count is not None and int(count["c"]) == 2
 
 
 def test_split_sql_and_cwd_independence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,3 +353,4 @@ def test_split_sql_and_cwd_independence(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.chdir(tmp_path)
     migrations = discover_migrations()
     assert migrations[0].filename == "0001_initial.sql"
+    assert migrations[1].filename == "0002_worker_runtime.sql"

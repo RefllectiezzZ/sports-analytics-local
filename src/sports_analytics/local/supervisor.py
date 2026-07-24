@@ -14,8 +14,16 @@ from typing import Protocol
 
 from sports_analytics.core.cli import CONFIG_ERROR_EXIT, handle_common_modes
 from sports_analytics.core.cli import build_argument_parser as build_common_argument_parser
-from sports_analytics.core.exceptions import ConfigurationError
+from sports_analytics.core.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    RepositoryError,
+    RuntimeBootstrapError,
+    WorkerError,
+)
 from sports_analytics.core.runtime import validate_configuration
+from sports_analytics.data.cli import migrate_database
+from sports_analytics.data.types import normalize_uuid
 
 SignalHandler = signal.Handlers | int | Callable[[int, FrameType | None], object] | None
 
@@ -74,11 +82,19 @@ class LocalSupervisor:
         worker_max_jobs: int | None = None,
         worker_id: str | None = None,
     ) -> int:
-        """Start ``worker.py`` and propagate its exit code."""
-        settings, _paths = validate_configuration(config_path=config, env_file=env_file)
+        """Ensure the database is ready, start ``worker.py``, and propagate exit status."""
+        settings, paths = validate_configuration(config_path=config, env_file=env_file)
+        migrate_database(settings, paths)
+        absolute_config = None if config is None else str(Path(config).resolve())
+        absolute_env = None if env_file is None else str(Path(env_file).resolve())
+        if worker_id is not None:
+            try:
+                worker_id = normalize_uuid(worker_id)
+            except RepositoryError as exc:
+                raise WorkerError(f"invalid worker UUID: {worker_id}") from exc
         command = self._build_worker_command(
-            config=config,
-            env_file=env_file,
+            config=absolute_config,
+            env_file=absolute_env,
             worker_once=worker_once,
             worker_max_jobs=worker_max_jobs,
             worker_id=worker_id,
@@ -138,7 +154,10 @@ class LocalSupervisor:
             if child.poll() is None:
                 child.terminate()
 
-        for signum in (signal.SIGINT, signal.SIGTERM):
+        for signum_name in ("SIGINT", "SIGTERM"):
+            signum = getattr(signal, signum_name, None)
+            if signum is None:
+                continue
             originals[signum] = signal.getsignal(signum)
             signal.signal(signum, _handler)
         return originals
@@ -206,7 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             worker_max_jobs=args.worker_max_jobs,
             worker_id=args.worker_id,
         )
-    except ConfigurationError as exc:
+    except (ConfigurationError, RuntimeBootstrapError, DatabaseError, WorkerError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return CONFIG_ERROR_EXIT
 

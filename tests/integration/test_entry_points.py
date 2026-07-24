@@ -90,10 +90,20 @@ def test_normal_placeholder_execution(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     module = importlib.import_module(module_name)
-    code = module.main([])
+    if module_name == "worker":
+        argv = ["--once"]
+    elif module_name == "run_local":
+        argv = ["--worker-once"]
+    else:
+        argv = []
+    code = module.main(argv)
     assert code == 0
     captured = capsys.readouterr()
-    assert "not implemented" in captured.out.lower()
+    if module_name in {"app", "scraper", "engine"}:
+        assert "not implemented" in captured.out.lower()
+    elif module_name == "worker":
+        assert "worker stopped:" in captured.out
+        assert "stop_reason=once_no_job" in captured.out
     assert (isolated_cwd / "storage").is_dir()
     assert (isolated_cwd / "storage" / "operational.sqlite3").is_file()
     reset_logging()

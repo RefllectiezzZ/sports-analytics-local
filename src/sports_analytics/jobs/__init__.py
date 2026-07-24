@@ -1,62 +1,75 @@
-"""Public durable-job worker APIs."""
+"""Durable local job-worker package.
 
-from sports_analytics.core.exceptions import (
-    JobLeaseError,
-    JobRegistryError,
-    PermanentJobError,
-    RetryableJobError,
-    WorkerError,
-    WorkerShutdownError,
-)
-from sports_analytics.jobs.context import JobExecutionContext
-from sports_analytics.jobs.handlers import JobHandler, system_noop_handler
-from sports_analytics.jobs.registry import HandlerRegistry, build_default_registry
-from sports_analytics.jobs.runner import LeaseHeartbeatController, LocalWorker
-from sports_analytics.jobs.service import JobQueueService, WorkerRegistrationService, WorkerService
-from sports_analytics.jobs.types import (
-    DEFAULT_WORKER_CAPABILITIES,
-    DEFAULT_WORKER_NAME,
-    SYSTEM_NOOP_JOB_TYPE,
-    JobClaim,
-    JobExecutionOutcome,
-    JobExecutionState,
-    JobFinalizationKind,
-    LeaseRecoveryResult,
-    QueueStatus,
-    StaleWorkerReconciliationResult,
-    WorkerRecord,
-    WorkerRunResult,
-    WorkerStatus,
-)
+Public symbols are imported lazily from submodules to avoid circular imports
+with data repositories.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sports_analytics.jobs.context import JobExecutionContext
+    from sports_analytics.jobs.registry import HandlerRegistry
+    from sports_analytics.jobs.runner import LeaseHeartbeatController, LocalWorker
+    from sports_analytics.jobs.service import WorkerService
+    from sports_analytics.jobs.types import (
+        JobClaim,
+        JobExecutionOutcome,
+        JobExecutionState,
+        LeaseRecoveryResult,
+        QueueStatus,
+        WorkerRecord,
+        WorkerRunResult,
+        WorkerStatus,
+    )
 
 __all__ = [
-    "DEFAULT_WORKER_CAPABILITIES",
-    "DEFAULT_WORKER_NAME",
-    "SYSTEM_NOOP_JOB_TYPE",
     "HandlerRegistry",
     "JobClaim",
     "JobExecutionContext",
     "JobExecutionOutcome",
     "JobExecutionState",
-    "JobFinalizationKind",
-    "JobHandler",
-    "JobLeaseError",
-    "JobQueueService",
-    "JobRegistryError",
     "LeaseHeartbeatController",
     "LeaseRecoveryResult",
     "LocalWorker",
-    "PermanentJobError",
     "QueueStatus",
-    "RetryableJobError",
-    "StaleWorkerReconciliationResult",
-    "WorkerError",
     "WorkerRecord",
-    "WorkerRegistrationService",
     "WorkerRunResult",
     "WorkerService",
-    "WorkerShutdownError",
     "WorkerStatus",
-    "build_default_registry",
-    "system_noop_handler",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in {
+        "JobClaim",
+        "JobExecutionOutcome",
+        "JobExecutionState",
+        "LeaseRecoveryResult",
+        "QueueStatus",
+        "WorkerRecord",
+        "WorkerRunResult",
+        "WorkerStatus",
+    }:
+        from sports_analytics.jobs import types as types_module
+
+        return getattr(types_module, name)
+    if name == "JobExecutionContext":
+        from sports_analytics.jobs.context import JobExecutionContext
+
+        return JobExecutionContext
+    if name == "HandlerRegistry":
+        from sports_analytics.jobs.registry import HandlerRegistry
+
+        return HandlerRegistry
+    if name in {"LeaseHeartbeatController", "LocalWorker"}:
+        from sports_analytics.jobs import runner as runner_module
+
+        return getattr(runner_module, name)
+    if name == "WorkerService":
+        from sports_analytics.jobs.service import WorkerService
+
+        return WorkerService
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

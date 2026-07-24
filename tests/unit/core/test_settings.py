@@ -23,6 +23,10 @@ def test_builtin_defaults_load_successfully(isolated_base: Path) -> None:
     assert settings.storage.root_directory == Path("storage")
     assert settings.logging.file_name == "sports-analytics.log"
     assert settings.worker.poll_interval_seconds == 30
+    assert settings.worker.retry_backoff_base_seconds == 5
+    assert settings.worker.retry_backoff_max_seconds == 300
+    assert settings.worker.shutdown_grace_seconds == 30
+    assert settings.worker.recovery_batch_size == 100
 
 
 def test_missing_default_settings_toml_does_not_fail(tmp_path: Path) -> None:
@@ -145,6 +149,32 @@ def test_toml_overrides_builtin_defaults(tmp_path: Path) -> None:
     )
     settings = load_settings(config_path=config, environ={}, base_directory=tmp_path)
     assert settings.worker.poll_interval_seconds == 11
+    assert settings.worker.heartbeat_interval_seconds == 5
+    assert settings.worker.stale_job_timeout_seconds == 60
+
+
+def test_new_worker_settings_load_from_toml_and_env(tmp_path: Path) -> None:
+    config = tmp_path / "settings.toml"
+    config.write_text(
+        "[worker]\n"
+        "retry_backoff_base_seconds = 2\n"
+        "retry_backoff_max_seconds = 20\n"
+        "shutdown_grace_seconds = 4\n"
+        "recovery_batch_size = 7\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(
+        config_path=config,
+        environ={
+            "SPORTS_ANALYTICS_WORKER__RETRY_BACKOFF_MAX_SECONDS": "30",
+            "SPORTS_ANALYTICS_WORKER__RECOVERY_BATCH_SIZE": "9",
+        },
+        base_directory=tmp_path,
+    )
+    assert settings.worker.retry_backoff_base_seconds == 2
+    assert settings.worker.retry_backoff_max_seconds == 30
+    assert settings.worker.shutdown_grace_seconds == 4
+    assert settings.worker.recovery_batch_size == 9
 
 
 def test_explicit_overrides_beat_all_sources(tmp_path: Path) -> None:
@@ -283,6 +313,35 @@ def test_invalid_worker_timing_relationship_fails(tmp_path: Path) -> None:
                     "stale_job_timeout_seconds": 30,
                 }
             },
+            environ={},
+            base_directory=tmp_path,
+        )
+
+
+def test_invalid_worker_retry_backoff_relationship_fails(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="retry_backoff_max_seconds"):
+        load_settings(
+            overrides={
+                "worker": {
+                    "retry_backoff_base_seconds": 60,
+                    "retry_backoff_max_seconds": 30,
+                }
+            },
+            environ={},
+            base_directory=tmp_path,
+        )
+
+
+def test_invalid_worker_recovery_batch_size_fails(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="recovery_batch_size"):
+        load_settings(
+            overrides={"worker": {"recovery_batch_size": 0}},
+            environ={},
+            base_directory=tmp_path,
+        )
+    with pytest.raises(ConfigurationError, match="recovery_batch_size"):
+        load_settings(
+            overrides={"worker": {"recovery_batch_size": True}},
             environ={},
             base_directory=tmp_path,
         )

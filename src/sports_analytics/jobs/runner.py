@@ -340,9 +340,10 @@ class LocalWorker:
                 failure = (sanitize_error_text(exc), True, None)
             except PermanentJobError as exc:
                 failure = (sanitize_error_text(exc), False, None)
-            except WorkerShutdownError as exc:
+            except WorkerShutdownError:
                 context.request_stop()
-                failure = (sanitize_error_text(exc), True, JobExecutionState.SHUTDOWN_INTERRUPTED)
+                # Leave the running lease in place; recovery requeues after expiry.
+                return JobExecutionState.SHUTDOWN_INTERRUPTED
             except JobLeaseError as exc:
                 context.report_lease_lost()
                 logger.warning(
@@ -482,7 +483,10 @@ class LocalWorker:
             runtime_context.logger.info("worker received shutdown signal signal=%s", signum)
             self._request_stop(local_stop)
 
-        for signum in (signal.SIGINT, signal.SIGTERM):
+        for signum_name in ("SIGINT", "SIGTERM"):
+            signum = getattr(signal, signum_name, None)
+            if signum is None:
+                continue
             originals[signum] = signal.getsignal(signum)
             signal.signal(signum, _handler)
         return originals

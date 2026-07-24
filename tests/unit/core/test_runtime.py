@@ -48,7 +48,7 @@ def test_bootstrap_creates_directories_and_sqlite(tmp_path: Path) -> None:
     assert context.paths.logs_directory.is_dir()
     assert context.paths.sqlite_path.is_file()
     assert context.database_path == context.paths.sqlite_path.resolve()
-    assert context.schema_version == 1
+    assert context.schema_version == 2
 
 
 def test_bootstrap_applies_deterministic_seeding(tmp_path: Path) -> None:
