@@ -15,6 +15,7 @@ from sports_analytics.data.codec import (
     parse_utc_timestamp,
     utc_now,
 )
+from sports_analytics.data.database import require_active_transaction
 from sports_analytics.data.schema import JOB_EVENTS_TABLE, JOBS_TABLE
 from sports_analytics.data.types import (
     DEFAULT_JOB_PRIORITY,
@@ -26,16 +27,19 @@ from sports_analytics.data.types import (
     validate_identifier,
     validate_limit_offset,
     validate_plain_text,
+    validate_strict_int,
 )
 
-_ALLOWED_TRANSITIONS: dict[tuple[JobStatus, JobStatus], str] = {
+_ORDINARY_TRANSITIONS: dict[tuple[JobStatus, JobStatus], str] = {
     (JobStatus.PENDING, JobStatus.RUNNING): "started",
     (JobStatus.PENDING, JobStatus.CANCELLED): "cancelled",
     (JobStatus.RUNNING, JobStatus.SUCCEEDED): "succeeded",
     (JobStatus.RUNNING, JobStatus.FAILED): "failed",
+    (JobStatus.FAILED, JobStatus.CANCELLED): "cancelled",
+}
+_RETRY_TRANSITIONS: dict[tuple[JobStatus, JobStatus], str] = {
     (JobStatus.RUNNING, JobStatus.PENDING): "retry_requested",
     (JobStatus.FAILED, JobStatus.PENDING): "retry_requested",
-    (JobStatus.FAILED, JobStatus.CANCELLED): "cancelled",
 }
 
 
@@ -59,12 +63,13 @@ class JobRepository:
         idempotency_key: str | None = None,
     ) -> JobRecord:
         """Create a pending job and its initial event in the caller transaction."""
-        if maximum_attempts <= 0:
-            msg = "maximum_attempts must be > 0"
-            raise RepositoryError(msg)
-        if priority != int(priority):
-            msg = "priority must be an integer"
-            raise RepositoryError(msg)
+        require_active_transaction(self._connection, operation="JobRepository.create_job")
+        maximum_attempts = validate_strict_int(
+            maximum_attempts,
+            field_name="maximum_attempts",
+            minimum=1,
+        )
+        priority = validate_strict_int(priority, field_name="priority")
         normalized_type = validate_identifier(job_type, field_name="job_type")
         normalized_actor = validate_identifier(actor, field_name="actor")
         if idempotency_key is not None:
@@ -279,14 +284,37 @@ class JobRepository:
         result: JsonValue | None = None,
         last_error: str | None = None,
         details: JsonValue | None = None,
+        retry: bool = False,
     ) -> JobRecord:
-        """Apply an allowed status transition with optimistic version checks."""
+        """Apply an allowed status transition with optimistic version checks.
+
+        Transitions to ``pending`` from ``running`` or ``failed`` require
+        ``retry=True`` and ``attempts < maximum_attempts``.
+        """
+        require_active_transaction(self._connection, operation="JobRepository.transition_job")
+        expected_version = validate_strict_int(
+            expected_version,
+            field_name="expected_version",
+            minimum=1,
+        )
         normalized_id = normalize_uuid(job_id)
         normalized_actor = validate_identifier(actor, field_name="actor")
         transition_key = (expected_status, new_status)
-        if transition_key not in _ALLOWED_TRANSITIONS:
-            msg = f"disallowed job transition {expected_status.value} -> {new_status.value}"
-            raise RepositoryError(msg)
+        if retry:
+            if transition_key not in _RETRY_TRANSITIONS:
+                msg = "retry=True is only valid for running|failed -> pending transitions"
+                raise RepositoryError(msg)
+            event_type = _RETRY_TRANSITIONS[transition_key]
+        else:
+            if transition_key in _RETRY_TRANSITIONS:
+                msg = (
+                    f"transition {expected_status.value} -> {new_status.value} requires retry=True"
+                )
+                raise RepositoryError(msg)
+            if transition_key not in _ORDINARY_TRANSITIONS:
+                msg = f"disallowed job transition {expected_status.value} -> {new_status.value}"
+                raise RepositoryError(msg)
+            event_type = _ORDINARY_TRANSITIONS[transition_key]
         if result is not None and new_status is not JobStatus.SUCCEEDED:
             msg = "result JSON is only accepted when transitioning to succeeded"
             raise RepositoryError(msg)
@@ -312,12 +340,11 @@ class JobRepository:
             )
             raise DatabaseIntegrityError(msg)
 
-        if (
-            expected_status is JobStatus.FAILED
-            and new_status is JobStatus.PENDING
-            and current.attempts >= current.maximum_attempts
-        ):
-            msg = "cannot retry failed job when attempts have reached maximum_attempts"
+        if new_status is JobStatus.RUNNING and current.attempts >= current.maximum_attempts:
+            msg = "cannot start job when attempts have reached maximum_attempts"
+            raise RepositoryError(msg)
+        if retry and current.attempts >= current.maximum_attempts:
+            msg = "cannot retry job when attempts have reached maximum_attempts"
             raise RepositoryError(msg)
 
         timestamp = occurred_at if occurred_at is not None else utc_now()
@@ -353,11 +380,13 @@ class JobRepository:
             finished_at = timestamp
         elif new_status is JobStatus.PENDING:
             finished_at = None
-            # Retry clears lease and leaves attempts unchanged until next start.
-            error_text = current.last_error if expected_status is JobStatus.FAILED else None
+            # Explicit retry clears lease/finished_at and preserves last_error for history.
+            if expected_status is JobStatus.FAILED:
+                error_text = current.last_error
+            elif expected_status is JobStatus.RUNNING:
+                error_text = current.last_error
             result_json = None
 
-        event_type = _ALLOWED_TRANSITIONS[transition_key]
         event_details = details if details is not None else {}
         try:
             cursor = self._connection.execute(

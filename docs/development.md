@@ -118,6 +118,14 @@ with connect_database(path) as connection:
 - connection context owns lifetime
 - transaction context owns commit/rollback
 - repositories own neither
+- repository write tests must assert that writes outside `transaction(...)`
+  raise `RepositoryError` and leave no rows
+- do not use `Path.read_bytes()` when inspecting SQLite headers; read exactly
+  the 16-byte header
+- integer affinity alone is insufficient: validate with strict Python `int`
+  checks and SQLite `typeof(...)` constraints
+- migration-history corruption tests should assert `DatabaseMigrationError` at
+  the library boundary and exit code `2` without traceback at the CLI
 
 ### Logging and secrets
 

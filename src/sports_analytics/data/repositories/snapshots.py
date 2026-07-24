@@ -15,6 +15,7 @@ from sports_analytics.data.codec import (
     parse_utc_timestamp,
     utc_now,
 )
+from sports_analytics.data.database import require_active_transaction
 from sports_analytics.data.schema import SNAPSHOTS_TABLE
 from sports_analytics.data.types import (
     JsonValue,
@@ -25,6 +26,7 @@ from sports_analytics.data.types import (
     validate_limit_offset,
     validate_relative_snapshot_path,
     validate_sha256_checksum,
+    validate_strict_int,
 )
 
 
@@ -47,6 +49,10 @@ class SnapshotRepository:
         created_at: datetime | None = None,
     ) -> SnapshotRecord:
         """Create a building snapshot metadata row."""
+        require_active_transaction(
+            self._connection,
+            operation="SnapshotRepository.create_building_snapshot",
+        )
         normalized_type = validate_identifier(snapshot_type, field_name="snapshot_type")
         normalized_source = validate_identifier(source_name, field_name="source_name")
         normalized_schema = validate_identifier(schema_version, field_name="schema_version")
@@ -151,11 +157,18 @@ class SnapshotRepository:
         ready_at: datetime | None = None,
     ) -> SnapshotRecord:
         """Mark a building snapshot as immutable ready metadata."""
+        require_active_transaction(
+            self._connection,
+            operation="SnapshotRepository.mark_snapshot_ready",
+        )
         normalized_id = normalize_uuid(snapshot_id)
         checksum = validate_sha256_checksum(checksum_sha256)
-        if row_count < 0:
-            msg = "row_count must be >= 0"
-            raise RepositoryError(msg)
+        row_count = validate_strict_int(row_count, field_name="row_count", minimum=0)
+        expected_version = validate_strict_int(
+            expected_version,
+            field_name="expected_version",
+            minimum=1,
+        )
         current = self.get_snapshot(normalized_id)
         if current is None:
             msg = f"snapshot not found: {normalized_id}"
@@ -224,7 +237,16 @@ class SnapshotRepository:
         metadata: JsonValue | None = None,
     ) -> SnapshotRecord:
         """Mark a building snapshot as failed without deleting files."""
+        require_active_transaction(
+            self._connection,
+            operation="SnapshotRepository.mark_snapshot_failed",
+        )
         normalized_id = normalize_uuid(snapshot_id)
+        expected_version = validate_strict_int(
+            expected_version,
+            field_name="expected_version",
+            minimum=1,
+        )
         current = self.get_snapshot(normalized_id)
         if current is None:
             msg = f"snapshot not found: {normalized_id}"

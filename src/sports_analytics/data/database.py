@@ -8,11 +8,41 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
-from sports_analytics.core.exceptions import DatabaseConnectionError, DatabaseError
+from sports_analytics.core.exceptions import (
+    DatabaseConnectionError,
+    DatabaseError,
+    RepositoryError,
+)
 
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
 DEFAULT_BUSY_TIMEOUT_MS: Final[int] = 30_000
 SQLITE_HEADER: Final[bytes] = b"SQLite format 3\x00"
+
+
+def read_sqlite_header(database_path: Path | str) -> bytes:
+    """Read exactly the SQLite header bytes without loading the full file."""
+    path = Path(database_path)
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(len(SQLITE_HEADER))
+    except OSError as exc:
+        msg = f"unable to read SQLite database header at {path}: {exc}"
+        raise DatabaseConnectionError(msg) from exc
+    return header
+
+
+def require_active_transaction(
+    connection: sqlite3.Connection,
+    *,
+    operation: str,
+) -> None:
+    """Require an explicit caller-owned write transaction before mutation."""
+    if not connection.in_transaction:
+        msg = (
+            f"operation {operation!r} requires an active explicit transaction; "
+            "callers must use transaction(...)"
+        )
+        raise RepositoryError(msg)
 
 
 @contextmanager
@@ -24,30 +54,23 @@ def connect_database(
 ) -> Iterator[sqlite3.Connection]:
     """Open an explicitly owned SQLite connection and close it on exit.
 
-    Writable connections create the parent directory when needed, enable foreign
-    keys, configure busy timeout, prefer WAL, and use ``synchronous=NORMAL``.
-    Read-only connections never create files or mutate journal mode.
+    Opening and configuration errors are converted to ``DatabaseConnectionError``.
+    Exceptions raised by caller code inside the ``with`` body propagate unchanged.
     """
     path = Path(database_path)
     if path.exists() and path.is_dir():
         msg = f"SQLite path points to a directory: {path}"
         raise DatabaseConnectionError(msg)
 
-    connection: sqlite3.Connection | None = None
+    if read_only:
+        connection = _open_read_only(path, timeout_seconds=timeout_seconds)
+    else:
+        connection = _open_writable(path, timeout_seconds=timeout_seconds)
+
     try:
-        if read_only:
-            connection = _open_read_only(path, timeout_seconds=timeout_seconds)
-        else:
-            connection = _open_writable(path, timeout_seconds=timeout_seconds)
         yield connection
-    except DatabaseError:
-        raise
-    except sqlite3.Error as exc:
-        msg = f"SQLite connection failure for {path}: {exc}"
-        raise DatabaseConnectionError(msg) from exc
     finally:
-        if connection is not None:
-            connection.close()
+        connection.close()
 
 
 @contextmanager
@@ -86,11 +109,7 @@ def verify_sqlite_file(database_path: Path | str, *, quick: bool = True) -> None
     if path.is_dir():
         msg = f"SQLite path points to a directory: {path}"
         raise DatabaseConnectionError(msg)
-    try:
-        header = path.read_bytes()[:16]
-    except OSError as exc:
-        msg = f"unable to read SQLite database header at {path}: {exc}"
-        raise DatabaseConnectionError(msg) from exc
+    header = read_sqlite_header(path)
     if header != SQLITE_HEADER:
         msg = f"file is not a valid SQLite database: {path}"
         raise DatabaseConnectionError(msg)
@@ -118,11 +137,7 @@ def _open_writable(path: Path, *, timeout_seconds: float) -> sqlite3.Connection:
         raise DatabaseConnectionError(msg) from exc
 
     if path.exists():
-        try:
-            header = path.read_bytes()[:16]
-        except OSError as exc:
-            msg = f"unable to read SQLite database header at {path}: {exc}"
-            raise DatabaseConnectionError(msg) from exc
+        header = read_sqlite_header(path)
         if header and header != SQLITE_HEADER:
             msg = f"refusing to open non-SQLite file as database: {path}"
             raise DatabaseConnectionError(msg)
@@ -153,11 +168,7 @@ def _open_read_only(path: Path, *, timeout_seconds: float) -> sqlite3.Connection
     if path.is_dir():
         msg = f"SQLite path points to a directory: {path}"
         raise DatabaseConnectionError(msg)
-    try:
-        header = path.read_bytes()[:16]
-    except OSError as exc:
-        msg = f"unable to read SQLite database header at {path}: {exc}"
-        raise DatabaseConnectionError(msg) from exc
+    header = read_sqlite_header(path)
     if header != SQLITE_HEADER:
         msg = f"file is not a valid SQLite database: {path}"
         raise DatabaseConnectionError(msg)

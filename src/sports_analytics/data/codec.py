@@ -83,7 +83,7 @@ def _reject_non_finite_numbers(value: object) -> None:
 
 
 def _as_json_value(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, str | int | float | bool):
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
             msg = "NaN and Infinity are not allowed in canonical JSON"
             raise RepositoryError(msg)
@@ -104,7 +104,7 @@ def _as_json_value(value: object) -> JsonValue:
 
 def ensure_json_value(value: Any) -> JsonValue:
     """Validate that ``value`` is JSON-compatible without silent coercion."""
-    if value is None or isinstance(value, (str, int, bool)):
+    if value is None or isinstance(value, str | int | bool):
         return value
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):

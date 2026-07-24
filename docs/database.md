@@ -19,6 +19,11 @@ phases; this document describes the current SQLite foundation only.
 - Do not share one `sqlite3.Connection` across threads.
 - Do not set `check_same_thread=False` to bypass ownership rules.
 - Always close connections through the context manager.
+- Opening/configuration failures become `DatabaseConnectionError`.
+- Exceptions raised by caller SQL or repository code inside the `with` body
+  propagate unchanged and are not reclassified as connection failures.
+- Header inspection uses a focused 16-byte binary read helper. Never use
+  `Path.read_bytes()` for database-header checks.
 
 Writable connections:
 
@@ -51,6 +56,9 @@ repositories        -> own neither
 - Repository methods must not call `commit` when the caller owns the transaction.
 - Multi-write operations must share one explicit transaction.
 - Read operations may run without an explicit write transaction.
+- Public repository write methods **actively enforce** an open transaction via
+  `require_active_transaction(...)` before mutating state. Calling them outside
+  `transaction(...)` raises `RepositoryError` and writes nothing.
 
 ## Migrations
 
@@ -70,7 +78,10 @@ Rules:
 - SHA-256 checksum over normalized migration text;
 - deterministic ordering independent of filesystem listing;
 - no recursive discovery of arbitrary SQL files;
-- no Python migration modules.
+- no Python migration modules;
+- every migration sequence (packaged or explicitly supplied) is validated for
+  version, filename/name match, checksum shape, checksum/SQL consistency, and
+  SQL safety before use.
 
 The runner creates `schema_migrations` before applying packaged migrations and
 records:
@@ -81,13 +92,21 @@ records:
 - `applied_at` (canonical UTC)
 - `execution_time_ms`
 
+Applied history must be exactly the consecutive prefix `1..current_version`.
+Gaps, duplicates, non-monotonic versions, missing earlier versions, newer-than-
+packaged versions, name mismatches, and checksum mismatches all raise
+`DatabaseMigrationError`.
+
 Migration locking uses `BEGIN IMMEDIATE` so concurrent local processes cannot
 falsely double-apply migrations. Each migration's SQL and metadata insert happen
-in the same transaction. `executescript` is not used; statements are split and
-executed individually so transaction boundaries remain intact.
+in the same transaction. `executescript` is not used; statements are split with a
+quote/comment-aware parser aided by `sqlite3.complete_statement` and executed
+individually so transaction boundaries remain intact.
 
 Migration SQL must not include `BEGIN`, `COMMIT`, `ROLLBACK`, `VACUUM`,
-`ATTACH`, `DETACH`, or PRAGMA statements that alter connection safety.
+`ATTACH`, `DETACH`, or PRAGMA statements that alter connection safety. Safety
+validation inspects the first SQL token after whitespace and comments, so block
+comments cannot bypass the prohibition.
 
 Applied migrations are immutable:
 
@@ -158,10 +177,26 @@ selection will order pending jobs by:
 
 Lease columns exist for a future worker PR; this phase does not claim leases.
 
+Retry transitions (`running|failed -> pending`) require an explicit
+`retry=True` argument. Ordinary `transition_job` calls cannot retry. Retries are
+rejected when `attempts >= maximum_attempts`, clear lease fields and
+`finished_at`, preserve `last_error` for history, increment version once, and
+append exactly one event in the same transaction. Starting a job
+(`pending -> running`) is also rejected when attempts are already exhausted.
+
+Repository numeric arguments such as priority, attempts bounds, versions,
+row counts, limits, and offsets use strict `int` validation (bools, floats, and
+numeric strings are rejected). Integer columns also use SQLite `typeof(...)`
+checks so REAL values cannot sneak through affinity alone.
+
 ### Snapshot READY immutability
 
 Once a snapshot metadata row is `ready`, ordinary repository updates are
 rejected. There is no repository delete for ready snapshots.
+
+Snapshot `relative_path` values are validated on raw segments before
+normalization: absolute paths, backslashes, repeated/trailing separators, `.` /
+`..`, Windows drive forms, UNC-style paths, and NUL bytes are rejected.
 
 ### Append-only events
 

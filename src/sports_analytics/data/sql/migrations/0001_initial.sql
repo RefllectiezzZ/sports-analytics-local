@@ -29,6 +29,10 @@ CREATE TABLE jobs (
     result_json TEXT NULL,
     version INTEGER NOT NULL,
     CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+    CHECK (typeof(priority) = 'integer'),
+    CHECK (typeof(attempts) = 'integer'),
+    CHECK (typeof(maximum_attempts) = 'integer'),
+    CHECK (typeof(version) = 'integer'),
     CHECK (attempts >= 0),
     CHECK (maximum_attempts > 0),
     CHECK (attempts <= maximum_attempts),
@@ -78,6 +82,7 @@ CREATE TABLE job_events (
     job_version INTEGER NOT NULL,
     CHECK (length(event_type) > 0),
     CHECK (length(actor) > 0),
+    CHECK (typeof(job_version) = 'integer'),
     CHECK (job_version >= 1),
     CHECK (
         from_status IS NULL
@@ -109,7 +114,15 @@ CREATE TABLE snapshots (
     version INTEGER NOT NULL,
     CHECK (status IN ('building', 'ready', 'failed')),
     CHECK (length(relative_path) > 0),
+    CHECK (instr(relative_path, '\') = 0),
+    CHECK (substr(relative_path, 1, 1) != '/'),
+    CHECK (substr(relative_path, -1) != '/'),
+    CHECK (instr(relative_path, '//') = 0),
+    CHECK (instr('/' || relative_path || '/', '/../') = 0),
+    CHECK (instr('/' || relative_path || '/', '/./') = 0),
+    CHECK (row_count IS NULL OR typeof(row_count) = 'integer'),
     CHECK (row_count IS NULL OR row_count >= 0),
+    CHECK (typeof(version) = 'integer'),
     CHECK (version >= 1),
     CHECK (
         status != 'ready'

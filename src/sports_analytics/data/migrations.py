@@ -28,14 +28,22 @@ from sports_analytics.data.types import (
 _MIGRATION_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^(?P<version>\d{4})_(?P<name>[A-Za-z0-9][A-Za-z0-9_-]*)\.sql$"
 )
-_PROHIBITED_STATEMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^\s*(BEGIN|COMMIT|ROLLBACK|VACUUM|ATTACH|DETACH)\b",
-    re.IGNORECASE,
+_MIGRATION_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_CHECKSUM_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
+_PROHIBITED_FIRST_TOKENS: Final[frozenset[str]] = frozenset(
+    {"BEGIN", "COMMIT", "ROLLBACK", "VACUUM", "ATTACH", "DETACH"}
 )
-_PROHIBITED_PRAGMA_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^\s*PRAGMA\s+(journal_mode|synchronous|foreign_keys|busy_timeout|locking_mode|"
-    r"temp_store|query_only|writable_schema)\b",
-    re.IGNORECASE,
+_PROHIBITED_PRAGMA_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "journal_mode",
+        "synchronous",
+        "foreign_keys",
+        "busy_timeout",
+        "locking_mode",
+        "temp_store",
+        "query_only",
+        "writable_schema",
+    }
 )
 _SCHEMA_MIGRATIONS_DDL: Final[str] = f"""
 CREATE TABLE IF NOT EXISTS {SCHEMA_MIGRATIONS_TABLE} (
@@ -43,7 +51,13 @@ CREATE TABLE IF NOT EXISTS {SCHEMA_MIGRATIONS_TABLE} (
     name TEXT NOT NULL,
     checksum TEXT NOT NULL,
     applied_at TEXT NOT NULL,
-    execution_time_ms INTEGER NOT NULL
+    execution_time_ms INTEGER NOT NULL,
+    CHECK (typeof(version) = 'integer'),
+    CHECK (version >= 1),
+    CHECK (length(name) > 0),
+    CHECK (length(checksum) = 64),
+    CHECK (typeof(execution_time_ms) = 'integer'),
+    CHECK (execution_time_ms >= 0)
 )
 """
 
@@ -60,7 +74,6 @@ def discover_migrations(
         raise DatabaseMigrationError(msg) from exc
 
     discovered: list[Migration] = []
-    seen_versions: set[int] = set()
     for entry in root.iterdir():
         if not entry.is_file():
             continue
@@ -73,14 +86,8 @@ def discover_migrations(
             raise DatabaseMigrationError(msg)
         version = int(match.group("version"))
         migration_name = match.group("name")
-        if version in seen_versions:
-            msg = f"duplicate migration version detected: {version}"
-            raise DatabaseMigrationError(msg)
-        seen_versions.add(version)
         sql_text = entry.read_text(encoding="utf-8")
-        normalized = _normalize_migration_text(sql_text)
-        checksum = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-        validate_migration_sql(sql_text, filename=name)
+        checksum = compute_migration_checksum(sql_text)
         discovered.append(
             Migration(
                 version=version,
@@ -90,74 +97,213 @@ def discover_migrations(
                 filename=name,
             )
         )
+    return validate_migration_sequence(discovered)
 
-    ordered = tuple(sorted(discovered, key=lambda item: item.version))
-    if not ordered:
-        return ordered
 
-    expected = list(range(1, ordered[-1].version + 1))
-    actual = [item.version for item in ordered]
-    if actual != expected:
+def validate_migration_sequence(migrations: Sequence[Migration]) -> tuple[Migration, ...]:
+    """Validate and return a deterministic immutable migration sequence."""
+    if not migrations:
+        return ()
+
+    ordered = tuple(sorted(migrations, key=lambda item: item.version))
+    seen_versions: set[int] = set()
+    for migration in ordered:
+        if type(migration.version) is not int or migration.version < 1:
+            msg = f"migration version must be a positive integer, got {migration.version!r}"
+            raise DatabaseMigrationError(msg)
+        if migration.version in seen_versions:
+            msg = f"duplicate migration version detected: {migration.version}"
+            raise DatabaseMigrationError(msg)
+        seen_versions.add(migration.version)
+        if not _MIGRATION_NAME_PATTERN.fullmatch(migration.name):
+            msg = f"invalid migration name: {migration.name!r}"
+            raise DatabaseMigrationError(msg)
+        expected_filename = f"{migration.version:04d}_{migration.name}.sql"
+        if migration.filename != expected_filename:
+            msg = (
+                f"migration filename/version/name mismatch: "
+                f"filename={migration.filename!r} expected={expected_filename!r}"
+            )
+            raise DatabaseMigrationError(msg)
+        if not _CHECKSUM_PATTERN.fullmatch(migration.checksum):
+            msg = f"migration checksum must be 64 lowercase hex characters: {migration.filename}"
+            raise DatabaseMigrationError(msg)
+        expected_checksum = compute_migration_checksum(migration.sql_text)
+        if migration.checksum != expected_checksum:
+            msg = (
+                f"migration checksum inconsistent with SQL text for {migration.filename}: "
+                f"stored={migration.checksum} computed={expected_checksum}"
+            )
+            raise DatabaseMigrationError(msg)
+        validate_migration_sql(migration.sql_text, filename=migration.filename)
+
+    expected_versions = list(range(1, ordered[-1].version + 1))
+    actual_versions = [item.version for item in ordered]
+    if actual_versions != expected_versions:
         msg = (
             "migration versions must be consecutive starting at 1; "
-            f"found {actual}, expected {expected}"
+            f"found {actual_versions}, expected {expected_versions}"
         )
         raise DatabaseMigrationError(msg)
     return ordered
 
 
+def compute_migration_checksum(sql_text: str) -> str:
+    """Return the SHA-256 checksum of normalized migration SQL text."""
+    normalized = _normalize_migration_text(sql_text)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def validate_migration_sql(sql_text: str, *, filename: str) -> None:
     """Reject prohibited transaction-control or unsafe statements."""
     for statement in split_sql_statements(sql_text):
-        if _PROHIBITED_STATEMENT_PATTERN.match(statement):
-            msg = f"prohibited statement in migration {filename}: {statement.split()[0]}"
+        token = _first_sql_token(statement)
+        if token is None:
+            continue
+        upper = token.upper()
+        if upper in _PROHIBITED_FIRST_TOKENS:
+            msg = f"prohibited statement in migration {filename}: {upper}"
             raise DatabaseMigrationError(msg)
-        if _PROHIBITED_PRAGMA_PATTERN.match(statement):
-            msg = f"prohibited PRAGMA in migration {filename}"
-            raise DatabaseMigrationError(msg)
+        if upper == "PRAGMA":
+            pragma_name = _pragma_name(statement)
+            if pragma_name is not None and pragma_name.lower() in _PROHIBITED_PRAGMA_NAMES:
+                msg = f"prohibited PRAGMA in migration {filename}"
+                raise DatabaseMigrationError(msg)
 
 
 def split_sql_statements(sql_text: str) -> list[str]:
-    """Split migration SQL into executable statements without using executescript."""
-    without_line_comments = _strip_line_comments(sql_text)
+    """Split migration SQL into executable statements without using executescript.
+
+    Uses a quote/comment-aware scanner and ``sqlite3.complete_statement`` to
+    detect statement boundaries while supporting semicolons inside quotes and
+    identifiers.
+    """
+    text = _normalize_migration_text(sql_text)
     statements: list[str] = []
     current: list[str] = []
-    in_single = False
+    state = "normal"
     index = 0
-    length = len(without_line_comments)
+    length = len(text)
+
     while index < length:
-        char = without_line_comments[index]
-        if char == "'" and not in_single:
-            in_single = True
-            current.append(char)
-            index += 1
-            continue
-        if char == "'" and in_single:
-            # Handle escaped single quotes ('') inside SQL string literals.
-            if index + 1 < length and without_line_comments[index + 1] == "'":
-                current.append("''")
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < length else ""
+
+        if state == "normal":
+            if char == "-" and nxt == "-":
+                state = "line_comment"
+                current.append(char)
+                current.append(nxt)
                 index += 2
                 continue
-            in_single = False
+            if char == "/" and nxt == "*":
+                state = "block_comment"
+                current.append(char)
+                current.append(nxt)
+                index += 2
+                continue
+            if char == "'":
+                state = "single"
+                current.append(char)
+                index += 1
+                continue
+            if char == '"':
+                state = "double"
+                current.append(char)
+                index += 1
+                continue
+            if char == "`":
+                state = "backtick"
+                current.append(char)
+                index += 1
+                continue
+            if char == "[":
+                state = "bracket"
+                current.append(char)
+                index += 1
+                continue
+            if char == ";":
+                candidate = "".join(current).strip()
+                if candidate:
+                    complete_text = candidate if candidate.endswith(";") else f"{candidate};"
+                    if not sqlite3.complete_statement(complete_text):
+                        msg = "migration SQL contains an incomplete statement"
+                        raise DatabaseMigrationError(msg)
+                    statements.append(candidate)
+                current = []
+                index += 1
+                continue
             current.append(char)
             index += 1
             continue
-        if char == ";" and not in_single:
-            statement = "".join(current).strip()
-            if statement:
-                statements.append(statement)
-            current = []
+
+        if state == "line_comment":
+            current.append(char)
+            index += 1
+            if char == "\n":
+                state = "normal"
+            continue
+
+        if state == "block_comment":
+            current.append(char)
+            if char == "*" and nxt == "/":
+                current.append(nxt)
+                index += 2
+                state = "normal"
+                continue
             index += 1
             continue
-        current.append(char)
-        index += 1
+
+        if state == "single":
+            current.append(char)
+            if char == "'" and nxt == "'":
+                current.append(nxt)
+                index += 2
+                continue
+            if char == "'":
+                state = "normal"
+            index += 1
+            continue
+
+        if state in {"double", "backtick"}:
+            quote = '"' if state == "double" else "`"
+            current.append(char)
+            if char == quote and nxt == quote:
+                current.append(nxt)
+                index += 2
+                continue
+            if char == quote:
+                state = "normal"
+            index += 1
+            continue
+
+        if state == "bracket":
+            current.append(char)
+            index += 1
+            if char == "]":
+                state = "normal"
+            continue
+
+        msg = f"internal SQL parser entered unexpected state {state!r}"
+        raise DatabaseMigrationError(msg)
+
+    if state == "block_comment":
+        msg = "migration SQL has an unclosed block comment"
+        raise DatabaseMigrationError(msg)
+    if state in {"single", "double", "backtick", "bracket"}:
+        msg = "migration SQL has an unclosed quoted value or identifier"
+        raise DatabaseMigrationError(msg)
 
     trailing = "".join(current).strip()
     if trailing:
-        statements.append(trailing)
-    if in_single:
-        msg = "migration SQL has an unclosed string literal"
-        raise DatabaseMigrationError(msg)
+        complete_text = trailing if trailing.endswith(";") else f"{trailing};"
+        if not sqlite3.complete_statement(complete_text):
+            msg = "migration SQL has trailing incomplete or malformed content"
+            raise DatabaseMigrationError(msg)
+        # Trailing comment-only content is allowed only when complete_statement
+        # accepts it; otherwise reject as incomplete SQL.
+        if _first_sql_token(trailing) is not None:
+            statements.append(trailing.rstrip(";").strip())
     return statements
 
 
@@ -168,7 +314,9 @@ def get_migration_status(
 ) -> MigrationStatus:
     """Inspect migration state using a read-only connection when the file exists."""
     path = Path(database_path)
-    packaged = tuple(migrations) if migrations is not None else discover_migrations()
+    packaged = (
+        validate_migration_sequence(migrations) if migrations is not None else discover_migrations()
+    )
     latest_version = packaged[-1].version if packaged else 0
 
     if not path.exists():
@@ -205,7 +353,9 @@ def apply_migrations(
 ) -> DatabaseReadiness:
     """Apply pending packaged migrations under a write lock."""
     path = Path(database_path)
-    packaged = tuple(migrations) if migrations is not None else discover_migrations()
+    packaged = (
+        validate_migration_sequence(migrations) if migrations is not None else discover_migrations()
+    )
     applied_now: list[Migration] = []
     previous_version = 0
 
@@ -280,34 +430,43 @@ def _normalize_migration_text(sql_text: str) -> str:
     return sql_text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _strip_line_comments(sql_text: str) -> str:
-    lines: list[str] = []
-    for line in _normalize_migration_text(sql_text).split("\n"):
-        in_single = False
-        result_chars: list[str] = []
-        index = 0
-        while index < len(line):
-            char = line[index]
-            if char == "'" and not in_single:
-                in_single = True
-                result_chars.append(char)
-                index += 1
-                continue
-            if char == "'" and in_single:
-                if index + 1 < len(line) and line[index + 1] == "'":
-                    result_chars.append("''")
-                    index += 2
-                    continue
-                in_single = False
-                result_chars.append(char)
-                index += 1
-                continue
-            if char == "-" and not in_single and index + 1 < len(line) and line[index + 1] == "-":
-                break
-            result_chars.append(char)
+def _first_sql_token(statement: str) -> str | None:
+    """Return the first SQL token after whitespace and comments."""
+    text = _normalize_migration_text(statement)
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < length else ""
+        if char.isspace():
             index += 1
-        lines.append("".join(result_chars))
-    return "\n".join(lines)
+            continue
+        if char == "-" and nxt == "-":
+            index += 2
+            while index < length and text[index] != "\n":
+                index += 1
+            continue
+        if char == "/" and nxt == "*":
+            index += 2
+            while index + 1 < length and not (text[index] == "*" and text[index + 1] == "/"):
+                index += 1
+            if index + 1 >= length:
+                return None
+            index += 2
+            continue
+        start = index
+        while index < length and not text[index].isspace() and text[index] not in ";()":
+            index += 1
+        token = text[start:index]
+        return token or None
+    return None
+
+
+def _pragma_name(statement: str) -> str | None:
+    match = re.search(r"\bPRAGMA\s+([A-Za-z_][A-Za-z0-9_]*)", statement, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return match.group(1)
 
 
 def _ensure_schema_migrations_table(connection: sqlite3.Connection) -> None:
@@ -315,30 +474,66 @@ def _ensure_schema_migrations_table(connection: sqlite3.Connection) -> None:
 
 
 def _read_applied_migrations(connection: sqlite3.Connection) -> tuple[AppliedMigration, ...]:
-    exists = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (SCHEMA_MIGRATIONS_TABLE,),
-    ).fetchone()
-    if exists is None:
-        return ()
-    rows = connection.execute(
-        f"""
-        SELECT version, name, checksum, applied_at, execution_time_ms
-        FROM {SCHEMA_MIGRATIONS_TABLE}
-        ORDER BY version ASC
-        """
-    ).fetchall()
+    try:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (SCHEMA_MIGRATIONS_TABLE,),
+        ).fetchone()
+        if exists is None:
+            return ()
+        rows = connection.execute(
+            f"""
+            SELECT version, name, checksum, applied_at, execution_time_ms
+            FROM {SCHEMA_MIGRATIONS_TABLE}
+            ORDER BY version ASC
+            """
+        ).fetchall()
+    except sqlite3.Error as exc:
+        msg = "unable to read schema_migrations metadata"
+        raise DatabaseMigrationError(msg) from exc
+
     applied: list[AppliedMigration] = []
     for row in rows:
-        applied.append(
-            AppliedMigration(
-                version=int(row["version"]),
-                name=str(row["name"]),
-                checksum=str(row["checksum"]),
-                applied_at=parse_utc_timestamp(str(row["applied_at"])),
-                execution_time_ms=int(row["execution_time_ms"]),
+        try:
+            version_raw = row["version"]
+            name = str(row["name"])
+            checksum = str(row["checksum"])
+            applied_at_raw = str(row["applied_at"])
+            execution_raw = row["execution_time_ms"]
+            if type(version_raw) is not int:
+                msg = f"applied migration version must be an integer, got {version_raw!r}"
+                raise DatabaseMigrationError(msg)
+            if version_raw < 1:
+                msg = f"applied migration version must be >= 1, got {version_raw}"
+                raise DatabaseMigrationError(msg)
+            if not name:
+                msg = "applied migration name must be non-empty"
+                raise DatabaseMigrationError(msg)
+            if not _CHECKSUM_PATTERN.fullmatch(checksum):
+                msg = f"applied migration checksum is malformed: {checksum!r}"
+                raise DatabaseMigrationError(msg)
+            if type(execution_raw) is not int:
+                msg = (
+                    f"applied migration execution_time_ms must be an integer, got {execution_raw!r}"
+                )
+                raise DatabaseMigrationError(msg)
+            if execution_raw < 0:
+                msg = f"applied migration execution_time_ms must be >= 0, got {execution_raw}"
+                raise DatabaseMigrationError(msg)
+            applied.append(
+                AppliedMigration(
+                    version=version_raw,
+                    name=name,
+                    checksum=checksum,
+                    applied_at=parse_utc_timestamp(applied_at_raw),
+                    execution_time_ms=execution_raw,
+                )
             )
-        )
+        except DatabaseMigrationError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            msg = "malformed applied migration metadata in schema_migrations"
+            raise DatabaseMigrationError(msg) from exc
     return tuple(applied)
 
 
@@ -348,6 +543,18 @@ def _verify_applied_history(
 ) -> None:
     packaged_by_version = {item.version: item for item in packaged}
     latest_packaged = packaged[-1].version if packaged else 0
+    if not applied:
+        return
+
+    versions = [record.version for record in applied]
+    expected = list(range(1, versions[-1] + 1))
+    if versions != expected:
+        msg = (
+            "applied migration history must be the exact consecutive prefix "
+            f"1..N; found {versions}, expected {expected}"
+        )
+        raise DatabaseMigrationError(msg)
+
     for record in applied:
         if record.version > latest_packaged:
             msg = (

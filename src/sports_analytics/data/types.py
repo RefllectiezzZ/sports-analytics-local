@@ -222,8 +222,32 @@ def validate_plain_text(value: str, *, field_name: str) -> str:
     return value
 
 
+def validate_strict_int(
+    value: object,
+    *,
+    field_name: str,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Require a real ``int`` (rejecting bool, float, and numeric strings)."""
+    if type(value) is not int:
+        msg = f"{field_name} must be an int, got {type(value).__name__}"
+        raise RepositoryError(msg)
+    if minimum is not None and value < minimum:
+        msg = f"{field_name} must be >= {minimum}"
+        raise RepositoryError(msg)
+    if maximum is not None and value > maximum:
+        msg = f"{field_name} must be <= {maximum}"
+        raise RepositoryError(msg)
+    return value
+
+
 def validate_relative_snapshot_path(value: str) -> str:
-    """Validate a relative POSIX-style snapshot path without traversal."""
+    """Validate a relative POSIX-style snapshot path without traversal.
+
+    Validates raw path segments before ``PurePosixPath`` normalization so that
+    repeated separators and trailing slashes are rejected.
+    """
     if not isinstance(value, str):
         msg = "relative_path must be a string"
         raise RepositoryError(msg)
@@ -233,19 +257,39 @@ def validate_relative_snapshot_path(value: str) -> str:
     if not value:
         msg = "relative_path must be non-empty"
         raise RepositoryError(msg)
+    if "\x00" in value:
+        msg = "relative_path must not contain NUL characters"
+        raise RepositoryError(msg)
     if "\\" in value:
         msg = "relative_path must use POSIX-style separators"
         raise RepositoryError(msg)
-    if value.startswith("/"):
+    if value.startswith("/") or value.startswith("~"):
         msg = "relative_path must be relative, not absolute"
         raise RepositoryError(msg)
+    if value.endswith("/"):
+        msg = "relative_path must not end with a separator"
+        raise RepositoryError(msg)
+    if "//" in value:
+        msg = "relative_path must not contain repeated separators"
+        raise RepositoryError(msg)
+    if len(value) >= 2 and value[1] == ":":
+        msg = "relative_path must not include a Windows drive prefix"
+        raise RepositoryError(msg)
+
+    raw_parts = value.split("/")
+    if not raw_parts or any(part == "" for part in raw_parts):
+        msg = "relative_path must not contain empty segments"
+        raise RepositoryError(msg)
+    if any(part in {".", ".."} for part in raw_parts):
+        msg = "relative_path must not contain '.' or '..' segments"
+        raise RepositoryError(msg)
+
     path = PurePosixPath(value)
     if path.is_absolute():
         msg = "relative_path must be relative, not absolute"
         raise RepositoryError(msg)
-    parts = path.parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        msg = "relative_path must not contain empty segments, '.', or '..'"
+    if path.as_posix() != value:
+        msg = "relative_path must already be a normalized POSIX relative path"
         raise RepositoryError(msg)
     return path.as_posix()
 
@@ -261,15 +305,13 @@ def validate_sha256_checksum(value: str) -> str:
     return value
 
 
-def validate_limit_offset(*, limit: int | None, offset: int) -> tuple[int | None, int]:
-    """Validate pagination arguments."""
-    if offset < 0:
-        msg = "offset must be >= 0"
-        raise RepositoryError(msg)
-    if limit is not None and limit < 0:
-        msg = "limit must be >= 0"
-        raise RepositoryError(msg)
-    return limit, offset
+def validate_limit_offset(*, limit: int | None, offset: object) -> tuple[int | None, int]:
+    """Validate pagination arguments with strict integer semantics."""
+    validated_offset = validate_strict_int(offset, field_name="offset", minimum=0)
+    if limit is None:
+        return None, validated_offset
+    validated_limit = validate_strict_int(limit, field_name="limit", minimum=0)
+    return validated_limit, validated_offset
 
 
 def is_migration_checksum(value: str) -> bool:

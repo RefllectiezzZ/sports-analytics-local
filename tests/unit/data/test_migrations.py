@@ -15,6 +15,7 @@ from sports_analytics.data import migrations as migrations_module
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.migrations import (
     apply_migrations,
+    compute_migration_checksum,
     discover_migrations,
     ensure_database_ready,
     get_migration_status,
@@ -242,7 +243,7 @@ def test_database_newer_and_missing_packaged_rejected(tmp_path: Path) -> None:
         with transaction(connection):
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, checksum, applied_at, "
-                "execution_time_ms) VALUES (99, 'future', ?, '2026-07-24T00:00:00.000000Z', 1)",
+                "execution_time_ms) VALUES (2, 'future', ?, '2026-07-24T00:00:00.000000Z', 1)",
                 ("c" * 64,),
             )
     with pytest.raises(DatabaseMigrationError, match="newer"):
@@ -255,11 +256,11 @@ def test_database_newer_and_missing_packaged_rejected(tmp_path: Path) -> None:
             version=2,
             name="later",
             sql_text="CREATE TABLE later(id INTEGER);",
-            checksum="d" * 64,
+            checksum=compute_migration_checksum("CREATE TABLE later(id INTEGER);"),
             filename="0002_later.sql",
         ),
     )
-    with pytest.raises(DatabaseMigrationError, match="missing from the package"):
+    with pytest.raises(DatabaseMigrationError, match="consecutive|start"):
         get_migration_status(db2, migrations=packaged_without_v1)
 
 

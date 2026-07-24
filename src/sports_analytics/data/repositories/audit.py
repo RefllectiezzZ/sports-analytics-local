@@ -14,12 +14,14 @@ from sports_analytics.data.codec import (
     parse_utc_timestamp,
     utc_now,
 )
+from sports_analytics.data.database import require_active_transaction
 from sports_analytics.data.schema import AUDIT_EVENTS_TABLE
 from sports_analytics.data.types import (
     AuditEventRecord,
     JsonValue,
     validate_identifier,
     validate_limit_offset,
+    validate_strict_int,
 )
 
 
@@ -41,6 +43,7 @@ class AuditEventRepository:
         correlation_id: str | None = None,
     ) -> AuditEventRecord:
         """Append one audit event and return the stored record."""
+        require_active_transaction(self._connection, operation="AuditEventRepository.append_event")
         normalized_event_type = validate_identifier(event_type, field_name="event_type")
         normalized_entity_type = validate_identifier(entity_type, field_name="entity_type")
         normalized_actor = validate_identifier(actor, field_name="actor")
@@ -88,15 +91,16 @@ class AuditEventRepository:
             raise RepositoryError(msg)
         return record
 
-    def get_event(self, event_id: int) -> AuditEventRecord | None:
+    def get_event(self, event_id: object) -> AuditEventRecord | None:
         """Return one audit event by id."""
+        validated_id = validate_strict_int(event_id, field_name="event_id", minimum=1)
         try:
             row = self._connection.execute(
                 f"SELECT * FROM {AUDIT_EVENTS_TABLE} WHERE id = ?",
-                (event_id,),
+                (validated_id,),
             ).fetchone()
         except sqlite3.Error as exc:
-            msg = f"failed to read audit event {event_id}"
+            msg = f"failed to read audit event {validated_id}"
             raise RepositoryError(msg) from exc
         if row is None:
             return None

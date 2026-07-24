@@ -241,6 +241,15 @@ def test_retry_and_failed_requirements(tmp_path: Path) -> None:
                 last_error="boom",
             )
             assert failed.last_error == "boom"
+            with pytest.raises(RepositoryError, match="retry=True"):
+                repo.transition_job(
+                    failed.id,
+                    expected_status=JobStatus.FAILED,
+                    expected_version=3,
+                    new_status=JobStatus.PENDING,
+                    actor="worker",
+                    occurred_at=FIXED.replace(microsecond=3),
+                )
             with pytest.raises(RepositoryError, match="maximum_attempts"):
                 repo.transition_job(
                     failed.id,
@@ -249,4 +258,5 @@ def test_retry_and_failed_requirements(tmp_path: Path) -> None:
                     new_status=JobStatus.PENDING,
                     actor="worker",
                     occurred_at=FIXED.replace(microsecond=3),
+                    retry=True,
                 )

@@ -7,6 +7,7 @@ from datetime import datetime
 
 from sports_analytics.core.exceptions import DatabaseIntegrityError, RepositoryError
 from sports_analytics.data.codec import format_utc_timestamp, parse_utc_timestamp
+from sports_analytics.data.database import require_active_transaction
 from sports_analytics.data.schema import APPLICATION_METADATA_TABLE
 from sports_analytics.data.types import validate_metadata_key, validate_plain_text
 
@@ -34,6 +35,10 @@ class ApplicationMetadataRepository:
 
     def upsert(self, key: str, value: str, updated_at: datetime) -> None:
         """Insert or replace a metadata value without committing."""
+        require_active_transaction(
+            self._connection,
+            operation="ApplicationMetadataRepository.upsert",
+        )
         normalized_key = validate_metadata_key(key)
         normalized_value = validate_plain_text(value, field_name="value")
         timestamp = format_utc_timestamp(updated_at)
