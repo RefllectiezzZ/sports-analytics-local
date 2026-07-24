@@ -56,6 +56,8 @@ def connect_database(
 
     Opening and configuration errors are converted to ``DatabaseConnectionError``.
     Exceptions raised by caller code inside the ``with`` body propagate unchanged.
+    Close failures after a successful caller body propagate normally; close
+    failures during cleanup must not replace an already-active caller exception.
     """
     path = Path(database_path)
     if path.exists() and path.is_dir():
@@ -69,7 +71,14 @@ def connect_database(
 
     try:
         yield connection
-    finally:
+    except BaseException as primary:
+        try:
+            connection.close()
+        except Exception:
+            # Preserve the original caller exception; close cleanup must not mask it.
+            pass
+        raise primary
+    else:
         connection.close()
 
 
@@ -84,7 +93,8 @@ def transaction(
     Nested independent transactions are rejected. Repository methods must not
     call ``commit`` when the caller owns the transaction boundary. If
     ``commit`` fails, an active transaction is rolled back while preserving the
-    original commit exception.
+    original commit exception. Rollback cleanup failures must not replace an
+    already-active caller or commit exception.
     """
     if connection.in_transaction:
         msg = "unsupported nested transaction: connection already has an open transaction"
@@ -94,21 +104,25 @@ def transaction(
     connection.execute(begin_sql)
     try:
         yield connection
-    except BaseException:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
+    except BaseException as primary:
+        try:
+            if connection.in_transaction:
+                connection.rollback()
+        except Exception:
+            # Preserve the original caller exception; cleanup must not mask it.
+            pass
+        raise primary
     else:
         try:
             connection.commit()
-        except BaseException:
-            if connection.in_transaction:
-                try:
+        except BaseException as primary:
+            try:
+                if connection.in_transaction:
                     connection.rollback()
-                except Exception:
-                    # Preserve the original commit failure; cleanup must not mask it.
-                    pass
-            raise
+            except Exception:
+                # Preserve the original commit failure; cleanup must not mask it.
+                pass
+            raise primary
 
 
 def verify_sqlite_file(database_path: Path | str, *, quick: bool = True) -> None:

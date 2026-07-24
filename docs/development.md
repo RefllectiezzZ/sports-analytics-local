@@ -137,8 +137,13 @@ with connect_database(path) as connection:
 - migration-history corruption tests should assert `DatabaseMigrationError` at
   the library boundary and exit code `2` without traceback at the CLI
 - migration parser tests should cover compound `CREATE TRIGGER` statements,
-  trailing comments, comment-only files, and packaged resource read failures
-  wrapped as `DatabaseMigrationError`
+  trailing comments, comment-only files, block comments that must not concatenate
+  tokens (for example `INT/* x */NOT NULL`), packaged resource read failures
+  wrapped as `DatabaseMigrationError`, and migration definitions that are
+  type-validated before sorting
+- cleanup tests should assert that rollback/close failures do not replace an
+  already-active caller or commit exception, while close failures after a
+  successful body still propagate
 
 ### Logging and secrets
 

@@ -22,6 +22,7 @@ from sports_analytics.data.database import (
     transaction,
 )
 from sports_analytics.data.migrations import (
+    apply_migrations,
     compute_migration_checksum,
     ensure_database_ready,
     get_migration_status,
@@ -858,3 +859,251 @@ def test_discover_migrations_wraps_resource_failures(monkeypatch: pytest.MonkeyP
     with pytest.raises(DatabaseMigrationError, match="UTF-8|reading migration") as utf_exc:
         migrations_module.discover_migrations()
     assert isinstance(utf_exc.value.__cause__, UnicodeError)
+
+
+def test_sql_comments_preserve_lexical_whitespace() -> None:
+    statements = split_sql_statements("CREATE/* comment */TABLE demo(id INTEGER);")
+    assert len(statements) == 1
+    assert " ".join(statements[0].split()).upper().startswith("CREATE TABLE")
+
+    statements = split_sql_statements(
+        "CREATE TABLE demo(value INT/* comment */NOT NULL);"
+    )
+    assert len(statements) == 1
+    compact = " ".join(statements[0].split()).upper()
+    assert "INT NOT NULL" in compact
+
+    statements = split_sql_statements(
+        "CREATE/* x */INDEX demo_idx ON demo(id);"
+    )
+    assert " ".join(statements[0].split()).upper().startswith("CREATE INDEX")
+
+    statements = split_sql_statements("SELECT 1/* plus */+/* two */2;")
+    assert len(statements) == 1
+    assert "+" in statements[0]
+
+    statements = split_sql_statements("/* leading */ CREATE TABLE demo(id INTEGER);")
+    assert len(statements) == 1
+    assert " ".join(statements[0].split()).upper().startswith("CREATE TABLE")
+
+    statements = split_sql_statements(
+        "CREATE TABLE a(id INTEGER); /* between; PRAGMA BEGIN COMMIT */ CREATE TABLE b(id INTEGER);"
+    )
+    assert len(statements) == 2
+
+    assert split_sql_statements("CREATE TABLE a(id INTEGER); -- trailing BEGIN") == [
+        "CREATE TABLE a(id INTEGER)"
+    ]
+    assert split_sql_statements("CREATE TABLE a(id INTEGER); /* trailing COMMIT; */") == [
+        "CREATE TABLE a(id INTEGER)"
+    ]
+    assert split_sql_statements("/* only PRAGMA BEGIN COMMIT ; */") == []
+    assert split_sql_statements(
+        "CREATE TABLE demo(note TEXT DEFAULT '/* not a comment */');"
+    ) == ["CREATE TABLE demo(note TEXT DEFAULT '/* not a comment */')"]
+
+    validate_migration_sql(
+        "/* PRAGMA journal_mode=OFF */ CREATE TABLE demo(id INTEGER);",
+        filename="0002_ok.sql",
+    )
+    with pytest.raises(DatabaseMigrationError, match="prohibited"):
+        validate_migration_sql(
+            "CREATE TABLE demo(id INTEGER); PRAGMA journal_mode=OFF;",
+            filename="0002_x.sql",
+        )
+
+
+def test_comment_preserving_migration_enforces_not_null(tmp_path: Path) -> None:
+    sql = """
+    CREATE TABLE demo(
+        value INT/* required */NOT NULL
+    );
+    """
+    checksum = compute_migration_checksum(sql)
+    migration = Migration(
+        version=1,
+        name="demo",
+        sql_text=sql,
+        checksum=checksum,
+        filename="0001_demo.sql",
+    )
+    assert migration.checksum == compute_migration_checksum(migration.sql_text)
+    db = tmp_path / "demo.sqlite3"
+    apply_migrations(db, migrations=(migration,))
+    with connect_database(db, read_only=True) as connection:
+        columns = connection.execute("PRAGMA table_info(demo)").fetchall()
+        assert len(columns) == 1
+        assert str(columns[0]["name"]) == "value"
+        assert int(columns[0]["notnull"]) == 1
+    with connect_database(db) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("INSERT INTO demo(value) VALUES (NULL)")
+
+
+def test_validate_migration_sequence_types_before_sort() -> None:
+    sql = "CREATE TABLE demo(id INTEGER PRIMARY KEY);"
+    checksum = compute_migration_checksum(sql)
+
+    def _migration(**overrides: object) -> Migration:
+        values: dict[str, object] = {
+            "version": 1,
+            "name": "demo",
+            "sql_text": sql,
+            "checksum": checksum,
+            "filename": "0001_demo.sql",
+        }
+        values.update(overrides)
+        return Migration(**values)  # type: ignore[arg-type]
+
+    second = Migration(
+        version=2,
+        name="second",
+        sql_text=sql,
+        checksum=checksum,
+        filename="0002_second.sql",
+    )
+    first = _migration()
+    ordered = validate_migration_sequence((second, first))
+    assert [item.version for item in ordered] == [1, 2]
+
+    cases: list[object] = [
+        (_migration(version="1"), "version"),
+        (_migration(version=True), "version"),
+        (_migration(version=1.0), "version"),
+        ("not-a-migration", "Migration"),
+        (_migration(name=123), "name"),
+        (_migration(filename=123), "filename"),
+        (_migration(checksum=123), "checksum"),
+        (_migration(sql_text=b"CREATE TABLE demo(id INTEGER);"), "sql_text"),
+        (_migration(checksum="ZZ"), "checksum"),
+        ((first, first), "duplicate"),
+        (
+            (
+                first,
+                Migration(
+                    version=3,
+                    name="gap",
+                    sql_text=sql,
+                    checksum=checksum,
+                    filename="0003_gap.sql",
+                ),
+            ),
+            "consecutive",
+        ),
+    ]
+    for payload, _label in cases:
+        with pytest.raises(DatabaseMigrationError) as exc_info:
+            if isinstance(payload, tuple):
+                validate_migration_sequence(payload)
+            else:
+                validate_migration_sequence((payload,))  # type: ignore[arg-type]
+        assert type(exc_info.value) is DatabaseMigrationError
+
+
+class _FlakyConnection(sqlite3.Connection):
+    """Connection subclass that can fail rollback/close on demand."""
+
+    fail_rollback = False
+    fail_close = False
+
+    def rollback(self) -> None:  # type: ignore[override]
+        if self.fail_rollback:
+            raise RuntimeError("rollback cleanup failed")
+        super().rollback()
+
+    def close(self) -> None:  # type: ignore[override]
+        if self.fail_close:
+            raise RuntimeError("close cleanup failed")
+        super().close()
+
+
+def _patch_sqlite_connect_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_connect = sqlite3.connect
+
+    def _factory(*args: object, **kwargs: object) -> _FlakyConnection:
+        kwargs = dict(kwargs)
+        kwargs["factory"] = _FlakyConnection
+        return original_connect(*args, **kwargs)  # type: ignore[misc]
+
+    monkeypatch.setattr(sqlite3, "connect", _factory)
+
+
+def test_transaction_preserves_caller_exception_when_rollback_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "ops.sqlite3"
+    _patch_sqlite_connect_factory(monkeypatch)
+
+    class CallerBoom(RuntimeError):
+        pass
+
+    with connect_database(path) as connection:
+        assert isinstance(connection, _FlakyConnection)
+        connection.execute("CREATE TABLE demo(id INTEGER PRIMARY KEY)")
+        connection.fail_rollback = True
+        with pytest.raises(CallerBoom, match="caller body failed") as exc_info:
+            with transaction(connection):
+                connection.execute("INSERT INTO demo DEFAULT VALUES")
+                raise CallerBoom("caller body failed")
+        assert type(exc_info.value) is CallerBoom
+        assert "rollback cleanup failed" not in str(exc_info.value)
+
+
+def test_transaction_preserves_commit_exception_when_rollback_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "ops.sqlite3"
+    _patch_sqlite_connect_factory(monkeypatch)
+
+    class CommitBoom(RuntimeError):
+        pass
+
+    with connect_database(path) as connection:
+        assert isinstance(connection, _FlakyConnection)
+        connection.execute("CREATE TABLE demo(id INTEGER PRIMARY KEY)")
+        original_commit = connection.commit
+
+        def _boom_commit() -> None:
+            raise CommitBoom("commit failed")
+
+        connection.commit = _boom_commit  # type: ignore[method-assign]
+        connection.fail_rollback = True
+        with pytest.raises(CommitBoom, match="commit failed") as exc_info:
+            with transaction(connection):
+                connection.execute("INSERT INTO demo DEFAULT VALUES")
+        assert type(exc_info.value) is CommitBoom
+        connection.commit = original_commit  # type: ignore[method-assign]
+
+
+def test_connect_database_preserves_caller_exception_when_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "ops.sqlite3"
+    _patch_sqlite_connect_factory(monkeypatch)
+
+    class CallerBoom(RuntimeError):
+        pass
+
+    with pytest.raises(CallerBoom, match="caller body failed") as exc_info:
+        with connect_database(path) as connection:
+            assert isinstance(connection, _FlakyConnection)
+            connection.fail_close = True
+            raise CallerBoom("caller body failed")
+    assert type(exc_info.value) is CallerBoom
+
+
+def test_connect_database_propagates_close_failure_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "ops.sqlite3"
+    _patch_sqlite_connect_factory(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="close cleanup failed"):
+        with connect_database(path) as connection:
+            assert isinstance(connection, _FlakyConnection)
+            connection.fail_close = True
+            connection.execute("SELECT 1")

@@ -64,6 +64,9 @@ repositories        -> own neither
   rollback-cleanup failure mask that commit failure.
 - After a failed commit that SQLite can roll back, `connection.in_transaction`
   is false and the connection remains reusable.
+- Rollback and connection-close cleanup must preserve an already-active primary
+  exception from the caller body; cleanup failures must not replace it. After a
+  successful caller body, a close failure may propagate normally.
 - Nested independent transactions are rejected.
 - Repository methods must not call `commit` when the caller owns the transaction.
 - Multi-write operations must share one explicit transaction.
@@ -118,10 +121,21 @@ individually so transaction boundaries remain intact.
 The splitter appends each `;` into the current buffer and only finalizes when
 `sqlite3.complete_statement` reports completeness. That supports valid compound
 SQLite statements such as `CREATE TRIGGER ... BEGIN ... END;` with internal
-semicolons. Trailing whitespace and trailing comment-only content are ignored.
-A final statement may omit a terminating semicolon when it becomes complete after
-one is appended; genuinely incomplete trailing SQL, unclosed quotes, and unclosed
-block comments are rejected.
+semicolons. SQL comments are treated as lexical whitespace during splitting and
+execution preparation: `--` line comments behave like newlines, and `/* ... */`
+block comments contribute separating whitespace so adjacent tokens are never
+concatenated. Semicolons and prohibited keywords inside comments do not change
+statement boundaries or safety checks. Trailing whitespace and trailing
+comment-only content are ignored. A final statement may omit a terminating
+semicolon when it becomes complete after one is appended; genuinely incomplete
+trailing SQL, unclosed quotes, and unclosed block comments are rejected.
+
+Migration checksums are SHA-256 digests of the original normalized source SQL.
+Parsing must not alter the SQL's lexical semantics relative to that source text.
+
+Every migration definition is runtime-type-validated before numerical sorting.
+Malformed objects raise `DatabaseMigrationError` rather than leaking built-in
+`TypeError` / `AttributeError` failures from sort keys.
 
 Migration SQL must not begin (after whitespace, `--` / `/* */` comments, and an
 optional UTF-8 BOM) with any of:

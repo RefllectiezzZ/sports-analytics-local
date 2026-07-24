@@ -121,21 +121,38 @@ def discover_migrations(
 
 
 def validate_migration_sequence(migrations: Sequence[Migration]) -> tuple[Migration, ...]:
-    """Validate and return a deterministic immutable migration sequence."""
-    if not migrations:
+    """Validate and return a deterministic immutable migration sequence.
+
+    Runtime types and basic fields are validated before numerical sorting so
+    malformed definitions raise ``DatabaseMigrationError`` instead of leaking
+    built-in attribute/type errors from the sort key.
+    """
+    try:
+        items = tuple(migrations)
+    except TypeError as exc:
+        msg = "migrations must be a finite sequence of Migration objects"
+        raise DatabaseMigrationError(msg) from exc
+
+    if not items:
         return ()
 
-    ordered = tuple(sorted(migrations, key=lambda item: item.version))
+    validated: list[Migration] = []
+    for index, item in enumerate(items):
+        validated.append(_validate_migration_definition(item, index=index))
+
+    ordered = tuple(sorted(validated, key=lambda item: item.version))
     seen_versions: set[int] = set()
     for migration in ordered:
-        if type(migration.version) is not int or migration.version < 1:
-            msg = f"migration version must be a positive integer, got {migration.version!r}"
-            raise DatabaseMigrationError(msg)
         if migration.version in seen_versions:
             msg = f"duplicate migration version detected: {migration.version}"
             raise DatabaseMigrationError(msg)
         seen_versions.add(migration.version)
-        if not _MIGRATION_NAME_PATTERN.fullmatch(migration.name):
+        try:
+            name_ok = _MIGRATION_NAME_PATTERN.fullmatch(migration.name) is not None
+        except re.error as exc:
+            msg = f"invalid migration name pattern check for {migration.name!r}"
+            raise DatabaseMigrationError(msg) from exc
+        if not name_ok:
             msg = f"invalid migration name: {migration.name!r}"
             raise DatabaseMigrationError(msg)
         expected_filename = f"{migration.version:04d}_{migration.name}.sql"
@@ -145,10 +162,19 @@ def validate_migration_sequence(migrations: Sequence[Migration]) -> tuple[Migrat
                 f"filename={migration.filename!r} expected={expected_filename!r}"
             )
             raise DatabaseMigrationError(msg)
-        if not _CHECKSUM_PATTERN.fullmatch(migration.checksum):
+        try:
+            checksum_ok = _CHECKSUM_PATTERN.fullmatch(migration.checksum) is not None
+        except re.error as exc:
+            msg = f"invalid migration checksum pattern check for {migration.filename}"
+            raise DatabaseMigrationError(msg) from exc
+        if not checksum_ok:
             msg = f"migration checksum must be 64 lowercase hex characters: {migration.filename}"
             raise DatabaseMigrationError(msg)
-        expected_checksum = compute_migration_checksum(migration.sql_text)
+        try:
+            expected_checksum = compute_migration_checksum(migration.sql_text)
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            msg = f"unable to compute checksum for migration {migration.filename}: {exc}"
+            raise DatabaseMigrationError(msg) from exc
         if migration.checksum != expected_checksum:
             msg = (
                 f"migration checksum inconsistent with SQL text for {migration.filename}: "
@@ -166,6 +192,37 @@ def validate_migration_sequence(migrations: Sequence[Migration]) -> tuple[Migrat
         )
         raise DatabaseMigrationError(msg)
     return ordered
+
+
+def _validate_migration_definition(item: object, *, index: int) -> Migration:
+    """Validate one migration element's runtime types before sorting."""
+    if not isinstance(item, Migration):
+        msg = (
+            f"migration at index {index} must be a Migration instance, "
+            f"got {type(item).__name__}"
+        )
+        raise DatabaseMigrationError(msg)
+
+    version = item.version
+    if type(version) is not int:
+        msg = f"migration version must be an integer, got {version!r}"
+        raise DatabaseMigrationError(msg)
+    if version < 1:
+        msg = f"migration version must be a positive integer, got {version!r}"
+        raise DatabaseMigrationError(msg)
+    if type(item.name) is not str:
+        msg = f"migration name must be a string, got {type(item.name).__name__}"
+        raise DatabaseMigrationError(msg)
+    if type(item.filename) is not str:
+        msg = f"migration filename must be a string, got {type(item.filename).__name__}"
+        raise DatabaseMigrationError(msg)
+    if type(item.checksum) is not str:
+        msg = f"migration checksum must be a string, got {type(item.checksum).__name__}"
+        raise DatabaseMigrationError(msg)
+    if type(item.sql_text) is not str:
+        msg = f"migration sql_text must be a string, got {type(item.sql_text).__name__}"
+        raise DatabaseMigrationError(msg)
+    return item
 
 
 def compute_migration_checksum(sql_text: str) -> str:
@@ -196,10 +253,11 @@ def split_sql_statements(sql_text: str) -> list[str]:
     Uses a quote/comment-aware scanner and ``sqlite3.complete_statement`` so
     compound statements (for example ``CREATE TRIGGER ... BEGIN ... END;``) are
     supported when their internal semicolons do not yet complete the statement.
-    Comments are skipped rather than buffered so trailing comment-only content
-    cannot hide a missing terminator or leave an incomplete statement.
-    Parenthesis depth is tracked so heuristically "complete" fragments such as
-    ``CREATE TABLE a(;`` are still rejected as incomplete.
+    SQL comments are treated as lexical whitespace: line comments contribute a
+    newline when terminated, and block comments contribute a single space so
+    adjacent tokens are never concatenated. Parenthesis depth is tracked so
+    heuristically "complete" fragments such as ``CREATE TABLE a(;`` are still
+    rejected as incomplete.
     """
     text = _normalize_migration_text(sql_text)
     if text.startswith("\ufeff"):
@@ -264,6 +322,7 @@ def split_sql_statements(sql_text: str) -> list[str]:
                         # Keep executable statement text without a trailing semicolon.
                         statements.append(candidate.rstrip().rstrip(";").strip())
                     current = []
+                    paren_depth = 0
                 # Incomplete after ';' (e.g. trigger body): keep accumulating.
                 index += 1
                 continue
@@ -274,7 +333,7 @@ def split_sql_statements(sql_text: str) -> list[str]:
         if state == "line_comment":
             index += 1
             if char == "\n":
-                # Preserve a newline so statement text remains readable/complete.
+                # Line comments behave as whitespace/newlines for token separation.
                 current.append("\n")
                 state = "normal"
             continue
@@ -283,6 +342,8 @@ def split_sql_statements(sql_text: str) -> list[str]:
             if char == "*" and nxt == "/":
                 index += 2
                 state = "normal"
+                # Block comments behave as lexical whitespace and must not glue tokens.
+                current.append(" ")
                 continue
             index += 1
             continue
