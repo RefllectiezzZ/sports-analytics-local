@@ -100,7 +100,8 @@ def test_terminate_child_uses_grace_then_kill() -> None:
 
 
 def test_build_worker_command_omits_absent_options() -> None:
-    runner = LocalSupervisor(worker_script="/tmp/worker.py", install_signals=False)
+    worker_script = Path("/tmp/worker.py")
+    runner = LocalSupervisor(worker_script=worker_script, install_signals=False)
     command = runner._build_worker_command(
         config=None,
         env_file=None,
@@ -108,7 +109,7 @@ def test_build_worker_command_omits_absent_options() -> None:
         worker_max_jobs=None,
         worker_id=None,
     )
-    assert command[-1] == "/tmp/worker.py"
+    assert command[-1] == str(worker_script.resolve())
     assert "--config" not in command
     assert "--once" not in command
 
