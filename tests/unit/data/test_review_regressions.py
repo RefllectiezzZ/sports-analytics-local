@@ -866,16 +866,12 @@ def test_sql_comments_preserve_lexical_whitespace() -> None:
     assert len(statements) == 1
     assert " ".join(statements[0].split()).upper().startswith("CREATE TABLE")
 
-    statements = split_sql_statements(
-        "CREATE TABLE demo(value INT/* comment */NOT NULL);"
-    )
+    statements = split_sql_statements("CREATE TABLE demo(value INT/* comment */NOT NULL);")
     assert len(statements) == 1
     compact = " ".join(statements[0].split()).upper()
     assert "INT NOT NULL" in compact
 
-    statements = split_sql_statements(
-        "CREATE/* x */INDEX demo_idx ON demo(id);"
-    )
+    statements = split_sql_statements("CREATE/* x */INDEX demo_idx ON demo(id);")
     assert " ".join(statements[0].split()).upper().startswith("CREATE INDEX")
 
     statements = split_sql_statements("SELECT 1/* plus */+/* two */2;")
@@ -898,9 +894,9 @@ def test_sql_comments_preserve_lexical_whitespace() -> None:
         "CREATE TABLE a(id INTEGER)"
     ]
     assert split_sql_statements("/* only PRAGMA BEGIN COMMIT ; */") == []
-    assert split_sql_statements(
-        "CREATE TABLE demo(note TEXT DEFAULT '/* not a comment */');"
-    ) == ["CREATE TABLE demo(note TEXT DEFAULT '/* not a comment */')"]
+    assert split_sql_statements("CREATE TABLE demo(note TEXT DEFAULT '/* not a comment */');") == [
+        "CREATE TABLE demo(note TEXT DEFAULT '/* not a comment */')"
+    ]
 
     validate_migration_sql(
         "/* PRAGMA journal_mode=OFF */ CREATE TABLE demo(id INTEGER);",

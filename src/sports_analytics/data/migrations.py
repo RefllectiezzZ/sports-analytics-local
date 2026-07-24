@@ -197,10 +197,7 @@ def validate_migration_sequence(migrations: Sequence[Migration]) -> tuple[Migrat
 def _validate_migration_definition(item: object, *, index: int) -> Migration:
     """Validate one migration element's runtime types before sorting."""
     if not isinstance(item, Migration):
-        msg = (
-            f"migration at index {index} must be a Migration instance, "
-            f"got {type(item).__name__}"
-        )
+        msg = f"migration at index {index} must be a Migration instance, got {type(item).__name__}"
         raise DatabaseMigrationError(msg)
 
     version = item.version
