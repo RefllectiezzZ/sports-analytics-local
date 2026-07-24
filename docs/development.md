@@ -35,6 +35,17 @@ Keep the subject concise and imperative.
 - Note any intentional non-goals or follow-up work.
 - Link related issues when applicable.
 - Expect review before merge; do not merge your own bootstrap or experimental work without review.
+- Use the pull-request template under `.github/pull_request_template.md`.
+
+### GitHub quality gates
+
+- All new pull requests must pass the GitHub quality workflow (`.github/workflows/quality.yml`).
+- Do **not** merge while checks are failing or still running.
+- The author must wait for review before merging.
+- A successful Cursor Agent report does **not** replace GitHub CI.
+- Run local checks before opening a pull request.
+- Failed CI checks must be investigated and fixed; do not bypass them.
+- Branch protection may be configured manually after the quality workflow is active. Do not assume it is already enabled.
 
 ## Tests and validation
 
