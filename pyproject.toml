@@ -27,6 +27,7 @@ dependencies = [
   "pyarrow",
   "pydantic",
   "pydantic-settings",
+  "python-dotenv",
 ]
 
 [project.optional-dependencies]

@@ -63,6 +63,35 @@ python -m mypy src
 - Do not add meaningless assertions (for example `assert True`).
 - Prefer deterministic fixtures under `tests/fixtures/`.
 
+### Isolating configuration tests
+
+- Pass explicit `environ={...}` mappings to `load_settings` / bootstrap helpers
+  instead of mutating the developer's real process environment when practical.
+- Clear inherited `SPORTS_ANALYTICS_*` variables for entry-point and subprocess
+  tests (see fixtures in `tests/conftest.py`).
+- Use `tmp_path` as `base_directory` / cwd for TOML, `.env`, and storage side
+  effects. Do not write test artifacts into the repository `storage/` tree.
+- Do not rely on a repository-local or developer `.env` file.
+- Call `reset_logging()` (or equivalent cleanup) so rotating file handlers do not
+  leave open handles, especially on Windows.
+- Do not create a hidden global settings singleton or memoize loaded settings.
+
+### Validating configuration locally
+
+```bash
+python engine.py --validate-config
+python engine.py --config config/settings.example.toml --validate-config
+```
+
+Validation-only mode must not create runtime directories or log files.
+
+### Logging and secrets
+
+- Log safe metadata only (component, environment, timezone, seed, base directory,
+  whether file logging is enabled).
+- Never log complete environment mappings, full settings dumps, tokens, or
+  credentials.
+
 ## Prohibitions
 
 - Do **not** commit directly to `main`.
