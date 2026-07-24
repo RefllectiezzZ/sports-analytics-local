@@ -264,9 +264,9 @@ class LocalWorker:
                         durable_worker_id,
                         sanitize_error_text(mark_exc),
                     )
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, KeyboardInterrupt | SystemExit):
                 raise
-            if isinstance(exc, (SportsAnalyticsError, RuntimeBootstrapError, DatabaseError)):
+            if isinstance(exc, SportsAnalyticsError | RuntimeBootstrapError | DatabaseError):
                 raise
             msg = f"worker failed: {sanitize_error_text(exc)}"
             raise WorkerError(msg) from exc

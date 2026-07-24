@@ -392,7 +392,7 @@ class WorkerRepository:
             raise RepositoryError(msg)
         if (
             isinstance(stale_threshold_seconds, bool)
-            or not isinstance(stale_threshold_seconds, (int, float))
+            or not isinstance(stale_threshold_seconds, int | float)
             or float(stale_threshold_seconds) <= 0
         ):
             msg = "stale_threshold_seconds must be a positive number"

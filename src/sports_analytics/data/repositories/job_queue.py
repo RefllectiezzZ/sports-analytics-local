@@ -72,7 +72,7 @@ class JobQueueRepository:
             raise RepositoryError(msg)
         if (
             isinstance(lease_duration_seconds, bool)
-            or not isinstance(lease_duration_seconds, (int, float))
+            or not isinstance(lease_duration_seconds, int | float)
             or float(lease_duration_seconds) <= 0
         ):
             msg = "lease_duration_seconds must be a positive number"
@@ -243,7 +243,7 @@ class JobQueueRepository:
         )
         if (
             isinstance(lease_duration_seconds, bool)
-            or not isinstance(lease_duration_seconds, (int, float))
+            or not isinstance(lease_duration_seconds, int | float)
             or float(lease_duration_seconds) <= 0
         ):
             msg = "lease_duration_seconds must be a positive number"
@@ -807,7 +807,7 @@ class JobQueueRepository:
             raise RepositoryError(msg)
         if (
             isinstance(stale_worker_threshold_seconds, bool)
-            or not isinstance(stale_worker_threshold_seconds, (int, float))
+            or not isinstance(stale_worker_threshold_seconds, int | float)
             or float(stale_worker_threshold_seconds) <= 0
         ):
             msg = "stale_worker_threshold_seconds must be a positive number"

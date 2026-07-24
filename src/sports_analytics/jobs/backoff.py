@@ -33,7 +33,7 @@ def compute_retry_delay_seconds(
         ("base_seconds", base_seconds),
         ("max_seconds", max_seconds),
     ):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, int | float):
             msg = f"{name} must be a positive finite number"
             raise WorkerError(msg)
         number = float(value)
