@@ -84,6 +84,10 @@ SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=production
 SPORTS_ANALYTICS_LOGGING__LEVEL=DEBUG
 ```
 
+`.env` values are loaded literally (dotenv interpolation is disabled), so
+`${NAME}` is not expanded from the process environment. Use `SPORTS_ANALYTICS_`
+variables for operating-system overrides.
+
 `SPORTS_ANALYTICS_CONFIG_PATH` selects the TOML file and is not part of the
 validated settings model.
 

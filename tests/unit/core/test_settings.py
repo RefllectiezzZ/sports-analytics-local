@@ -16,8 +16,8 @@ from sports_analytics.core.settings import (
 )
 
 
-def test_builtin_defaults_load_successfully() -> None:
-    settings = load_settings(environ={}, base_directory=Path.cwd())
+def test_builtin_defaults_load_successfully(isolated_base: Path) -> None:
+    settings = load_settings(environ={}, base_directory=isolated_base)
     assert settings.application.name == "sports-analytics-local"
     assert settings.application.environment == "development"
     assert settings.storage.root_directory == Path("storage")
@@ -363,12 +363,79 @@ def test_deep_merge_type_conflict() -> None:
         deep_merge({"application": {"name": "x"}}, {"application": "bad"})
 
 
-def test_example_settings_file_validates() -> None:
-    example = Path("config/settings.example.toml")
+def test_example_settings_file_validates(isolated_base: Path) -> None:
+    example = Path("config/settings.example.toml").resolve()
     settings = load_settings(
         config_path=example,
         environ={},
-        base_directory=Path.cwd(),
+        base_directory=isolated_base,
     )
     assert settings.logging.date_format
     assert settings.logging.file_name == "sports-analytics.log"
+
+
+def test_dotenv_interpolation_disabled(
+    isolated_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXTERNAL_NAME", "from-process-env")
+    env_file = isolated_base / ".env"
+    env_file.write_text(
+        "SPORTS_ANALYTICS_APPLICATION__NAME=${EXTERNAL_NAME}\n",
+        encoding="utf-8",
+    )
+    first = load_settings(
+        env_file=env_file,
+        environ={},
+        base_directory=isolated_base,
+    )
+    assert first.application.name == "${EXTERNAL_NAME}"
+
+    monkeypatch.setenv("EXTERNAL_NAME", "changed-process-env")
+    second = load_settings(
+        env_file=env_file,
+        environ={},
+        base_directory=isolated_base,
+    )
+    assert second.application.name == "${EXTERNAL_NAME}"
+    assert first == second
+
+
+def test_hostile_repository_dotenv_ignored_with_isolated_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    (fake_repo / ".env").write_text(
+        "SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=not-a-valid-environment\n",
+        encoding="utf-8",
+    )
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    monkeypatch.chdir(fake_repo)
+    settings = load_settings(environ={}, base_directory=isolated)
+    assert settings.application.environment == "development"
+
+
+def test_invalid_utf8_toml_raises_configuration_error(isolated_base: Path) -> None:
+    config = isolated_base / "broken.toml"
+    config.write_bytes(b"\xff\xfe[application]\n")
+    with pytest.raises(ConfigurationError, match="TOML configuration file") as exc_info:
+        load_settings(config_path=config, environ={}, base_directory=isolated_base)
+    assert isinstance(exc_info.value.__cause__, UnicodeError)
+
+
+def test_invalid_utf8_dotenv_raises_configuration_error(isolated_base: Path) -> None:
+    env_file = isolated_base / "broken.env"
+    env_file.write_bytes(b"SPORTS_ANALYTICS_APPLICATION__NAME=\xff\xfe\n")
+    with pytest.raises(ConfigurationError, match="environment file") as exc_info:
+        load_settings(env_file=env_file, environ={}, base_directory=isolated_base)
+    assert isinstance(exc_info.value.__cause__, UnicodeError)
+
+
+def test_invalid_logging_format_fails(isolated_base: Path) -> None:
+    with pytest.raises(ConfigurationError, match="logging.format"):
+        load_settings(
+            overrides={"logging": {"format": "%(asctime"}},
+            environ={},
+            base_directory=isolated_base,
+        )

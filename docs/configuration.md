@@ -43,6 +43,7 @@ not search parent directories for configuration files.
 - If an explicitly selected file is absent, loading fails with
   `ConfigurationError`.
 - Invalid TOML fails with `ConfigurationError`.
+- Invalid UTF-8 encoding fails with `ConfigurationError` (cause preserved).
 - An empty valid TOML document means no overrides.
 - Unknown sections or keys fail validation.
 
@@ -56,6 +57,14 @@ Use the standard-library `tomllib` module only.
 - Loading uses `python-dotenv` (`dotenv_values`) and does not mutate process
   environment state.
 - Parent-directory `.env` files are not loaded automatically.
+- **Dotenv interpolation is intentionally disabled** (`interpolate=False`).
+  Values containing `${NAME}` are treated as **literal** strings. This prevents
+  hidden reads from the real process environment when callers pass an explicit
+  `environ={...}` mapping. Operating-system overrides must use normal
+  `SPORTS_ANALYTICS_` variables rather than relying on dotenv expansion.
+- Invalid UTF-8 in an explicitly selected `.env` file raises
+  `ConfigurationError` with the original decoding exception chained as
+  `__cause__`.
 
 ## Environment variables
 
@@ -105,11 +114,29 @@ process working directory.
 
 ## Validation behaviour
 
-Invalid values, unknown fields, malformed TOML, missing explicitly requested
-files, unsafe log file names, invalid timezones, invalid log levels, and invalid
+Invalid values, unknown fields, malformed TOML, invalid UTF-8 encodings,
+missing explicitly requested files, unsafe log file names, invalid timezones,
+invalid log levels, invalid percent-style `logging.format` strings, and invalid
 worker timing relationships all raise `ConfigurationError`. Human-facing messages
 identify the failure and relevant file or field when known. Secrets and complete
 environment dumps are never included.
+
+Component identifiers are validated in **both** normal bootstrap and
+`--validate-config` CLI modes. Invalid component names return exit code `2`
+without creating directories or log files.
+
+### Test isolation
+
+Configuration and entry-point tests must isolate:
+
+- process `SPORTS_ANALYTICS_*` variables;
+- repository-local or developer `.env` files;
+- filesystem side effects via `tmp_path` base directories.
+
+Prefer explicit `environ={}` / scrubbed subprocess environments and temporary
+base directories so built-in-default tests do not depend on developer machine
+state. Explicit environment mappings are respected without hidden dotenv
+interpolation.
 
 ## CLI usage
 

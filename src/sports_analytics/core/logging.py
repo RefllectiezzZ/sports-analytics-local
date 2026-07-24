@@ -56,39 +56,54 @@ def configure_logging(
 
     Console logging always writes to stderr. Optional rotating file logging
     writes only inside ``logs_directory`` using ``settings.file_name``.
+
+    New handlers are fully constructed before any existing project-managed
+    handlers are replaced. On failure, newly created handlers are closed and
+    unrelated handlers are left untouched.
     """
     logger = logging.getLogger(LOGGER_NAMESPACE)
     logger.setLevel(settings.level)
     logger.propagate = False
 
-    reset_logging()
-
-    formatter = UTCFormatter(fmt=settings.format, datefmt=settings.date_format)
-
-    console = logging.StreamHandler(stream=sys.stderr)
-    console.setLevel(settings.level)
-    console.setFormatter(formatter)
-    _mark_handler(console)
-    logger.addHandler(console)
-
-    if settings.file_enabled:
-        log_path = logs_directory / settings.file_name
+    created: list[logging.Handler] = []
+    try:
         try:
-            logs_directory.mkdir(parents=True, exist_ok=True)
-            file_handler = RotatingFileHandler(
-                log_path,
-                maxBytes=settings.max_bytes,
-                backupCount=settings.backup_count,
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            msg = f"failed to configure log file at {log_path}: {exc}"
+            formatter = UTCFormatter(fmt=settings.format, datefmt=settings.date_format)
+        except ValueError as exc:
+            msg = f"failed to configure logging format: {exc}"
             raise RuntimeBootstrapError(msg) from exc
-        file_handler.setLevel(settings.level)
-        file_handler.setFormatter(formatter)
-        _mark_handler(file_handler)
-        logger.addHandler(file_handler)
 
+        console = logging.StreamHandler(stream=sys.stderr)
+        console.setLevel(settings.level)
+        console.setFormatter(formatter)
+        _mark_handler(console)
+        created.append(console)
+
+        if settings.file_enabled:
+            log_path = logs_directory / settings.file_name
+            try:
+                logs_directory.mkdir(parents=True, exist_ok=True)
+                file_handler = RotatingFileHandler(
+                    log_path,
+                    maxBytes=settings.max_bytes,
+                    backupCount=settings.backup_count,
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                msg = f"failed to configure log file at {log_path}: {exc}"
+                raise RuntimeBootstrapError(msg) from exc
+            file_handler.setLevel(settings.level)
+            file_handler.setFormatter(formatter)
+            _mark_handler(file_handler)
+            created.append(file_handler)
+    except Exception:
+        for handler in created:
+            handler.close()
+        raise
+
+    reset_logging()
+    for handler in created:
+        logger.addHandler(handler)
     return logger
 
 

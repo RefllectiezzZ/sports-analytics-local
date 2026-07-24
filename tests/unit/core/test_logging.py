@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from sports_analytics.core.exceptions import RuntimeBootstrapError
 from sports_analytics.core.logging import (
     HANDLER_MARKER,
     LOGGER_NAMESPACE,
@@ -116,3 +117,56 @@ def test_reset_logging_releases_file_handles(tmp_path: Path) -> None:
     log_file = tmp_path / "handle.log"
     log_file.unlink()
     assert not log_file.exists()
+
+
+def test_failed_logging_setup_leaves_no_partial_managed_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset_logging()
+    before = [
+        handler
+        for handler in logging.getLogger(LOGGER_NAMESPACE).handlers
+        if getattr(handler, HANDLER_MARKER, False)
+    ]
+    assert before == []
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "sports_analytics.core.logging.RotatingFileHandler",
+        boom,
+    )
+    settings = LoggingSettings(file_enabled=True, file_name="partial.log")
+    with pytest.raises(RuntimeBootstrapError, match="failed to configure log file"):
+        configure_logging(settings, logs_directory=tmp_path)
+
+    after = [
+        handler
+        for handler in logging.getLogger(LOGGER_NAMESPACE).handlers
+        if getattr(handler, HANDLER_MARKER, False)
+    ]
+    assert after == []
+    assert not (tmp_path / "partial.log").exists()
+
+
+def test_invalid_format_configure_logging_raises_bootstrap_error(tmp_path: Path) -> None:
+    reset_logging()
+    settings = LoggingSettings.model_construct(
+        level="INFO",
+        format="%(asctime",
+        date_format="%Y-%m-%dT%H:%M:%SZ",
+        file_enabled=False,
+        file_name="sports-analytics.log",
+        max_bytes=1024,
+        backup_count=1,
+    )
+    with pytest.raises(RuntimeBootstrapError, match="logging format") as exc_info:
+        configure_logging(settings, logs_directory=tmp_path)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    managed = [
+        handler
+        for handler in logging.getLogger(LOGGER_NAMESPACE).handlers
+        if getattr(handler, HANDLER_MARKER, False)
+    ]
+    assert managed == []

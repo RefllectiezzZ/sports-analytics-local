@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tomllib
@@ -94,11 +95,24 @@ class LoggingSettings(_FrozenModel):
     max_bytes: int = Field(default=1_048_576, gt=0)
     backup_count: int = Field(default=5, ge=0)
 
-    @field_validator("format", "date_format")
+    @field_validator("format")
     @classmethod
-    def _non_empty_format(cls, value: str) -> str:
+    def _valid_logging_format(cls, value: str) -> str:
         if not value:
-            msg = "logging format strings must be non-empty"
+            msg = "logging.format must be a non-empty string"
+            raise ValueError(msg)
+        try:
+            logging.Formatter(fmt=value)
+        except ValueError as exc:
+            msg = f"logging.format is not a valid percent-style logging format: {exc}"
+            raise ValueError(msg) from exc
+        return value
+
+    @field_validator("date_format")
+    @classmethod
+    def _non_empty_date_format(cls, value: str) -> str:
+        if not value:
+            msg = "logging.date_format must be a non-empty string"
             raise ValueError(msg)
         return value
 
@@ -269,6 +283,9 @@ def _load_toml_mapping(path: Path, *, required: bool) -> dict[str, Any]:
     try:
         raw_text = path.read_text(encoding="utf-8")
         loaded = tomllib.loads(raw_text)
+    except UnicodeError as exc:
+        msg = f"unable to decode TOML configuration file {path}: invalid UTF-8 encoding ({exc})"
+        raise ConfigurationError(msg) from exc
     except tomllib.TOMLDecodeError as exc:
         msg = f"invalid TOML in configuration file {path}: {exc}"
         raise ConfigurationError(msg) from exc
@@ -288,7 +305,12 @@ def _load_dotenv_mapping(path: Path, *, required: bool) -> dict[str, str]:
             raise ConfigurationError(msg)
         return {}
     try:
-        values = dotenv_values(path)
+        # Interpolation is disabled so dotenv values remain literal and loading
+        # stays deterministic from explicit inputs (no hidden process env reads).
+        values = dotenv_values(path, interpolate=False)
+    except UnicodeError as exc:
+        msg = f"unable to decode environment file {path}: invalid UTF-8 encoding ({exc})"
+        raise ConfigurationError(msg) from exc
     except OSError as exc:
         msg = f"unable to read environment file {path}: {exc}"
         raise ConfigurationError(msg) from exc

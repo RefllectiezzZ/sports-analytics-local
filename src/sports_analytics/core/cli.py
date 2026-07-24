@@ -11,6 +11,7 @@ from sports_analytics.core.exceptions import ConfigurationError, RuntimeBootstra
 from sports_analytics.core.runtime import (
     bootstrap_runtime,
     format_validation_success,
+    validate_component_name,
     validate_configuration,
 )
 
@@ -69,6 +70,7 @@ def run_component(
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
+        component_name = validate_component_name(component)
         if args.validate_config:
             settings, paths = validate_configuration(
                 config_path=args.config,
@@ -78,7 +80,7 @@ def run_component(
             return SUCCESS_EXIT
 
         context = bootstrap_runtime(
-            component,
+            component_name,
             config_path=args.config,
             env_file=args.env_file,
         )

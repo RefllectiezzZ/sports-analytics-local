@@ -67,8 +67,11 @@ python -m mypy src
 
 - Pass explicit `environ={...}` mappings to `load_settings` / bootstrap helpers
   instead of mutating the developer's real process environment when practical.
-- Use `tmp_path` for TOML, `.env`, and storage side effects. Do not write test
-  artifacts into the repository `storage/` tree.
+- Clear inherited `SPORTS_ANALYTICS_*` variables for entry-point and subprocess
+  tests (see fixtures in `tests/conftest.py`).
+- Use `tmp_path` as `base_directory` / cwd for TOML, `.env`, and storage side
+  effects. Do not write test artifacts into the repository `storage/` tree.
+- Do not rely on a repository-local or developer `.env` file.
 - Call `reset_logging()` (or equivalent cleanup) so rotating file handlers do not
   leave open handles, especially on Windows.
 - Do not create a hidden global settings singleton or memoize loaded settings.
