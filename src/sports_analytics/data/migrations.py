@@ -31,18 +31,17 @@ _MIGRATION_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
 _MIGRATION_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _CHECKSUM_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 _PROHIBITED_FIRST_TOKENS: Final[frozenset[str]] = frozenset(
-    {"BEGIN", "COMMIT", "ROLLBACK", "VACUUM", "ATTACH", "DETACH"}
-)
-_PROHIBITED_PRAGMA_NAMES: Final[frozenset[str]] = frozenset(
     {
-        "journal_mode",
-        "synchronous",
-        "foreign_keys",
-        "busy_timeout",
-        "locking_mode",
-        "temp_store",
-        "query_only",
-        "writable_schema",
+        "BEGIN",
+        "COMMIT",
+        "END",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "RELEASE",
+        "VACUUM",
+        "ATTACH",
+        "DETACH",
+        "PRAGMA",
     }
 )
 _SCHEMA_MIGRATIONS_DDL: Final[str] = f"""
@@ -69,15 +68,26 @@ def discover_migrations(
     """Discover packaged migrations deterministically by numeric version."""
     try:
         root = resources.files(package)
-    except (ModuleNotFoundError, TypeError) as exc:
+    except (ModuleNotFoundError, TypeError, OSError) as exc:
         msg = f"unable to locate migration package {package!r}: {exc}"
         raise DatabaseMigrationError(msg) from exc
 
     discovered: list[Migration] = []
-    for entry in root.iterdir():
-        if not entry.is_file():
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        msg = f"failed enumerating migration package {package!r}: {exc}"
+        raise DatabaseMigrationError(msg) from exc
+
+    for entry in entries:
+        try:
+            is_file = entry.is_file()
+            name = entry.name
+        except OSError as exc:
+            msg = f"failed inspecting migration resource in package {package!r}: {exc}"
+            raise DatabaseMigrationError(msg) from exc
+        if not is_file:
             continue
-        name = entry.name
         if name == "__init__.py" or name.startswith("."):
             continue
         match = _MIGRATION_FILENAME_PATTERN.fullmatch(name)
@@ -86,7 +96,17 @@ def discover_migrations(
             raise DatabaseMigrationError(msg)
         version = int(match.group("version"))
         migration_name = match.group("name")
-        sql_text = entry.read_text(encoding="utf-8")
+        try:
+            sql_text = entry.read_text(encoding="utf-8")
+        except UnicodeError as exc:
+            msg = (
+                f"failed reading migration {name!r} from package {package!r}: "
+                f"invalid UTF-8 encoding ({exc})"
+            )
+            raise DatabaseMigrationError(msg) from exc
+        except OSError as exc:
+            msg = f"failed reading migration {name!r} from package {package!r}: {exc}"
+            raise DatabaseMigrationError(msg) from exc
         checksum = compute_migration_checksum(sql_text)
         discovered.append(
             Migration(
@@ -155,7 +175,11 @@ def compute_migration_checksum(sql_text: str) -> str:
 
 
 def validate_migration_sql(sql_text: str, *, filename: str) -> None:
-    """Reject prohibited transaction-control or unsafe statements."""
+    """Reject prohibited transaction-control or unsafe statements.
+
+    All packaged migration PRAGMA statements are prohibited. Connection safety
+    PRAGMAs belong in ``database.py``, not migration SQL.
+    """
     for statement in split_sql_statements(sql_text):
         token = _first_sql_token(statement)
         if token is None:
@@ -164,24 +188,26 @@ def validate_migration_sql(sql_text: str, *, filename: str) -> None:
         if upper in _PROHIBITED_FIRST_TOKENS:
             msg = f"prohibited statement in migration {filename}: {upper}"
             raise DatabaseMigrationError(msg)
-        if upper == "PRAGMA":
-            pragma_name = _pragma_name(statement)
-            if pragma_name is not None and pragma_name.lower() in _PROHIBITED_PRAGMA_NAMES:
-                msg = f"prohibited PRAGMA in migration {filename}"
-                raise DatabaseMigrationError(msg)
 
 
 def split_sql_statements(sql_text: str) -> list[str]:
     """Split migration SQL into executable statements without using executescript.
 
-    Uses a quote/comment-aware scanner and ``sqlite3.complete_statement`` to
-    detect statement boundaries while supporting semicolons inside quotes and
-    identifiers.
+    Uses a quote/comment-aware scanner and ``sqlite3.complete_statement`` so
+    compound statements (for example ``CREATE TRIGGER ... BEGIN ... END;``) are
+    supported when their internal semicolons do not yet complete the statement.
+    Comments are skipped rather than buffered so trailing comment-only content
+    cannot hide a missing terminator or leave an incomplete statement.
+    Parenthesis depth is tracked so heuristically "complete" fragments such as
+    ``CREATE TABLE a(;`` are still rejected as incomplete.
     """
     text = _normalize_migration_text(sql_text)
+    if text.startswith("\ufeff"):
+        text = text[1:]
     statements: list[str] = []
     current: list[str] = []
     state = "normal"
+    paren_depth = 0
     index = 0
     length = len(text)
 
@@ -192,14 +218,10 @@ def split_sql_statements(sql_text: str) -> list[str]:
         if state == "normal":
             if char == "-" and nxt == "-":
                 state = "line_comment"
-                current.append(char)
-                current.append(nxt)
                 index += 2
                 continue
             if char == "/" and nxt == "*":
                 state = "block_comment"
-                current.append(char)
-                current.append(nxt)
                 index += 2
                 continue
             if char == "'":
@@ -222,15 +244,27 @@ def split_sql_statements(sql_text: str) -> list[str]:
                 current.append(char)
                 index += 1
                 continue
+            if char == "(":
+                paren_depth += 1
+                current.append(char)
+                index += 1
+                continue
+            if char == ")":
+                if paren_depth > 0:
+                    paren_depth -= 1
+                current.append(char)
+                index += 1
+                continue
             if char == ";":
-                candidate = "".join(current).strip()
-                if candidate:
-                    complete_text = candidate if candidate.endswith(";") else f"{candidate};"
-                    if not sqlite3.complete_statement(complete_text):
-                        msg = "migration SQL contains an incomplete statement"
-                        raise DatabaseMigrationError(msg)
-                    statements.append(candidate)
-                current = []
+                current.append(char)
+                buffer = "".join(current)
+                if paren_depth == 0 and sqlite3.complete_statement(buffer):
+                    candidate = buffer.strip()
+                    if candidate:
+                        # Keep executable statement text without a trailing semicolon.
+                        statements.append(candidate.rstrip().rstrip(";").strip())
+                    current = []
+                # Incomplete after ';' (e.g. trigger body): keep accumulating.
                 index += 1
                 continue
             current.append(char)
@@ -238,16 +272,15 @@ def split_sql_statements(sql_text: str) -> list[str]:
             continue
 
         if state == "line_comment":
-            current.append(char)
             index += 1
             if char == "\n":
+                # Preserve a newline so statement text remains readable/complete.
+                current.append("\n")
                 state = "normal"
             continue
 
         if state == "block_comment":
-            current.append(char)
             if char == "*" and nxt == "/":
-                current.append(nxt)
                 index += 2
                 state = "normal"
                 continue
@@ -293,18 +326,26 @@ def split_sql_statements(sql_text: str) -> list[str]:
     if state in {"single", "double", "backtick", "bracket"}:
         msg = "migration SQL has an unclosed quoted value or identifier"
         raise DatabaseMigrationError(msg)
+    if paren_depth != 0:
+        msg = "migration SQL ends with an incomplete statement"
+        raise DatabaseMigrationError(msg)
 
     trailing = "".join(current).strip()
-    if trailing:
-        complete_text = trailing if trailing.endswith(";") else f"{trailing};"
-        if not sqlite3.complete_statement(complete_text):
-            msg = "migration SQL has trailing incomplete or malformed content"
-            raise DatabaseMigrationError(msg)
-        # Trailing comment-only content is allowed only when complete_statement
-        # accepts it; otherwise reject as incomplete SQL.
-        if _first_sql_token(trailing) is not None:
-            statements.append(trailing.rstrip(";").strip())
-    return statements
+    if not trailing:
+        # Trailing whitespace / comment-only content yields no statements.
+        return statements
+
+    if sqlite3.complete_statement(trailing):
+        statements.append(trailing.rstrip(";").strip())
+        return statements
+
+    candidate = f"{trailing};"
+    if sqlite3.complete_statement(candidate):
+        statements.append(trailing.rstrip(";").strip())
+        return statements
+
+    msg = "migration SQL ends with an incomplete statement"
+    raise DatabaseMigrationError(msg)
 
 
 def get_migration_status(
@@ -431,8 +472,10 @@ def _normalize_migration_text(sql_text: str) -> str:
 
 
 def _first_sql_token(statement: str) -> str | None:
-    """Return the first SQL token after whitespace and comments."""
+    """Return the first SQL token after whitespace, comments, and an optional BOM."""
     text = _normalize_migration_text(statement)
+    if text.startswith("\ufeff"):
+        text = text[1:]
     index = 0
     length = len(text)
     while index < length:
@@ -460,13 +503,6 @@ def _first_sql_token(statement: str) -> str | None:
         token = text[start:index]
         return token or None
     return None
-
-
-def _pragma_name(statement: str) -> str | None:
-    match = re.search(r"\bPRAGMA\s+([A-Za-z_][A-Za-z0-9_]*)", statement, flags=re.IGNORECASE)
-    if match is None:
-        return None
-    return match.group(1)
 
 
 def _ensure_schema_migrations_table(connection: sqlite3.Connection) -> None:

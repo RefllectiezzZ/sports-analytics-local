@@ -97,8 +97,11 @@ databases.
 
 1. Create `src/sports_analytics/data/sql/migrations/NNNN_name.sql` with the next
    consecutive version.
-2. Keep SQL free of `BEGIN` / `COMMIT` / `ROLLBACK` / `VACUUM` / `ATTACH` /
-   unsafe PRAGMA statements.
+2. Keep SQL free of transaction-control first tokens (`BEGIN`, `COMMIT`, `END`,
+   `ROLLBACK`, `SAVEPOINT`, `RELEASE`), `VACUUM` / `ATTACH` / `DETACH`, and
+   **all** `PRAGMA` statements. Connection PRAGMAs belong in `database.py`.
+   Compound statements such as triggers with internal semicolons are supported by
+   the splitter; trailing comment-only content is ignored.
 3. Load migrations only through `importlib.resources` (package data), never via
    repository-relative filesystem paths in application code.
 4. Never edit an already-applied migration after it has shipped. Checksums are
@@ -119,13 +122,23 @@ with connect_database(path) as connection:
 - transaction context owns commit/rollback
 - repositories own neither
 - repository write tests must assert that writes outside `transaction(...)`
-  raise `RepositoryError` and leave no rows
+  raise `RepositoryError` and leave no rows (cover every public write method,
+  including update/transition helpers after creating prerequisite rows)
+- transaction tests should cover successful commit, caller-body rollback,
+  `BEGIN IMMEDIATE`, nested rejection, and commit-time failures (for example
+  deferred foreign-key violations) that must roll back and leave the connection
+  reusable
+- existing non-SQLite files (empty, short, partial header, arbitrary) must be
+  rejected unchanged without WAL/SHM sidecars; nonexistent paths may create a DB
 - do not use `Path.read_bytes()` when inspecting SQLite headers; read exactly
   the 16-byte header
 - integer affinity alone is insufficient: validate with strict Python `int`
   checks and SQLite `typeof(...)` constraints
 - migration-history corruption tests should assert `DatabaseMigrationError` at
   the library boundary and exit code `2` without traceback at the CLI
+- migration parser tests should cover compound `CREATE TRIGGER` statements,
+  trailing comments, comment-only files, and packaged resource read failures
+  wrapped as `DatabaseMigrationError`
 
 ### Logging and secrets
 

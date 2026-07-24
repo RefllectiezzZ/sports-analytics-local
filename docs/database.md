@@ -33,7 +33,13 @@ Writable connections:
 - set `busy_timeout`;
 - prefer WAL journal mode and fail clearly if WAL cannot be enabled;
 - use `synchronous=NORMAL`;
-- use explicit transaction control (`isolation_level=None` plus `BEGIN`).
+- use explicit transaction control (`isolation_level=None` plus `BEGIN`);
+- create a new database only when the configured path does not exist;
+- reject any **existing** path whose 16-byte header is not exactly the SQLite
+  header, including empty files, truncated files, partial headers, and arbitrary
+  non-SQLite content;
+- leave rejected existing files byte-for-byte unchanged and do not create WAL or
+  SHM sidecars for them.
 
 Read-only connections:
 
@@ -51,7 +57,13 @@ repositories        -> own neither
 ```
 
 - Use `transaction(connection)` or `transaction(connection, immediate=True)`.
-- Commit only on successful completion; roll back on exceptions.
+- Commit only after the caller body completes successfully.
+- Roll back when the caller body raises.
+- If `commit()` itself raises, attempt rollback while the transaction remains
+  active, preserve and re-raise the original commit exception, and do not let a
+  rollback-cleanup failure mask that commit failure.
+- After a failed commit that SQLite can roll back, `connection.in_transaction`
+  is false and the connection remains reusable.
 - Nested independent transactions are rejected.
 - Repository methods must not call `commit` when the caller owns the transaction.
 - Multi-write operations must share one explicit transaction.
@@ -103,10 +115,30 @@ in the same transaction. `executescript` is not used; statements are split with 
 quote/comment-aware parser aided by `sqlite3.complete_statement` and executed
 individually so transaction boundaries remain intact.
 
-Migration SQL must not include `BEGIN`, `COMMIT`, `ROLLBACK`, `VACUUM`,
-`ATTACH`, `DETACH`, or PRAGMA statements that alter connection safety. Safety
-validation inspects the first SQL token after whitespace and comments, so block
-comments cannot bypass the prohibition.
+The splitter appends each `;` into the current buffer and only finalizes when
+`sqlite3.complete_statement` reports completeness. That supports valid compound
+SQLite statements such as `CREATE TRIGGER ... BEGIN ... END;` with internal
+semicolons. Trailing whitespace and trailing comment-only content are ignored.
+A final statement may omit a terminating semicolon when it becomes complete after
+one is appended; genuinely incomplete trailing SQL, unclosed quotes, and unclosed
+block comments are rejected.
+
+Migration SQL must not begin (after whitespace, `--` / `/* */` comments, and an
+optional UTF-8 BOM) with any of:
+
+- `BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`
+- `VACUUM`, `ATTACH`, `DETACH`
+- **any** `PRAGMA` (all packaged migration PRAGMA statements are prohibited;
+  connection safety PRAGMAs belong in `database.py`)
+
+Words appearing only inside quoted strings, quoted identifiers, comments, or
+later in the body of a different valid statement are not treated as prohibited
+first tokens.
+
+Failures while locating, enumerating, inspecting, or reading packaged migration
+resources (including UTF-8 decoding failures) raise `DatabaseMigrationError`
+with exception chaining. Messages identify discovery vs reading and the package
+or filename when known; they do not expose migration file contents.
 
 Applied migrations are immutable:
 

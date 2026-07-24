@@ -82,22 +82,33 @@ def transaction(
     """Run a caller-owned unit of work with explicit commit/rollback.
 
     Nested independent transactions are rejected. Repository methods must not
-    call ``commit`` when the caller owns the transaction boundary.
+    call ``commit`` when the caller owns the transaction boundary. If
+    ``commit`` fails, an active transaction is rolled back while preserving the
+    original commit exception.
     """
     if connection.in_transaction:
         msg = "unsupported nested transaction: connection already has an open transaction"
         raise DatabaseError(msg)
 
     begin_sql = "BEGIN IMMEDIATE" if immediate else "BEGIN"
+    connection.execute(begin_sql)
     try:
-        connection.execute(begin_sql)
         yield connection
-    except Exception:
+    except BaseException:
         if connection.in_transaction:
             connection.rollback()
         raise
     else:
-        connection.commit()
+        try:
+            connection.commit()
+        except BaseException:
+            if connection.in_transaction:
+                try:
+                    connection.rollback()
+                except Exception:
+                    # Preserve the original commit failure; cleanup must not mask it.
+                    pass
+            raise
 
 
 def verify_sqlite_file(database_path: Path | str, *, quick: bool = True) -> None:
@@ -138,7 +149,8 @@ def _open_writable(path: Path, *, timeout_seconds: float) -> sqlite3.Connection:
 
     if path.exists():
         header = read_sqlite_header(path)
-        if header and header != SQLITE_HEADER:
+        # Existing files (including empty or truncated ones) must already be SQLite.
+        if header != SQLITE_HEADER:
             msg = f"refusing to open non-SQLite file as database: {path}"
             raise DatabaseConnectionError(msg)
 

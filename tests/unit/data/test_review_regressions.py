@@ -36,6 +36,7 @@ from sports_analytics.data.repositories.snapshots import SnapshotRepository
 from sports_analytics.data.types import (
     JobStatus,
     Migration,
+    SnapshotStatus,
     validate_relative_snapshot_path,
     validate_strict_int,
 )
@@ -105,59 +106,195 @@ def test_require_active_transaction_helper(tmp_path: Path) -> None:
             require_active_transaction(connection, operation="demo.write")
 
 
-@pytest.mark.parametrize(
-    ("repo_factory", "write"),
-    [
-        (
-            ApplicationMetadataRepository,
-            lambda repo: repo.upsert("k", "v", FIXED),
-        ),
-        (
-            JobRepository,
-            lambda repo: repo.create_job(
+def test_application_metadata_upsert_requires_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        repo = ApplicationMetadataRepository(connection)
+        with pytest.raises(RepositoryError, match="active explicit transaction"):
+            repo.upsert("k", "v", FIXED)
+        assert repo.get("k") is None
+        with transaction(connection):
+            repo.upsert("k", "v", FIXED)
+        assert repo.get("k") == "v"
+
+
+def test_job_create_requires_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        repo = JobRepository(connection)
+        with pytest.raises(RepositoryError, match="active explicit transaction"):
+            repo.create_job(
                 job_type="demo.job",
                 payload={},
                 maximum_attempts=1,
                 actor="cli",
                 created_at=FIXED,
-            ),
-        ),
-        (
-            SnapshotRepository,
-            lambda repo: repo.create_building_snapshot(
+            )
+        assert repo.count_jobs() == 0
+        with transaction(connection):
+            repo.create_job(
+                job_type="demo.job",
+                payload={},
+                maximum_attempts=1,
+                actor="cli",
+                created_at=FIXED,
+            )
+        assert repo.count_jobs() == 1
+
+
+def test_job_transition_requires_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        repo = JobRepository(connection)
+        with transaction(connection):
+            job = repo.create_job(
+                job_type="demo.job",
+                payload={},
+                maximum_attempts=2,
+                actor="cli",
+                created_at=FIXED,
+            )
+        events_before = connection.execute("SELECT COUNT(*) AS c FROM job_events").fetchone()["c"]
+        with pytest.raises(RepositoryError, match="active explicit transaction"):
+            repo.transition_job(
+                job.id,
+                expected_status=JobStatus.PENDING,
+                expected_version=1,
+                new_status=JobStatus.RUNNING,
+                actor="worker",
+                occurred_at=FIXED.replace(microsecond=1),
+            )
+        assert repo.get_job(job.id) == job
+        assert (
+            connection.execute("SELECT COUNT(*) AS c FROM job_events").fetchone()["c"]
+            == events_before
+        )
+        with transaction(connection):
+            running = repo.transition_job(
+                job.id,
+                expected_status=JobStatus.PENDING,
+                expected_version=1,
+                new_status=JobStatus.RUNNING,
+                actor="worker",
+                occurred_at=FIXED.replace(microsecond=1),
+            )
+        assert running.status is JobStatus.RUNNING
+        assert (
+            connection.execute("SELECT COUNT(*) AS c FROM job_events").fetchone()["c"]
+            == events_before + 1
+        )
+
+
+def test_snapshot_create_requires_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        repo = SnapshotRepository(connection)
+        with pytest.raises(RepositoryError, match="active explicit transaction"):
+            repo.create_building_snapshot(
                 snapshot_type="raw.events",
                 relative_path="raw/file.parquet",
                 source_name="local.fixture",
                 schema_version="v1",
                 metadata={},
                 created_at=FIXED,
-            ),
-        ),
-        (
-            AuditEventRepository,
-            lambda repo: repo.append_event(
+            )
+        assert repo.list_snapshots() == []
+        with transaction(connection):
+            repo.create_building_snapshot(
+                snapshot_type="raw.events",
+                relative_path="raw/file.parquet",
+                source_name="local.fixture",
+                schema_version="v1",
+                metadata={},
+                created_at=FIXED,
+            )
+        assert len(repo.list_snapshots()) == 1
+
+
+def test_snapshot_mark_ready_requires_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    checksum = "a" * 64
+    with connect_database(db) as connection:
+        repo = SnapshotRepository(connection)
+        with transaction(connection):
+            building = repo.create_building_snapshot(
+                snapshot_type="raw.events",
+                relative_path="raw/ready.parquet",
+                source_name="local.fixture",
+                schema_version="v1",
+                metadata={},
+                created_at=FIXED,
+            )
+        with pytest.raises(RepositoryError, match="active explicit transaction"):
+            repo.mark_snapshot_ready(
+                building.id,
+                checksum_sha256=checksum,
+                row_count=1,
+                expected_version=1,
+                ready_at=FIXED.replace(microsecond=1),
+            )
+        assert repo.get_snapshot(building.id) == building
+        with transaction(connection):
+            ready = repo.mark_snapshot_ready(
+                building.id,
+                checksum_sha256=checksum,
+                row_count=1,
+                expected_version=1,
+                ready_at=FIXED.replace(microsecond=1),
+            )
+        assert ready.status is SnapshotStatus.READY
+
+
+def test_snapshot_mark_failed_requires_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        repo = SnapshotRepository(connection)
+        with transaction(connection):
+            building = repo.create_building_snapshot(
+                snapshot_type="raw.events",
+                relative_path="raw/fail.parquet",
+                source_name="local.fixture",
+                schema_version="v1",
+                metadata={},
+                created_at=FIXED,
+            )
+        with pytest.raises(RepositoryError, match="active explicit transaction"):
+            repo.mark_snapshot_failed(building.id, expected_version=1)
+        assert repo.get_snapshot(building.id) == building
+        with transaction(connection):
+            failed = repo.mark_snapshot_failed(building.id, expected_version=1)
+        assert failed.status is SnapshotStatus.FAILED
+
+
+def test_audit_append_requires_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        repo = AuditEventRepository(connection)
+        with pytest.raises(RepositoryError, match="active explicit transaction"):
+            repo.append_event(
                 event_type="demo.event",
                 entity_type="demo",
                 actor="cli",
                 details={},
                 occurred_at=FIXED,
-            ),
-        ),
-    ],
-)
-def test_repository_writes_require_transaction(
-    tmp_path: Path,
-    repo_factory: type,
-    write,
-) -> None:
-    db = tmp_path / "ops.sqlite3"
-    ensure_database_ready(db)
-    with connect_database(db) as connection:
-        repo = repo_factory(connection)
-        with pytest.raises(RepositoryError, match="active explicit transaction"):
-            write(repo)
+            )
+        assert repo.list_events() == []
         with transaction(connection):
-            write(repo)
+            repo.append_event(
+                event_type="demo.event",
+                entity_type="demo",
+                actor="cli",
+                details={},
+                occurred_at=FIXED,
+            )
+        assert len(repo.list_events()) == 1
 
 
 def test_create_job_and_transition_atomic_with_events(tmp_path: Path) -> None:
@@ -506,3 +643,218 @@ def test_retry_limits_cannot_create_unstartable_pending_job(tmp_path: Path) -> N
             assert pending2.attempts == 1
             assert pending2.last_error == "once"
             assert pending2.finished_at is None
+
+
+def _assert_rejected_existing_file_unchanged(path: Path) -> None:
+    before = path.read_bytes()
+    sidecars = (Path(f"{path}-wal"), Path(f"{path}-shm"))
+    with pytest.raises(DatabaseConnectionError, match=rf"non-SQLite|{path}") as exc_info:
+        with connect_database(path):
+            pass
+    assert str(path) in str(exc_info.value)
+    assert path.read_bytes() == before
+    for sidecar in sidecars:
+        assert not sidecar.exists()
+
+
+def test_existing_zero_byte_file_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "empty.sqlite3"
+    path.write_bytes(b"")
+    _assert_rejected_existing_file_unchanged(path)
+
+
+def test_existing_short_file_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "short.sqlite3"
+    path.write_bytes(b"SQLite")
+    _assert_rejected_existing_file_unchanged(path)
+
+
+def test_existing_partial_sqlite_header_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "partial.sqlite3"
+    path.write_bytes(SQLITE_HEADER[:-1])
+    _assert_rejected_existing_file_unchanged(path)
+
+
+def test_existing_arbitrary_non_sqlite_file_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "arbitrary.sqlite3"
+    path.write_bytes(b"this is not a sqlite database file at all")
+    _assert_rejected_existing_file_unchanged(path)
+
+
+def test_nonexistent_path_creates_new_database(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "new.sqlite3"
+    assert not path.exists()
+    with connect_database(path) as connection:
+        connection.execute("CREATE TABLE demo(id INTEGER PRIMARY KEY)")
+        with transaction(connection):
+            connection.execute("INSERT INTO demo DEFAULT VALUES")
+    assert path.is_file()
+    assert read_sqlite_header(path) == SQLITE_HEADER
+
+
+def test_commit_failure_rolls_back_deferred_fk(tmp_path: Path) -> None:
+    path = tmp_path / "ops.sqlite3"
+    with connect_database(path) as connection:
+        connection.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+        connection.execute(
+            """
+            CREATE TABLE child (
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER NOT NULL,
+                FOREIGN KEY (parent_id) REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+            )
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            with transaction(connection):
+                connection.execute("INSERT INTO child(id, parent_id) VALUES (1, 999)")
+        assert not connection.in_transaction
+        assert connection.execute("SELECT COUNT(*) AS c FROM child").fetchone()["c"] == 0
+        with transaction(connection):
+            connection.execute("INSERT INTO parent(id) VALUES (1)")
+            connection.execute("INSERT INTO child(id, parent_id) VALUES (1, 1)")
+        assert connection.execute("SELECT COUNT(*) AS c FROM child").fetchone()["c"] == 1
+
+
+def test_migration_rejects_all_pragma_and_transaction_controls() -> None:
+    prohibited = [
+        "PRAGMA journal_mode=OFF;",
+        "PRAGMA main.journal_mode=OFF;",
+        "/* harmless comment */ PRAGMA writable_schema=ON;",
+        "/* PRAGMA user_version */ PRAGMA writable_schema=ON;",
+        "-- comment\nPRAGMA foreign_keys=OFF;",
+        "END TRANSACTION;",
+        "SAVEPOINT sp1;",
+        "RELEASE sp1;",
+        "BEGIN IMMEDIATE;",
+        "COMMIT;",
+        "ROLLBACK;",
+        "VACUUM;",
+        "ATTACH DATABASE 'x.db' AS other;",
+        "DETACH DATABASE other;",
+    ]
+    for sql in prohibited:
+        with pytest.raises(DatabaseMigrationError, match="prohibited"):
+            validate_migration_sql(sql, filename="0002_x.sql")
+
+    # PRAGMA only inside a string or comment must not reject the statement.
+    validate_migration_sql(
+        "CREATE TABLE demo(note TEXT DEFAULT 'PRAGMA journal_mode=OFF');",
+        filename="0002_ok.sql",
+    )
+    validate_migration_sql(
+        "/* PRAGMA journal_mode=OFF */ CREATE TABLE demo(id INTEGER);",
+        filename="0002_ok.sql",
+    )
+
+
+def test_sql_splitter_supports_triggers_and_trailing_comments() -> None:
+    trigger_sql = """
+    CREATE TABLE example(id INTEGER PRIMARY KEY);
+    CREATE TABLE counters(value INTEGER NOT NULL);
+    CREATE TABLE audit_log(message TEXT NOT NULL);
+    CREATE TRIGGER example_trigger
+    AFTER INSERT ON example
+    BEGIN
+        UPDATE counters SET value = value + 1;
+        INSERT INTO audit_log(message) VALUES ('inserted');
+    END;
+    CREATE TABLE after_trigger(id INTEGER PRIMARY KEY);
+    """
+    statements = split_sql_statements(trigger_sql)
+    assert len(statements) == 5
+    assert statements[3].upper().startswith("CREATE TRIGGER")
+    assert "UPDATE COUNTERS" in statements[3].upper()
+    assert statements[4].upper().startswith("CREATE TABLE AFTER_TRIGGER")
+
+    assert split_sql_statements("CREATE TABLE a(id INTEGER); -- trailing") == [
+        "CREATE TABLE a(id INTEGER)"
+    ]
+    assert split_sql_statements("CREATE TABLE a(id INTEGER);\n-- trailing\n") == [
+        "CREATE TABLE a(id INTEGER)"
+    ]
+    assert split_sql_statements("CREATE TABLE a(id INTEGER); /* trailing */") == [
+        "CREATE TABLE a(id INTEGER)"
+    ]
+    assert split_sql_statements("-- only comments\n/* still comments */") == []
+    assert split_sql_statements("CREATE TABLE a(id INTEGER)") == ["CREATE TABLE a(id INTEGER)"]
+    with pytest.raises(DatabaseMigrationError, match="incomplete"):
+        split_sql_statements("CREATE TABLE a(")
+    assert split_sql_statements("CREATE TABLE a(note TEXT DEFAULT 'a;b');") == [
+        "CREATE TABLE a(note TEXT DEFAULT 'a;b')"
+    ]
+    assert split_sql_statements('CREATE TABLE "weird;name"(id INTEGER);') == [
+        'CREATE TABLE "weird;name"(id INTEGER)'
+    ]
+    assert split_sql_statements("CREATE TABLE [bracket;name](id INTEGER);") == [
+        "CREATE TABLE [bracket;name](id INTEGER)"
+    ]
+    assert split_sql_statements("CREATE TABLE `tick;name`(id INTEGER);") == [
+        "CREATE TABLE `tick;name`(id INTEGER)"
+    ]
+    with pytest.raises(DatabaseMigrationError, match="unclosed"):
+        split_sql_statements("CREATE TABLE a(note TEXT DEFAULT 'oops);")
+    with pytest.raises(DatabaseMigrationError, match="unclosed block comment"):
+        split_sql_statements("CREATE TABLE a(id INTEGER); /* forever")
+
+
+def test_discover_migrations_wraps_resource_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sports_analytics.data import migrations as migrations_module
+
+    class _BoomRoot:
+        def iterdir(self):
+            raise OSError("iterdir failed")
+
+    monkeypatch.setattr(
+        migrations_module.resources,
+        "files",
+        lambda package: _BoomRoot(),
+    )
+    with pytest.raises(DatabaseMigrationError, match="enumerating|failed") as exc_info:
+        migrations_module.discover_migrations()
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+    class _BadRead:
+        name = "0001_initial.sql"
+
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            del encoding
+            raise OSError("read failed")
+
+    class _Root:
+        def __init__(self, files: list[object]) -> None:
+            self._files = files
+
+        def iterdir(self):
+            return iter(self._files)
+
+    monkeypatch.setattr(
+        migrations_module.resources,
+        "files",
+        lambda package: _Root([_BadRead()]),
+    )
+    with pytest.raises(DatabaseMigrationError, match="reading migration") as read_exc:
+        migrations_module.discover_migrations()
+    assert isinstance(read_exc.value.__cause__, OSError)
+
+    class _BadUtf8:
+        name = "0001_initial.sql"
+
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            del encoding
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+
+    monkeypatch.setattr(
+        migrations_module.resources,
+        "files",
+        lambda package: _Root([_BadUtf8()]),
+    )
+    with pytest.raises(DatabaseMigrationError, match="UTF-8|reading migration") as utf_exc:
+        migrations_module.discover_migrations()
+    assert isinstance(utf_exc.value.__cause__, UnicodeError)
