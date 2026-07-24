@@ -31,3 +31,31 @@ class DatabaseIntegrityError(DatabaseError):
 
 class RepositoryError(DatabaseError):
     """Raised when a repository operation fails unexpectedly."""
+
+
+class WorkerError(SportsAnalyticsError):
+    """Raised for durable worker lifecycle or execution failures."""
+
+
+class WorkerShutdownError(WorkerError):
+    """Raised when a handler should stop because the worker is shutting down."""
+
+
+class JobLeaseError(WorkerError, DatabaseIntegrityError):
+    """Raised when lease ownership, expiry, or fencing checks fail."""
+
+
+class JobHandlerError(WorkerError):
+    """Raised for job-handler registration or execution failures."""
+
+
+class JobRegistryError(JobHandlerError):
+    """Raised when the static handler registry is misused."""
+
+
+class RetryableJobError(JobHandlerError):
+    """Raised by a handler to request a retry when attempts remain."""
+
+
+class PermanentJobError(JobHandlerError):
+    """Raised by a handler to request terminal failure without retry."""

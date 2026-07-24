@@ -31,16 +31,20 @@ from sports_analytics.data.types import (
 )
 
 _ORDINARY_TRANSITIONS: dict[tuple[JobStatus, JobStatus], str] = {
-    (JobStatus.PENDING, JobStatus.RUNNING): "started",
     (JobStatus.PENDING, JobStatus.CANCELLED): "cancelled",
-    (JobStatus.RUNNING, JobStatus.SUCCEEDED): "succeeded",
-    (JobStatus.RUNNING, JobStatus.FAILED): "failed",
     (JobStatus.FAILED, JobStatus.CANCELLED): "cancelled",
 }
 _RETRY_TRANSITIONS: dict[tuple[JobStatus, JobStatus], str] = {
-    (JobStatus.RUNNING, JobStatus.PENDING): "retry_requested",
     (JobStatus.FAILED, JobStatus.PENDING): "retry_requested",
 }
+_LEASE_MANAGED_TRANSITIONS: frozenset[tuple[JobStatus, JobStatus]] = frozenset(
+    {
+        (JobStatus.PENDING, JobStatus.RUNNING),
+        (JobStatus.RUNNING, JobStatus.SUCCEEDED),
+        (JobStatus.RUNNING, JobStatus.FAILED),
+        (JobStatus.RUNNING, JobStatus.PENDING),
+    }
+)
 
 
 class JobRepository:
@@ -286,10 +290,21 @@ class JobRepository:
         details: JsonValue | None = None,
         retry: bool = False,
     ) -> JobRecord:
-        """Apply an allowed status transition with optimistic version checks.
+        """Apply an allowed administrative status transition with optimistic checks.
 
-        Transitions to ``pending`` from ``running`` or ``failed`` require
-        ``retry=True`` and ``attempts < maximum_attempts``.
+        Lease-managed transitions are rejected:
+
+        - ``pending -> running`` must use ``JobQueueRepository.claim_next_job``
+        - ``running -> succeeded|failed|pending`` must use
+          ``complete_claimed_job`` / ``fail_claimed_job``
+
+        Retained administrative transitions:
+
+        - ``pending -> cancelled``
+        - ``failed -> cancelled``
+        - ``failed -> pending`` with ``retry=True`` when attempts remain
+
+        Generic methods never clear or overwrite another worker's lease.
         """
         require_active_transaction(self._connection, operation="JobRepository.transition_job")
         expected_version = validate_strict_int(
@@ -300,9 +315,27 @@ class JobRepository:
         normalized_id = normalize_uuid(job_id)
         normalized_actor = validate_identifier(actor, field_name="actor")
         transition_key = (expected_status, new_status)
+        if transition_key in _LEASE_MANAGED_TRANSITIONS:
+            if transition_key == (JobStatus.PENDING, JobStatus.RUNNING):
+                msg = (
+                    "pending -> running must use JobQueueRepository.claim_next_job; "
+                    "manual transitions cannot bypass lease ownership"
+                )
+            elif transition_key == (JobStatus.RUNNING, JobStatus.PENDING):
+                msg = (
+                    "running -> pending retries must use JobQueueRepository.fail_claimed_job; "
+                    "manual transitions cannot bypass lease ownership"
+                )
+            else:
+                msg = (
+                    f"running -> {new_status.value} must use JobQueueRepository "
+                    "complete_claimed_job or fail_claimed_job; "
+                    "manual transitions cannot bypass lease ownership"
+                )
+            raise RepositoryError(msg)
         if retry:
             if transition_key not in _RETRY_TRANSITIONS:
-                msg = "retry=True is only valid for running|failed -> pending transitions"
+                msg = "retry=True is only valid for failed -> pending transitions"
                 raise RepositoryError(msg)
             event_type = _RETRY_TRANSITIONS[transition_key]
         else:
@@ -339,10 +372,13 @@ class JobRepository:
                 f"version={current.version}"
             )
             raise DatabaseIntegrityError(msg)
-
-        if new_status is JobStatus.RUNNING and current.attempts >= current.maximum_attempts:
-            msg = "cannot start job when attempts have reached maximum_attempts"
+        if current.lease_owner is not None or current.lease_expires_at is not None:
+            msg = (
+                f"job {normalized_id} still has an active lease; "
+                "administrative transitions cannot clear another worker's lease"
+            )
             raise RepositoryError(msg)
+
         if retry and current.attempts >= current.maximum_attempts:
             msg = "cannot retry job when attempts have reached maximum_attempts"
             raise RepositoryError(msg)
@@ -362,29 +398,12 @@ class JobRepository:
             else current.last_error
         )
 
-        if new_status is JobStatus.RUNNING:
-            started_at = timestamp
-            finished_at = None
-            attempts = current.attempts + 1
-            error_text = None
-            result_json = None
-        elif new_status is JobStatus.SUCCEEDED:
-            finished_at = timestamp
-            if started_at is None:
-                started_at = timestamp
-        elif new_status is JobStatus.FAILED:
-            finished_at = timestamp
-            if started_at is None:
-                started_at = timestamp
-        elif new_status is JobStatus.CANCELLED:
+        if new_status is JobStatus.CANCELLED:
             finished_at = timestamp
         elif new_status is JobStatus.PENDING:
             finished_at = None
-            # Explicit retry clears lease/finished_at and preserves last_error for history.
-            if expected_status is JobStatus.FAILED:
-                error_text = current.last_error
-            elif expected_status is JobStatus.RUNNING:
-                error_text = current.last_error
+            # Administrative failed -> pending retry preserves last_error.
+            error_text = current.last_error
             result_json = None
 
         event_details = details if details is not None else {}
@@ -402,7 +421,11 @@ class JobRepository:
                     lease_owner = NULL,
                     lease_expires_at = NULL,
                     version = ?
-                WHERE id = ? AND status = ? AND version = ?
+                WHERE id = ?
+                  AND status = ?
+                  AND version = ?
+                  AND lease_owner IS NULL
+                  AND lease_expires_at IS NULL
                 """,
                 (
                     new_status.value,

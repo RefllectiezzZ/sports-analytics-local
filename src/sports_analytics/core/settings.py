@@ -143,18 +143,52 @@ class LoggingSettings(_FrozenModel):
 
 
 class WorkerSettings(_FrozenModel):
-    """Background worker timing settings (loop not implemented)."""
+    """Background worker timing, lease, retry, and shutdown settings."""
 
     poll_interval_seconds: float = Field(default=30, gt=0)
     heartbeat_interval_seconds: float = Field(default=15, gt=0)
     stale_job_timeout_seconds: float = Field(default=300, gt=0)
+    retry_backoff_base_seconds: float = Field(default=5, gt=0)
+    retry_backoff_max_seconds: float = Field(default=300, gt=0)
+    shutdown_grace_seconds: float = Field(default=30, gt=0)
+    recovery_batch_size: int = Field(default=100, gt=0)
+
+    @field_validator(
+        "poll_interval_seconds",
+        "heartbeat_interval_seconds",
+        "stale_job_timeout_seconds",
+        "retry_backoff_base_seconds",
+        "retry_backoff_max_seconds",
+        "shutdown_grace_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_float_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            msg = "worker timing settings must not be boolean"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("recovery_batch_size", mode="before")
+    @classmethod
+    def _reject_bool_batch_size(cls, value: object) -> object:
+        if isinstance(value, bool):
+            msg = "worker.recovery_batch_size must not be boolean"
+            raise ValueError(msg)
+        return value
 
     @model_validator(mode="after")
-    def _stale_after_heartbeat(self) -> Self:
+    def _validate_worker_relations(self) -> Self:
         if self.stale_job_timeout_seconds <= self.heartbeat_interval_seconds:
             msg = (
                 "worker.stale_job_timeout_seconds must be greater than "
                 "worker.heartbeat_interval_seconds"
+            )
+            raise ValueError(msg)
+        if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
+            msg = (
+                "worker.retry_backoff_max_seconds must be greater than or equal to "
+                "worker.retry_backoff_base_seconds"
             )
             raise ValueError(msg)
         return self
