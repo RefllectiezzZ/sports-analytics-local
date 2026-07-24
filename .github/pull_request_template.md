@@ -12,7 +12,19 @@
 
 ## Validation performed
 
-<!-- Local commands run and their results. Note GitHub CI will also run. -->
+### Local Cursor / Linux validation
+
+<!-- Commands run in the Cursor agent environment and their real results. -->
+
+### Hosted Windows / Python 3.12 check
+
+<!-- GitHub Actions Windows compatibility result. The Cursor report does not replace this check or code review. -->
+
+## Database / migrations
+
+- [ ] Database migrations changed (list versions)
+- [ ] Migration checksums changed (list old/new when rewriting is intentional and not yet applied)
+- [ ] Confirmation that no already-applied migration file was modified after shipping
 
 ## Risks
 
@@ -28,10 +40,10 @@ Confirm each item, or mark it N/A with a brief reason in the Summary / Non-goals
 
 - [ ] Pull request is focused on one concern
 - [ ] Tests were added or updated when behaviour changed (or N/A)
-- [ ] `python -m pytest` passes
-- [ ] `python -m ruff check .` passes
-- [ ] `python -m ruff format --check .` passes
-- [ ] `python -m mypy src` passes
+- [ ] Local Cursor quality suite passed (`pytest`, `ruff`, `mypy`, and related checks)
+- [ ] Hosted Windows / Python 3.12 GitHub check passed
+- [ ] GitHub does not redundantly run the Linux suite already covered by Cursor
+- [ ] Cursor report does not replace code review
 - [ ] No generated data was committed
 - [ ] No credentials or secrets were committed
 - [ ] No paid API dependency was introduced

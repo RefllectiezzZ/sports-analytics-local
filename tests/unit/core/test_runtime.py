@@ -37,7 +37,7 @@ def test_bootstrap_returns_complete_context(tmp_path: Path) -> None:
     assert context.logger.name.endswith(".engine")
 
 
-def test_bootstrap_creates_directories_not_sqlite(tmp_path: Path) -> None:
+def test_bootstrap_creates_directories_and_sqlite(tmp_path: Path) -> None:
     context = bootstrap_runtime(
         "worker",
         environ={},
@@ -46,7 +46,9 @@ def test_bootstrap_creates_directories_not_sqlite(tmp_path: Path) -> None:
     )
     assert context.paths.storage_root.is_dir()
     assert context.paths.logs_directory.is_dir()
-    assert not context.paths.sqlite_path.exists()
+    assert context.paths.sqlite_path.is_file()
+    assert context.database_path == context.paths.sqlite_path.resolve()
+    assert context.schema_version == 1
 
 
 def test_bootstrap_applies_deterministic_seeding(tmp_path: Path) -> None:
@@ -84,6 +86,7 @@ def test_validation_only_creates_no_directories_or_log_file(tmp_path: Path) -> N
     assert settings.application.environment == "development"
     assert not paths.storage_root.exists()
     assert not (paths.logs_directory / settings.logging.file_name).exists()
+    assert not paths.sqlite_path.exists()
 
 
 def test_validation_only_does_not_alter_random_state(tmp_path: Path) -> None:

@@ -140,10 +140,12 @@ interpolation.
 
 ## CLI usage
 
-All five root entry points support:
+All five root entry points support mutually exclusive modes:
 
 ```bash
 python engine.py --validate-config
+python engine.py --database-status
+python engine.py --migrate-database
 python engine.py --config path/to/settings.toml
 python engine.py --env-file path/to/.env
 ```
@@ -164,16 +166,27 @@ SPORTS_ANALYTICS_LOGGING__LEVEL=DEBUG python engine.py
 ```
 
 `--validate-config` validates and resolves configuration without creating
-runtime directories, writing log files, configuring persistent handlers, or seeding
-global random state.
+runtime directories, writing log files, configuring persistent handlers, seeding
+global random state, or touching SQLite.
 
-Normal execution bootstraps the runtime (directories, seeding, logging) and then
-prints that the component business functionality is not implemented.
+`--database-status` loads configuration, resolves `storage.sqlite_path`, and
+inspects an existing database read-only. It does not create directories or apply
+migrations. Missing or inconsistent databases return exit code `2`.
+
+`--migrate-database` loads configuration, creates the SQLite parent directory if
+needed, applies pending migrations, and exits without starting workers or
+business workflows.
+
+Normal execution bootstraps the runtime (directories, seeding, logging, automatic
+idempotent SQLite migration) and then prints that the component business
+functionality is not implemented.
+
+Default SQLite path: `storage/operational.sqlite3` (`storage.sqlite_path`).
 
 Exit codes:
 
 - `0` — success
-- `2` — expected configuration or bootstrap error
+- `2` — expected configuration, database, or bootstrap error
 
 ## Logging
 

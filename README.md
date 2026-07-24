@@ -21,9 +21,10 @@ Provide a localhost-only toolchain that:
 ## Current status
 
 This repository is in **pre-alpha** state. Packaging, typed configuration, local
-runtime bootstrap, documentation, linting, typing, and tests are in place.
-Application features (scraping, modelling, predictions, Streamlit UI, workers,
-and database schemas) are **not implemented**.
+runtime bootstrap, SQLite operational persistence, migrations, documentation,
+linting, typing, and tests are in place. Application features (scraping,
+modelling, predictions, Streamlit UI, workers, and sports-domain schemas) are
+**not implemented**.
 
 ## Supported Python version
 
@@ -91,17 +92,30 @@ variables for operating-system overrides.
 `SPORTS_ANALYTICS_CONFIG_PATH` selects the TOML file and is not part of the
 validated settings model.
 
-All five root scripts accept:
+All five root scripts accept mutually exclusive modes:
 
 | Option | Meaning |
 | --- | --- |
 | `--config PATH` | Explicit TOML configuration file |
 | `--env-file PATH` | Explicit dotenv file |
 | `--validate-config` | Validate and resolve configuration only |
+| `--database-status` | Read-only inspect an existing SQLite database |
+| `--migrate-database` | Apply pending SQLite migrations |
 
-Normal bootstrap creates configured runtime directories and may create a rotating
-log file when file logging is enabled. `--validate-config` does **not** create
-directories or log files and does not seed global random state.
+Normal bootstrap creates configured runtime directories, may create a rotating
+log file when file logging is enabled, and ensures the configured SQLite database
+is migrated and ready. `--validate-config` does **not** create directories, log
+files, or SQLite databases and does not seed global random state.
+
+Default SQLite location (configurable via `storage.sqlite_path`):
+
+```text
+storage/operational.sqlite3
+```
+
+No sports-domain data tables or model schemas exist yet. The initial schema covers
+operational foundations only: application metadata, jobs, job events, snapshot
+metadata, and audit events.
 
 Logging:
 
@@ -120,6 +134,19 @@ Deterministic seeding:
 python engine.py --validate-config
 ```
 
+### Database status and migration
+
+```bash
+python engine.py --database-status
+python engine.py --migrate-database
+python engine.py --database-status
+```
+
+The first `--database-status` call fails when the database is missing and creates
+nothing. `--migrate-database` creates the parent directory if needed and applies
+pending migrations. The final `--database-status` call succeeds when the database
+is valid and up to date.
+
 ### Windows PowerShell overrides
 
 ```powershell
@@ -133,9 +160,12 @@ python engine.py --validate-config
 SPORTS_ANALYTICS_LOGGING__LEVEL=DEBUG python engine.py --validate-config
 ```
 
-See [docs/configuration.md](docs/configuration.md) for the full reference.
+See [docs/configuration.md](docs/configuration.md) and
+[docs/database.md](docs/database.md) for the full references.
 
 ## Validation commands
+
+The Cursor agent runs the complete local quality suite:
 
 ```bash
 python -m pytest
@@ -152,15 +182,21 @@ python -m ruff format .
 
 ## Continuous integration
 
-Pull requests and pushes to `main` are automatically checked on **Ubuntu** and **Windows** with **Python 3.12**. Automated checks include:
+GitHub Actions provides an **additional clean Windows / Python 3.12 compatibility
+check**. It does **not** redundantly re-run the same Linux suite already executed
+by the Cursor agent.
+
+- The Windows check must finish successfully before merge.
+- A Cursor report does **not** replace code review.
+- Ubuntu CI is not used for this repository's GitHub workflow.
+
+Automated Windows checks include:
 
 - dependency consistency (`pip check`);
 - pytest;
 - Ruff lint;
 - Ruff format verification;
 - mypy.
-
-Local validation remains required before opening a pull request. GitHub-hosted CI validates the same quality gates on both platforms; this repository does not claim broader Windows application testing beyond those checks.
 
 ## Pre-commit
 
@@ -179,8 +215,8 @@ pre-commit run --all-files
 | `worker.py` | Runs background jobs outside the Streamlit process |
 | `run_local.py` | Coordinates local multi-process startup |
 
-Each file bootstraps the shared local runtime (or validates configuration) and
-then reports that its business functionality is not implemented.
+Each file bootstraps the shared local runtime (or runs a validation / database
+CLI mode) and then reports that its business functionality is not implemented.
 
 ## Directory structure
 
@@ -226,6 +262,7 @@ then reports that its business functionality is not implemented.
 └── docs/
     ├── architecture.md
     ├── configuration.md
+    ├── database.md
     └── development.md
 ```
 
@@ -235,7 +272,7 @@ then reports that its business functionality is not implemented.
 - **Scraper coordinator** (`scraper.py`) for permitted public sources only.
 - **Engine** (`engine.py`) for deterministic feature generation, local models, and combination proposals.
 - **Worker** (`worker.py`) for durable background jobs and retries.
-- **SQLite** for operational state, jobs, predictions, and audit records.
+- **SQLite** for operational state, jobs, snapshot metadata, and audit records.
 - **Parquet** for historical and analytical datasets under versioned snapshots.
 
 See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
@@ -243,9 +280,9 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 ## Current limitations
 
 - No scraping, prediction, ML, betting, or UI logic is implemented.
-- No database schemas or tables are defined.
-- No background job processing is implemented.
-- Configuration and runtime bootstrap are implemented; analytics features are not.
+- No sports-domain database schemas are defined.
+- No background job claiming or worker loop is implemented.
+- Configuration, runtime bootstrap, and operational SQLite persistence are implemented.
 - Entry points remain functional placeholders after bootstrap.
 
 ## Contribution workflow
@@ -254,7 +291,7 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 2. Make typed, deterministic, auditable changes.
 3. Add or update tests for behaviour you change.
 4. Run the validation commands above.
-5. Open a pull request for review.
+5. Open a pull request for review and wait for the Windows GitHub check.
 
 See [docs/development.md](docs/development.md) for conventions and review outcomes.
 
