@@ -77,6 +77,7 @@ def test_supervisor_run_bootstraps_database_and_starts_worker_with_absolute_path
         worker_script=isolated_cwd / "worker.py",
         popen_factory=popen,
         install_signals=False,
+        platform_name="linux",
     )
 
     code = runner.run(
@@ -101,7 +102,7 @@ def test_supervisor_run_bootstraps_database_and_starts_worker_with_absolute_path
 
 def test_shutdown_child_uses_grace_then_kill_and_sends_grace_once() -> None:
     graceful = FakeChild(exit_code=0)
-    runner = LocalSupervisor(install_signals=False)
+    runner = LocalSupervisor(install_signals=False, platform_name="linux")
     assert runner._shutdown_child(graceful, shutdown_grace_seconds=1) == 0
     assert graceful.terminated == 1
     assert graceful.killed == 0
@@ -109,7 +110,7 @@ def test_shutdown_child_uses_grace_then_kill_and_sends_grace_once() -> None:
     assert graceful.terminated == 1
 
     stubborn = FakeChild(exit_code=0, timeout_once=True)
-    runner = LocalSupervisor(install_signals=False)
+    runner = LocalSupervisor(install_signals=False, platform_name="linux")
     assert runner._shutdown_child(stubborn, shutdown_grace_seconds=1) == -9
     assert stubborn.terminated == 1
     assert stubborn.killed == 1
