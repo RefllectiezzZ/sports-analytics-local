@@ -648,7 +648,7 @@ def test_retry_limits_cannot_create_unstartable_pending_job(tmp_path: Path) -> N
 def _assert_rejected_existing_file_unchanged(path: Path) -> None:
     before = path.read_bytes()
     sidecars = (Path(f"{path}-wal"), Path(f"{path}-shm"))
-    with pytest.raises(DatabaseConnectionError, match=rf"non-SQLite|{path}") as exc_info:
+    with pytest.raises(DatabaseConnectionError, match="non-SQLite") as exc_info:
         with connect_database(path):
             pass
     assert str(path) in str(exc_info.value)
