@@ -411,3 +411,101 @@ def test_state_from_finalization_mapping() -> None:
         LocalWorker._state_from_finalization(JobFinalizationKind.SUCCEEDED)
         is JobExecutionState.SUCCEEDED
     )
+
+
+def test_worker_signal_handler_only_sets_event_without_lock_or_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import logging
+    import signal
+    import threading
+
+    context = _runtime(tmp_path)
+    installed: dict[int, object] = {}
+    originals_map = {signal.SIGINT: signal.SIG_DFL}
+
+    def fake_getsignal(signum: int) -> object:
+        return originals_map.get(signum, signal.SIG_DFL)
+
+    def fake_signal(signum: int, handler: object) -> object:
+        previous = originals_map.get(signum, signal.SIG_DFL)
+        installed[signum] = handler
+        originals_map[signum] = handler  # type: ignore[assignment]
+        return previous
+
+    monkeypatch.setattr(signal, "getsignal", fake_getsignal)
+    monkeypatch.setattr(signal, "signal", fake_signal)
+
+    worker = LocalWorker(install_signals=True)
+    local_stop = threading.Event()
+    active = JobExecutionContext(
+        job_id=JOB_ID,
+        worker_id=WORKER_ID,
+        attempt=1,
+        maximum_attempts=2,
+        claimed_at=FIXED,
+        lease_expires_at=FIXED + timedelta(seconds=10),
+        logger=logging.getLogger("test.worker.signal"),
+    )
+    worker._active_context = active
+    assert worker._active_context_lock.acquire(blocking=False)
+    try:
+        originals = worker._install_signal_handlers(context, local_stop)
+        assert originals
+        handler = installed[signal.SIGINT]
+        assert callable(handler)
+        # Holding the non-reentrant lock must not deadlock the signal callback.
+        handler(signal.SIGINT, None)
+        assert local_stop.is_set()
+        assert not active.is_stop_requested()
+    finally:
+        worker._active_context_lock.release()
+
+    assert worker._is_stop_requested(local_stop, None)
+    assert active.is_stop_requested()
+    worker._restore_signal_handlers(originals)
+    assert originals_map[signal.SIGINT] is signal.SIG_DFL
+
+
+def test_heartbeat_propagates_stop_and_continues_renewal_after_signal_event() -> None:
+    import logging
+    import threading
+
+    from sports_analytics.jobs.runner import LeaseHeartbeatController
+
+    class _Service:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.called = threading.Event()
+
+        def renew_lease(self, **_kwargs: object) -> None:
+            self.calls += 1
+            self.called.set()
+
+    service = _Service()
+    context = JobExecutionContext(
+        job_id=JOB_ID,
+        worker_id=WORKER_ID,
+        attempt=1,
+        maximum_attempts=2,
+        claimed_at=FIXED,
+        lease_expires_at=FIXED,
+        logger=logging.getLogger("test.worker.hb"),
+    )
+    local_stop = threading.Event()
+    local_stop.set()
+    controller = LeaseHeartbeatController(
+        service=service,  # type: ignore[arg-type]
+        context=context,
+        expected_job_version=1,
+        interval_seconds=0.001,
+        clock=lambda: FIXED,
+        should_stop=lambda: local_stop.is_set(),
+    )
+    controller.start()
+    assert service.called.wait(timeout=1)
+    assert controller.stop(timeout_seconds=1)
+    assert context.is_stop_requested()
+    assert service.calls >= 1
+    assert not context.is_lease_lost()

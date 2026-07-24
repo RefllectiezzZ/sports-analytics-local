@@ -20,7 +20,7 @@ from sports_analytics.data.migrations import (
 from sports_analytics.data.schema import EXPECTED_INDEXES, EXPECTED_TRIGGERS, OPERATIONAL_TABLES
 
 CHECKSUM_0001 = "404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de"
-CHECKSUM_0002 = "3dcc08c2053a3b4a1dcf9026ad2bc1f1d3f49e43062119a28c360e2fe7847f28"
+CHECKSUM_0002 = "94af0d6d9df740ac0c578c815015fe3981acfc48f5faa3cfb1ba3bc1a719b55d"
 
 
 def test_migration_0002_discovered_with_expected_checksum() -> None:
@@ -38,7 +38,7 @@ def test_migration_0002_discovered_with_expected_checksum() -> None:
     )
     assert compute_migration_checksum(text) == CHECKSUM_0002
     statements = split_sql_statements(text)
-    assert sum(1 for statement in statements if statement.upper().startswith("CREATE TRIGGER")) == 2
+    assert sum(1 for statement in statements if statement.upper().startswith("CREATE TRIGGER")) == 4
 
 
 def test_fresh_schema_contains_worker_runtime_objects(tmp_path: Path) -> None:

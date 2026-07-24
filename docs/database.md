@@ -173,7 +173,7 @@ Current packaged migrations:
 | Version | File | Checksum |
 | --- | --- | --- |
 | 1 | `0001_initial.sql` | `404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de` |
-| 2 | `0002_worker_runtime.sql` | `3dcc08c2053a3b4a1dcf9026ad2bc1f1d3f49e43062119a28c360e2fe7847f28` |
+| 2 | `0002_worker_runtime.sql` | `94af0d6d9df740ac0c578c815015fe3981acfc48f5faa3cfb1ba3bc1a719b55d` |
 
 Migration `0001_initial.sql` is unchanged. Schema version `2` adds the durable
 worker runtime metadata and queue lease integrity described below.
@@ -240,6 +240,13 @@ It also adds triggers:
 
 - `trg_jobs_running_lease_insert`
 - `trg_jobs_running_lease_update`
+- `trg_worker_instances_current_job_insert`
+- `trg_worker_instances_current_job_update`
+
+After installing the lease triggers, migration `0002` validates every existing
+`jobs` row with a no-op update of the trigger-covered columns. A legacy v1
+running job with a NULL lease aborts the migration atomically (`DatabaseMigrationError`),
+leaving schema version 1 and no `worker_instances` objects behind.
 
 No sports-domain tables (teams, fixtures, odds, predictions, bets, etc.) exist
 yet.
@@ -267,6 +274,14 @@ The partial unique `uq_worker_instances_current_job` index enforces that a
 non-NULL `worker_instances.current_job_id` is associated with at most one worker
 row. Claiming a job also requires the claiming worker's own `current_job_id` to
 be NULL, so an occupied worker cannot claim a second job.
+
+The `trg_worker_instances_current_job_*` triggers require any non-NULL
+`current_job_id` to reference a matching `jobs` row that is `running`, leased by
+that worker (`lease_owner = worker_instances.id`), and has a non-NULL
+`lease_expires_at`. Clearing `current_job_id` remains allowed for worker failure,
+shutdown interruption, and expired-lease recovery. Ordinary heartbeats must not
+change `current_job_id`; only queue claim, finalization, recovery, and terminal
+worker transitions may.
 
 Retry transitions (`running|failed -> pending`) require an explicit
 `retry=True` argument. Ordinary `transition_job` calls cannot retry. Retries are

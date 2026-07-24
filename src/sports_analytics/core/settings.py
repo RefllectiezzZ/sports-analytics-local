@@ -21,7 +21,8 @@ from pydantic import (
     model_validator,
 )
 
-from sports_analytics.core.exceptions import ConfigurationError
+from sports_analytics.core.exceptions import ConfigurationError, RepositoryError
+from sports_analytics.core.validation import MAX_DURATION_SECONDS, parse_positive_decimal_int
 
 ENV_PREFIX: Final[str] = "SPORTS_ANALYTICS_"
 NESTED_DELIMITER: Final[str] = "__"
@@ -172,25 +173,35 @@ class WorkerSettings(_FrozenModel):
         if isinstance(value, str):
             try:
                 value = float(value)
-            except ValueError as exc:
+            except (OverflowError, ValueError) as exc:
                 msg = "worker timing settings must be positive finite numbers"
                 raise ValueError(msg) from exc
         if not isinstance(value, int | float):
             msg = "worker timing settings must be positive finite numbers"
             raise ValueError(msg)
-        number = float(value)
+        try:
+            number = float(value)
+        except (OverflowError, ValueError, TypeError) as exc:
+            msg = "worker timing settings must be positive finite numbers"
+            raise ValueError(msg) from exc
         if not math.isfinite(number) or number <= 0:
             msg = "worker timing settings must be positive finite numbers"
+            raise ValueError(msg)
+        if number > MAX_DURATION_SECONDS:
+            msg = (
+                "worker timing settings must be <= "
+                f"{MAX_DURATION_SECONDS} seconds (maximum supported duration)"
+            )
             raise ValueError(msg)
         return number
 
     @field_validator("recovery_batch_size", mode="before")
     @classmethod
-    def _reject_bool_batch_size(cls, value: object) -> object:
-        if isinstance(value, bool):
-            msg = "worker.recovery_batch_size must not be boolean"
-            raise ValueError(msg)
-        return value
+    def _normalize_recovery_batch_size(cls, value: object) -> int:
+        try:
+            return parse_positive_decimal_int(value, field_name="worker.recovery_batch_size")
+        except RepositoryError as exc:
+            raise ValueError(str(exc)) from exc
 
     @model_validator(mode="after")
     def _validate_worker_relations(self) -> Self:

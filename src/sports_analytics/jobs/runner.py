@@ -25,7 +25,7 @@ from sports_analytics.core.exceptions import (
 )
 from sports_analytics.core.runtime import RuntimeContext
 from sports_analytics.data.codec import ensure_json_value
-from sports_analytics.data.types import JsonValue
+from sports_analytics.data.types import JsonValue, validate_positive_duration_seconds
 from sports_analytics.jobs.context import JobExecutionContext
 from sports_analytics.jobs.errors import sanitize_error_text
 from sports_analytics.jobs.registry import HandlerRegistry, build_default_registry
@@ -66,7 +66,10 @@ class LeaseHeartbeatController:
         self._service = service
         self._context = context
         self._expected_job_version = expected_job_version
-        self._interval_seconds = float(interval_seconds)
+        self._interval_seconds = validate_positive_duration_seconds(
+            interval_seconds,
+            field_name="interval_seconds",
+        )
         self._clock = clock
         self._should_stop = should_stop
         self._stop_requested = threading.Event()
@@ -82,8 +85,12 @@ class LeaseHeartbeatController:
 
     def stop(self, *, timeout_seconds: float) -> bool:
         """Stop the heartbeat thread and return whether cleanup completed."""
+        timeout = validate_positive_duration_seconds(
+            timeout_seconds,
+            field_name="timeout_seconds",
+        )
         self._stop_requested.set()
-        self._thread.join(timeout=max(0.0, float(timeout_seconds)))
+        self._thread.join(timeout=timeout)
         return not self._thread.is_alive()
 
     def _run(self) -> None:
@@ -478,6 +485,7 @@ class LocalWorker:
         return False
 
     def _request_stop(self, local_stop: threading.Event) -> None:
+        """Propagate a cooperative stop outside the signal-handler path."""
         local_stop.set()
         with self._active_context_lock:
             if self._active_context is not None:
@@ -488,15 +496,15 @@ class LocalWorker:
         runtime_context: RuntimeContext,
         local_stop: threading.Event,
     ) -> dict[int, SignalHandler]:
+        del runtime_context
         if not self._install_signals or threading.current_thread() is not threading.main_thread():
             return {}
 
         originals: dict[int, SignalHandler] = {}
 
         def _handler(signum: int, frame: FrameType | None) -> None:
-            del frame
-            runtime_context.logger.info("worker received shutdown signal signal=%s", signum)
-            self._request_stop(local_stop)
+            del signum, frame
+            local_stop.set()
 
         for signum_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             signum = getattr(signal, signum_name, None)

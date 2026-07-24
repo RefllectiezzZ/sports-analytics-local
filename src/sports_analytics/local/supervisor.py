@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import subprocess
 import sys
@@ -23,9 +24,11 @@ from sports_analytics.core.exceptions import (
 )
 from sports_analytics.core.runtime import bootstrap_runtime
 from sports_analytics.core.settings import WorkerSettings
-from sports_analytics.data.types import normalize_uuid, validate_positive_finite_number
+from sports_analytics.data.types import normalize_uuid, validate_positive_duration_seconds
+from sports_analytics.jobs.errors import sanitize_error_text
 
 SignalHandler = signal.Handlers | int | Callable[[int, FrameType | None], object] | None
+_LOGGER = logging.getLogger(__name__)
 
 
 class ChildProcess(Protocol):
@@ -119,7 +122,7 @@ class LocalSupervisor:
         self,
         *,
         worker_script: Path | str | None = None,
-        popen_factory: PopenFactory = _default_popen,
+        popen_factory: PopenFactory | None = None,
         install_signals: bool = True,
         shutdown_strategy: ProcessShutdownStrategy | None = None,
         platform_name: str | None = None,
@@ -129,7 +132,7 @@ class LocalSupervisor:
             if worker_script is not None
             else Path(__file__).resolve().parents[3] / "worker.py"
         )
-        self._popen_factory = popen_factory
+        self._popen_factory = _default_popen if popen_factory is None else popen_factory
         self._install_signals = install_signals
         self._shutdown_strategy = (
             shutdown_strategy
@@ -148,6 +151,7 @@ class LocalSupervisor:
         worker_id: str | None = None,
     ) -> int:
         """Bootstrap run_local, start ``worker.py``, and propagate exit status."""
+        self._graceful_stop_sent = False
         runtime_context = bootstrap_runtime(
             "run_local",
             config_path=config,
@@ -168,12 +172,18 @@ class LocalSupervisor:
             worker_max_jobs=worker_max_jobs,
             worker_id=worker_id,
         )
-        child = self._popen_factory(
-            command,
-            creationflags=self._shutdown_strategy.creationflags(),
-        )
+        try:
+            child = self._popen_factory(
+                command,
+                creationflags=self._shutdown_strategy.creationflags(),
+            )
+        except OSError as exc:
+            msg = f"failed to start worker child process: {sanitize_error_text(exc)}"
+            raise WorkerError(msg) from exc
+
         stop_requested = threading.Event()
         originals = self._install_signal_handlers(stop_requested)
+        primary_exc: BaseException | None = None
         try:
             while True:
                 if stop_requested.is_set():
@@ -185,6 +195,14 @@ class LocalSupervisor:
                     return child.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
                     continue
+        except BaseException as exc:
+            primary_exc = exc
+            self._cleanup_child_after_exception(
+                child,
+                shutdown_grace_seconds=settings.shutdown_grace_seconds,
+                primary_exc=primary_exc,
+            )
+            raise
         finally:
             self._restore_signal_handlers(originals)
 
@@ -237,21 +255,67 @@ class LocalSupervisor:
             signal.signal(signum, handler)
 
     def _shutdown_child(self, child: ChildProcess, *, shutdown_grace_seconds: float) -> int:
-        grace = validate_positive_finite_number(
+        grace = validate_positive_duration_seconds(
             shutdown_grace_seconds,
             field_name="shutdown_grace_seconds",
         )
         code = child.poll()
         if code is not None:
             return code
-        if not self._graceful_stop_sent:
-            self._shutdown_strategy.request_graceful_stop(child)
-            self._graceful_stop_sent = True
+        self._request_graceful_stop_once(child)
         try:
             return child.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             child.kill()
             return child.wait()
+
+    def _request_graceful_stop_once(self, child: ChildProcess) -> None:
+        if self._graceful_stop_sent:
+            return
+        self._shutdown_strategy.request_graceful_stop(child)
+        self._graceful_stop_sent = True
+
+    def _cleanup_child_after_exception(
+        self,
+        child: ChildProcess,
+        *,
+        shutdown_grace_seconds: float,
+        primary_exc: BaseException,
+    ) -> None:
+        """Best-effort child cleanup that preserves ``primary_exc``."""
+        try:
+            if child.poll() is not None:
+                return
+            grace = validate_positive_duration_seconds(
+                shutdown_grace_seconds,
+                field_name="shutdown_grace_seconds",
+            )
+            try:
+                self._request_graceful_stop_once(child)
+            except Exception as graceful_exc:  # noqa: BLE001 - forced kill remains
+                _LOGGER.warning(
+                    "graceful child stop failed during cleanup error=%s",
+                    sanitize_error_text(graceful_exc),
+                )
+            try:
+                child.wait(timeout=grace)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception as wait_exc:  # noqa: BLE001 - fall through to kill
+                _LOGGER.warning(
+                    "child wait failed during cleanup error=%s",
+                    sanitize_error_text(wait_exc),
+                )
+            child.kill()
+            child.wait()
+        except Exception as cleanup_exc:  # noqa: BLE001 - never replace primary
+            note = f"child cleanup also failed: {sanitize_error_text(cleanup_exc)}"
+            _LOGGER.error(note)
+            try:
+                primary_exc.add_note(note)
+            except (AttributeError, TypeError):
+                pass
 
 
 def build_argument_parser() -> argparse.ArgumentParser:

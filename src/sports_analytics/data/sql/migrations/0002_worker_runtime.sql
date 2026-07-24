@@ -86,6 +86,45 @@ BEGIN
     END;
 END;
 
+-- Reciprocal current-job / lease ownership. Clearing current_job_id is allowed
+-- so failure, shutdown interruption, and expired-lease recovery can detach the
+-- worker while leaving the job lease for later recovery.
+CREATE TRIGGER trg_worker_instances_current_job_insert
+BEFORE INSERT ON worker_instances
+FOR EACH ROW
+WHEN NEW.current_job_id IS NOT NULL
+BEGIN
+    SELECT CASE
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM jobs
+            WHERE id = NEW.current_job_id
+              AND status = 'running'
+              AND lease_owner = NEW.id
+              AND lease_expires_at IS NOT NULL
+        )
+        THEN RAISE(ABORT, 'worker current_job_id requires matching running lease')
+    END;
+END;
+
+CREATE TRIGGER trg_worker_instances_current_job_update
+BEFORE UPDATE OF current_job_id ON worker_instances
+FOR EACH ROW
+WHEN NEW.current_job_id IS NOT NULL
+BEGIN
+    SELECT CASE
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM jobs
+            WHERE id = NEW.current_job_id
+              AND status = 'running'
+              AND lease_owner = NEW.id
+              AND lease_expires_at IS NOT NULL
+        )
+        THEN RAISE(ABORT, 'worker current_job_id requires matching running lease')
+    END;
+END;
+
 -- Validate every existing jobs row against the new lease invariant.
 -- The BEFORE UPDATE trigger rejects legacy running rows with a NULL lease.
 UPDATE jobs

@@ -26,7 +26,7 @@ from sports_analytics.data.types import (
     JsonValue,
     normalize_uuid,
     validate_identifier,
-    validate_positive_finite_number,
+    validate_positive_duration_seconds,
     validate_strict_int,
 )
 from sports_analytics.jobs.backoff import compute_retry_available_at
@@ -71,7 +71,7 @@ class JobQueueRepository:
         if claimed_at.tzinfo is None:
             msg = "claimed_at must be timezone-aware"
             raise RepositoryError(msg)
-        lease_duration_seconds = validate_positive_finite_number(
+        lease_duration_seconds = validate_positive_duration_seconds(
             lease_duration_seconds,
             field_name="lease_duration_seconds",
         )
@@ -95,7 +95,11 @@ class JobQueueRepository:
             raise JobLeaseError(msg)
 
         claimed_text = format_utc_timestamp(claimed_at)
-        lease_expires_at = claimed_at + timedelta(seconds=lease_duration_seconds)
+        try:
+            lease_expires_at = claimed_at + timedelta(seconds=lease_duration_seconds)
+        except OverflowError as exc:
+            msg = "lease_duration_seconds is not a representable positive duration"
+            raise RepositoryError(msg) from exc
         lease_text = format_utc_timestamp(lease_expires_at)
         try:
             row = self._connection.execute(
@@ -246,11 +250,15 @@ class JobQueueRepository:
             expected_job_version=expected_job_version,
             allow_stopping_worker=True,
         )
-        lease_duration_seconds = validate_positive_finite_number(
+        lease_duration_seconds = validate_positive_duration_seconds(
             lease_duration_seconds,
             field_name="lease_duration_seconds",
         )
-        lease_expires_at = heartbeat_at + timedelta(seconds=lease_duration_seconds)
+        try:
+            lease_expires_at = heartbeat_at + timedelta(seconds=lease_duration_seconds)
+        except OverflowError as exc:
+            msg = "lease_duration_seconds is not a representable positive duration"
+            raise RepositoryError(msg) from exc
         try:
             cursor = self._connection.execute(
                 f"""
@@ -416,6 +424,23 @@ class JobQueueRepository:
             self._connection,
             operation="JobQueueRepository.fail_claimed_job",
         )
+        if type(retryable) is not bool:
+            msg = "retryable must be a bool"
+            raise RepositoryError(msg)
+        retry_backoff_base_seconds = validate_positive_duration_seconds(
+            retry_backoff_base_seconds,
+            field_name="retry_backoff_base_seconds",
+        )
+        retry_backoff_max_seconds = validate_positive_duration_seconds(
+            retry_backoff_max_seconds,
+            field_name="retry_backoff_max_seconds",
+        )
+        if retry_backoff_max_seconds < retry_backoff_base_seconds:
+            msg = (
+                "retry_backoff_max_seconds must be greater than or equal to "
+                "retry_backoff_base_seconds"
+            )
+            raise RepositoryError(msg)
         job, worker = self._require_active_lease(
             job_id=job_id,
             worker_id=worker_id,
@@ -423,9 +448,6 @@ class JobQueueRepository:
             expected_job_version=expected_job_version,
             allow_stopping_worker=True,
         )
-        if type(retryable) is not bool:
-            msg = "retryable must be a bool"
-            raise RepositoryError(msg)
         normalized_actor = validate_identifier(actor, field_name="actor")
         error_text = sanitize_error_text(error)
         event_details = ensure_json_value(details if details is not None else {})
@@ -592,6 +614,20 @@ class JobQueueRepository:
             msg = "recovered_at must be timezone-aware"
             raise RepositoryError(msg)
         maximum_rows = validate_strict_int(maximum_rows, field_name="maximum_rows", minimum=1)
+        retry_backoff_base_seconds = validate_positive_duration_seconds(
+            retry_backoff_base_seconds,
+            field_name="retry_backoff_base_seconds",
+        )
+        retry_backoff_max_seconds = validate_positive_duration_seconds(
+            retry_backoff_max_seconds,
+            field_name="retry_backoff_max_seconds",
+        )
+        if retry_backoff_max_seconds < retry_backoff_base_seconds:
+            msg = (
+                "retry_backoff_max_seconds must be greater than or equal to "
+                "retry_backoff_base_seconds"
+            )
+            raise RepositoryError(msg)
         normalized_actor = validate_identifier(actor, field_name="actor")
         recovered_text = format_utc_timestamp(recovered_at)
         try:
@@ -810,12 +846,16 @@ class JobQueueRepository:
         if now.tzinfo is None:
             msg = "now must be timezone-aware"
             raise RepositoryError(msg)
-        stale_worker_threshold_seconds = validate_positive_finite_number(
+        stale_worker_threshold_seconds = validate_positive_duration_seconds(
             stale_worker_threshold_seconds,
             field_name="stale_worker_threshold_seconds",
         )
         now_text = format_utc_timestamp(now)
-        cutoff = now - timedelta(seconds=stale_worker_threshold_seconds)
+        try:
+            cutoff = now - timedelta(seconds=stale_worker_threshold_seconds)
+        except OverflowError as exc:
+            msg = "stale_worker_threshold_seconds is not a representable positive duration"
+            raise RepositoryError(msg) from exc
         cutoff_text = format_utc_timestamp(cutoff)
 
         def _count(sql: str, params: tuple[object, ...] = ()) -> int:

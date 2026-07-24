@@ -358,6 +358,59 @@ def test_invalid_worker_recovery_batch_size_fails(tmp_path: Path) -> None:
             environ={},
             base_directory=tmp_path,
         )
+    for value in (1.0, "1.0", "01", "+1", " 1", "1e2", "", "0", -3):
+        with pytest.raises(ConfigurationError, match="recovery_batch_size"):
+            load_settings(
+                overrides={"worker": {"recovery_batch_size": value}},
+                environ={},
+                base_directory=tmp_path,
+            )
+
+
+def test_recovery_batch_size_accepts_canonical_int_and_decimal_string(tmp_path: Path) -> None:
+    settings = load_settings(
+        overrides={"worker": {"recovery_batch_size": 42}},
+        environ={},
+        base_directory=tmp_path,
+    )
+    assert settings.worker.recovery_batch_size == 42
+    settings = load_settings(
+        overrides={"worker": {"recovery_batch_size": "42"}},
+        environ={},
+        base_directory=tmp_path,
+    )
+    assert settings.worker.recovery_batch_size == 42
+    toml = tmp_path / "batch.toml"
+    toml.write_text(
+        '[application]\nenvironment = "test"\n[worker]\nrecovery_batch_size = 17\n',
+        encoding="utf-8",
+    )
+    settings = load_settings(config_path=toml, environ={}, base_directory=tmp_path)
+    assert settings.worker.recovery_batch_size == 17
+    env_file = tmp_path / ".env"
+    env_file.write_text("SPORTS_ANALYTICS_WORKER__RECOVERY_BATCH_SIZE=19\n", encoding="utf-8")
+    settings = load_settings(env_file=env_file, environ={}, base_directory=tmp_path)
+    assert settings.worker.recovery_batch_size == 19
+    settings = load_settings(
+        environ={"SPORTS_ANALYTICS_WORKER__RECOVERY_BATCH_SIZE": "23"},
+        base_directory=tmp_path,
+    )
+    assert settings.worker.recovery_batch_size == 23
+
+
+def test_worker_timing_rejects_unusable_finite_durations(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError):
+        load_settings(
+            overrides={"worker": {"poll_interval_seconds": float("1e308")}},
+            environ={},
+            base_directory=tmp_path,
+        )
+    with pytest.raises(ConfigurationError):
+        load_settings(
+            overrides={"worker": {"shutdown_grace_seconds": 60 * 60 * 24 * 31}},
+            environ={},
+            base_directory=tmp_path,
+        )
 
 
 def test_model_instances_are_immutable() -> None:

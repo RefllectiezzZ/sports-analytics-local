@@ -37,9 +37,12 @@ from sports_analytics.data.repositories.jobs import JobRepository
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
 from sports_analytics.data.repositories.workers import WorkerRepository
 from sports_analytics.data.types import (
+    MAX_DURATION_SECONDS,
     JobStatus,
     Migration,
     SnapshotStatus,
+    parse_positive_decimal_int,
+    validate_positive_duration_seconds,
     validate_positive_finite_number,
     validate_relative_snapshot_path,
     validate_strict_int,
@@ -526,6 +529,21 @@ def test_positive_finite_number_validation_rejects_bool_nan_and_infinity() -> No
     for value in (True, False, 0, -1, float("nan"), float("inf"), float("-inf"), "1"):
         with pytest.raises(RepositoryError, match="positive finite number"):
             validate_positive_finite_number(value, field_name="seconds")
+    with pytest.raises(RepositoryError, match="positive finite number"):
+        validate_positive_finite_number(10**10000, field_name="seconds")
+    with pytest.raises(RepositoryError):
+        validate_positive_duration_seconds(float("1e308"), field_name="seconds")
+    with pytest.raises(RepositoryError, match="must be <="):
+        validate_positive_duration_seconds(MAX_DURATION_SECONDS + 1, field_name="seconds")
+    assert validate_positive_duration_seconds(1.5, field_name="seconds") == 1.5
+
+
+def test_parse_positive_decimal_int_rejects_non_canonical_forms() -> None:
+    assert parse_positive_decimal_int(100, field_name="batch") == 100
+    assert parse_positive_decimal_int("100", field_name="batch") == 100
+    for value in (True, False, 0, -1, 1.0, "1.0", "01", "+1", " 1", "1 ", "1e2", "", None, "0"):
+        with pytest.raises(RepositoryError, match="positive integer"):
+            parse_positive_decimal_int(value, field_name="batch")
 
 
 def test_sqlite_storage_class_rejects_real_integers(tmp_path: Path) -> None:

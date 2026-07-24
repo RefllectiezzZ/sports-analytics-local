@@ -193,6 +193,14 @@ deterministic and cover:
 - post-checkpoint lease-loss races that must prevent success, retry, or failure
   finalization;
 - occupied-worker claims where `worker_instances.current_job_id` is already set;
+- heartbeat assignment bypasses (ordinary heartbeat must not assign, replace, or
+  clear `current_job_id`; reciprocal lease triggers reject invalid direct SQL);
+- signal arrival while the active-context lock is already held (handler only sets
+  an Event and must return without blocking);
+- supervisor reuse across sequential runs, exceptional child cleanup, and
+  cleanup failures that preserve the primary exception;
+- very large finite duration values and non-canonical `recovery_batch_size`
+  inputs rejected as project-specific configuration/repository errors;
 - Windows supervision using a new process group and `CTRL_BREAK_EVENT`;
 - migration upgrade corruption cases, especially legacy v1 `running` jobs that
   lack a complete lease and must roll back atomically.

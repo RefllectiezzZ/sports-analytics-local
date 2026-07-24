@@ -98,6 +98,17 @@ considered occupied and cannot claim another job.
 The database also enforces a unique current-job association: at most one
 `worker_instances` row may reference a given non-NULL `current_job_id`.
 
+Queue operations are the exclusive owner of `current_job_id`. Ordinary worker
+heartbeats update only `heartbeat_at` and the worker version; they cannot assign,
+replace, or clear the current-job pointer. Claim, success/failure finalization,
+expired-lease recovery, and terminal worker transitions remain the only paths
+that change the association. The database also rejects any non-NULL
+`current_job_id` that does not point at a matching `jobs` row that is `running`,
+leased by that worker (`lease_owner = worker.id`), and has a non-NULL
+`lease_expires_at`. Clearing `current_job_id` to NULL remains allowed so worker
+failure, shutdown interruption, and recovery can detach the worker while leaving
+the job lease for later recovery.
+
 ## Lease ownership
 
 Lease duration uses `worker.stale_job_timeout_seconds`.
@@ -129,7 +140,16 @@ thread. Ordinary renewals:
 - extend `lease_expires_at`;
 - update job `updated_at` and worker `heartbeat_at`;
 - do **not** increment the job lifecycle version;
-- do **not** append job events.
+- do **not** append job events;
+- do **not** change `current_job_id`.
+
+Idle `heartbeat_worker` calls likewise preserve `current_job_id` exactly.
+
+Installed worker signal handlers (`SIGINT`, `SIGTERM`, and `SIGBREAK` when
+available) only set a `threading.Event`. They must not log, acquire locks, touch
+SQLite, or mutate `JobExecutionContext`. Stop propagation into the active
+execution context happens outside the signal callback via the heartbeat
+controller's `should_stop` path and the normal worker loop.
 
 Lifecycle version changes occur on claim, retry, recovery, cancellation, success,
 and terminal failure.
@@ -269,13 +289,23 @@ python run_local.py --worker-id <uuid>
 
 Behaviour:
 
-- validates configuration and ensures the operational database is ready;
+- bootstraps via `bootstrap_runtime("run_local", ...)` (validated settings, paths,
+  logging, and an up-to-date database);
 - starts `worker.py` with `sys.executable` and an absolute script path;
 - never uses `shell=True`;
 - forwards only validated config/env paths and worker flags;
 - propagates the child exit code;
-- requests platform-specific child shutdown on SIGINT/SIGTERM/SIGBREAK and kills
-  only after `shutdown_grace_seconds`.
+- parent signal handlers only set a `threading.Event`; process operations run in
+  the supervisor loop;
+- requests platform-specific child shutdown on SIGINT/SIGTERM/SIGBREAK exactly
+  once per run and kills only after `shutdown_grace_seconds`;
+- resets per-run graceful-stop state so the same `LocalSupervisor` instance can
+  safely supervise sequential children;
+- guarantees bounded child cleanup on unexpected wait/signal errors and on
+  parent `KeyboardInterrupt` / `SystemExit`, without replacing an already-active
+  primary exception;
+- wraps child-start `OSError` as `WorkerError` so the CLI returns exit code 2
+  without a traceback.
 
 On POSIX platforms the graceful stop request is `SIGTERM` via
 `Popen.terminate()`. On Windows, `run_local.py` starts the worker in a new
@@ -287,9 +317,13 @@ launched now.
 
 ## Timing validation
 
-Worker timing settings are strict finite positive numbers. `NaN`, positive or
-negative infinity, booleans, zero, and negative values are rejected for polling,
-heartbeat, stale-job timeout, retry backoff, and shutdown grace settings.
+Worker timing settings are strict positive finite durations. `NaN`, positive or
+negative infinity, booleans, zero, negative values, and values above the
+documented maximum supported duration (`MAX_DURATION_SECONDS`, 30 days) are
+rejected for polling, heartbeat, stale-job timeout, retry backoff, and shutdown
+grace settings. Repository lease durations, stale thresholds, heartbeat
+intervals, and wait/join timeouts use the same representable-duration rules so
+`timedelta` and wait APIs cannot overflow.
 
 ## Migration 0002 upgrade preflight
 

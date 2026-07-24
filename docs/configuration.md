@@ -148,13 +148,21 @@ backoff, and process shutdown:
 
 Validation relationships:
 
-- all worker timing settings must be positive finite numbers: `NaN`, positive or
-  negative infinity, booleans, zero, and negative values are rejected;
+- all worker timing settings must be positive finite representable durations:
+  `NaN`, positive or negative infinity, booleans, zero, negative values, and
+  values above the maximum supported duration (30 days /
+  `MAX_DURATION_SECONDS`) are rejected before filesystem, logging, random,
+  database, worker, or subprocess side effects;
 - `stale_job_timeout_seconds` must be greater than
   `heartbeat_interval_seconds`;
 - `retry_backoff_max_seconds` must be greater than or equal to
   `retry_backoff_base_seconds`;
-- `recovery_batch_size` must be a positive integer and not a boolean.
+- `recovery_batch_size` must be a strict positive integer: real `int` values
+  greater than zero, or canonical decimal digit strings matching
+  `^[1-9][0-9]*$`. Booleans, floats (including `1.0`), scientific notation,
+  signed forms, whitespace padding, leading zeros, empty strings, zero, and
+  negatives are rejected. Accepted values are normalized to `int` before field
+  validation.
 
 Retry scheduling is deterministic and has no jitter:
 

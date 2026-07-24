@@ -555,3 +555,55 @@ def test_concurrent_claim_fences_single_job_to_one_worker(tmp_path: Path) -> Non
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
     ) == 1
     assert [job_id for _worker_id, job_id in claimed].count(None) == 1
+
+
+def test_duration_arguments_reject_overflow_and_unusable_values(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
+            _register_running_worker(connection)
+            with pytest.raises(RepositoryError):
+                queue.claim_next_job(
+                    worker_id=WORKER_ID,
+                    claimed_at=FIXED,
+                    lease_duration_seconds=10**10000,
+                    actor=WORKER_ID,
+                )
+            with pytest.raises(RepositoryError):
+                queue.claim_next_job(
+                    worker_id=WORKER_ID,
+                    claimed_at=FIXED,
+                    lease_duration_seconds=float("1e308"),
+                    actor=WORKER_ID,
+                )
+            with pytest.raises(RepositoryError):
+                queue.get_queue_status(
+                    now=FIXED,
+                    stale_worker_threshold_seconds=60 * 60 * 24 * 40,
+                )
+            with pytest.raises(RepositoryError, match="retry_backoff"):
+                queue.recover_expired_leases(
+                    recovered_at=FIXED,
+                    actor=WORKER_ID,
+                    retry_backoff_base_seconds=float("nan"),
+                    retry_backoff_max_seconds=1,
+                    maximum_rows=10,
+                )
+            with pytest.raises(RepositoryError, match="retry_backoff"):
+                queue.recover_expired_leases(
+                    recovered_at=FIXED,
+                    actor=WORKER_ID,
+                    retry_backoff_base_seconds=10,
+                    retry_backoff_max_seconds=1,
+                    maximum_rows=10,
+                )
+            empty = queue.recover_expired_leases(
+                recovered_at=FIXED,
+                actor=WORKER_ID,
+                retry_backoff_base_seconds=1,
+                retry_backoff_max_seconds=1,
+                maximum_rows=10,
+            )
+            assert empty.scanned_count == 0

@@ -40,4 +40,6 @@ EXPECTED_INDEXES: Final[tuple[str, ...]] = (
 EXPECTED_TRIGGERS: Final[tuple[str, ...]] = (
     "trg_jobs_running_lease_insert",
     "trg_jobs_running_lease_update",
+    "trg_worker_instances_current_job_insert",
+    "trg_worker_instances_current_job_update",
 )

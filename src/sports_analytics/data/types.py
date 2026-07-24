@@ -7,11 +7,22 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from math import isfinite
 from pathlib import Path, PurePosixPath
 from typing import Final
 
 from sports_analytics.core.exceptions import RepositoryError
+from sports_analytics.core.validation import (
+    MAX_DURATION_SECONDS as MAX_DURATION_SECONDS,
+)
+from sports_analytics.core.validation import (
+    parse_positive_decimal_int as parse_positive_decimal_int,
+)
+from sports_analytics.core.validation import (
+    validate_positive_duration_seconds as validate_positive_duration_seconds,
+)
+from sports_analytics.core.validation import (
+    validate_positive_finite_number as validate_positive_finite_number,
+)
 
 JsonPrimitive = None | bool | int | float | str
 JsonValue = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
@@ -241,18 +252,6 @@ def validate_strict_int(
         msg = f"{field_name} must be <= {maximum}"
         raise RepositoryError(msg)
     return value
-
-
-def validate_positive_finite_number(value: object, *, field_name: str) -> float:
-    """Require a strict positive finite number (reject bool, NaN, and infinities)."""
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        msg = f"{field_name} must be a positive finite number"
-        raise RepositoryError(msg)
-    number = float(value)
-    if not isfinite(number) or number <= 0:
-        msg = f"{field_name} must be a positive finite number"
-        raise RepositoryError(msg)
-    return number
 
 
 def validate_relative_snapshot_path(value: str) -> str:

@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from sports_analytics.core.exceptions import DatabaseIntegrityError, RepositoryError
+from sports_analytics.core.exceptions import DatabaseIntegrityError, JobLeaseError, RepositoryError
+from sports_analytics.data.codec import format_utc_timestamp
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.migrations import ensure_database_ready
+from sports_analytics.data.repositories.job_queue import JobQueueRepository
 from sports_analytics.data.repositories.jobs import JobRepository
 from sports_analytics.data.repositories.workers import WorkerRepository
+from sports_analytics.data.types import JobStatus
 from sports_analytics.jobs.types import WorkerStatus
 
 FIXED = datetime(2026, 7, 24, 19, 30, 0, tzinfo=UTC)
 WORKER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+SECOND_WORKER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
 JOB_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+SECOND_JOB_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab"
 
 
 def _register(
@@ -87,13 +93,14 @@ def test_register_requires_transaction_and_valid_fields(tmp_path: Path) -> None:
                 )
 
 
-def test_lifecycle_heartbeat_stop_and_fail(tmp_path: Path) -> None:
+def test_lifecycle_heartbeat_preserves_current_job_and_stop_clears(tmp_path: Path) -> None:
     db = tmp_path / "ops.sqlite3"
     ensure_database_ready(db)
     with connect_database(db) as connection:
         workers = WorkerRepository(connection)
         jobs = JobRepository(connection)
-        with transaction(connection):
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
             worker = _register(workers)
             running = workers.mark_worker_running(
                 worker.id,
@@ -102,7 +109,7 @@ def test_lifecycle_heartbeat_stop_and_fail(tmp_path: Path) -> None:
             )
             assert running.status is WorkerStatus.RUNNING
             assert running.version == 2
-            job = jobs.create_job(
+            jobs.create_job(
                 job_id=JOB_ID,
                 job_type="demo.job",
                 payload={},
@@ -110,24 +117,35 @@ def test_lifecycle_heartbeat_stop_and_fail(tmp_path: Path) -> None:
                 actor="cli",
                 created_at=FIXED,
             )
-            heartbeat = workers.heartbeat_worker(
-                running.id,
-                expected_version=running.version,
-                heartbeat_at=FIXED + timedelta(seconds=2),
-                current_job_id=job.id,
+            claim = queue.claim_next_job(
+                worker_id=running.id,
+                claimed_at=FIXED + timedelta(seconds=2),
+                lease_duration_seconds=30,
+                actor="cli",
             )
-            assert heartbeat.current_job_id == job.id
-            assert heartbeat.version == 3
+            assert claim is not None
+            occupied = workers.get_worker(running.id)
+            assert occupied is not None
+            assert occupied.current_job_id == JOB_ID
+            heartbeat = workers.heartbeat_worker(
+                occupied.id,
+                expected_version=occupied.version,
+                heartbeat_at=FIXED + timedelta(seconds=3),
+            )
+            assert heartbeat.current_job_id == JOB_ID
+            assert heartbeat.heartbeat_at == FIXED + timedelta(seconds=3)
+            assert heartbeat.version == occupied.version + 1
             stopping = workers.mark_worker_stopping(
                 heartbeat.id,
                 expected_version=heartbeat.version,
-                stopping_at=FIXED + timedelta(seconds=3),
+                stopping_at=FIXED + timedelta(seconds=4),
             )
             assert stopping.status is WorkerStatus.STOPPING
+            assert stopping.current_job_id == JOB_ID
             stopped = workers.mark_worker_stopped(
                 stopping.id,
                 expected_version=stopping.version,
-                stopped_at=FIXED + timedelta(seconds=4),
+                stopped_at=FIXED + timedelta(seconds=5),
                 shutdown_note="clean shutdown",
             )
             assert stopped.status is WorkerStatus.STOPPED
@@ -137,12 +155,35 @@ def test_lifecycle_heartbeat_stop_and_fail(tmp_path: Path) -> None:
                 workers.mark_worker_failed(
                     stopped.id,
                     expected_version=stopped.version,
-                    stopped_at=FIXED + timedelta(seconds=5),
+                    stopped_at=FIXED + timedelta(seconds=6),
                     error="too late",
                 )
 
 
-def test_optimistic_version_and_clear_current_job(tmp_path: Path) -> None:
+def test_heartbeat_worker_rejects_assignment_bypass_kwargs(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        repository = WorkerRepository(connection)
+        with transaction(connection):
+            worker = _register(repository, status=WorkerStatus.RUNNING)
+            with pytest.raises(TypeError):
+                repository.heartbeat_worker(
+                    worker.id,
+                    expected_version=worker.version,
+                    heartbeat_at=FIXED + timedelta(seconds=1),
+                    current_job_id=JOB_ID,  # type: ignore[call-arg]
+                )
+            with pytest.raises(TypeError):
+                repository.heartbeat_worker(
+                    worker.id,
+                    expected_version=worker.version,
+                    heartbeat_at=FIXED + timedelta(seconds=1),
+                    clear_current_job=True,  # type: ignore[call-arg]
+                )
+
+
+def test_optimistic_version_mismatch_on_heartbeat(tmp_path: Path) -> None:
     db = tmp_path / "ops.sqlite3"
     ensure_database_ready(db)
     with connect_database(db) as connection:
@@ -155,14 +196,213 @@ def test_optimistic_version_and_clear_current_job(tmp_path: Path) -> None:
                     expected_version=worker.version + 1,
                     heartbeat_at=FIXED + timedelta(seconds=1),
                 )
-            with pytest.raises(RepositoryError, match="clear_current_job"):
-                repository.heartbeat_worker(
-                    worker.id,
-                    expected_version=worker.version,
-                    heartbeat_at=FIXED + timedelta(seconds=1),
-                    current_job_id=JOB_ID,
-                    clear_current_job=True,
+
+
+def test_heartbeat_cannot_assign_replace_or_clear_and_second_claim_stays_impossible(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        workers = WorkerRepository(connection)
+        jobs = JobRepository(connection)
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
+            worker = _register(workers, status=WorkerStatus.RUNNING)
+            jobs.create_job(
+                job_id=JOB_ID,
+                job_type="demo.job",
+                payload={},
+                maximum_attempts=2,
+                actor="cli",
+                created_at=FIXED,
+            )
+            jobs.create_job(
+                job_id=SECOND_JOB_ID,
+                job_type="demo.job",
+                payload={},
+                maximum_attempts=2,
+                actor="cli",
+                created_at=FIXED,
+            )
+            idle = workers.heartbeat_worker(
+                worker.id,
+                expected_version=worker.version,
+                heartbeat_at=FIXED + timedelta(seconds=1),
+            )
+            assert idle.current_job_id is None
+            claim = queue.claim_next_job(
+                worker_id=worker.id,
+                claimed_at=FIXED + timedelta(seconds=2),
+                lease_duration_seconds=60,
+                actor="cli",
+            )
+            assert claim is not None
+
+        with transaction(connection, immediate=True):
+            occupied = workers.get_worker(worker.id)
+            assert occupied is not None and occupied.current_job_id == JOB_ID
+            preserved = workers.heartbeat_worker(
+                occupied.id,
+                expected_version=occupied.version,
+                heartbeat_at=FIXED + timedelta(seconds=3),
+            )
+            assert preserved.current_job_id == JOB_ID
+            assert preserved.heartbeat_at == FIXED + timedelta(seconds=3)
+
+        with pytest.raises(sqlite3.IntegrityError, match="matching running lease"):
+            with transaction(connection, immediate=True):
+                connection.execute(
+                    "UPDATE worker_instances SET current_job_id = ? WHERE id = ?",
+                    (SECOND_JOB_ID, worker.id),
                 )
+
+        with transaction(connection, immediate=True):
+            refreshed = workers.get_worker(worker.id)
+            assert refreshed is not None and refreshed.current_job_id == JOB_ID
+            with pytest.raises(JobLeaseError, match="already has current_job_id"):
+                queue.claim_next_job(
+                    worker_id=worker.id,
+                    claimed_at=FIXED + timedelta(seconds=4),
+                    lease_duration_seconds=60,
+                    actor="cli",
+                )
+            second = jobs.get_job(SECOND_JOB_ID)
+            assert second is not None
+            assert second.status is JobStatus.PENDING
+            assert second.attempts == 0
+
+
+def test_direct_sql_current_job_requires_matching_running_lease(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        workers = WorkerRepository(connection)
+        jobs = JobRepository(connection)
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
+            owner = _register(workers, worker_id=WORKER_ID, status=WorkerStatus.RUNNING)
+            other = _register(
+                workers,
+                worker_id=SECOND_WORKER_ID,
+                status=WorkerStatus.RUNNING,
+            )
+            jobs.create_job(
+                job_id=JOB_ID,
+                job_type="demo.job",
+                payload={},
+                maximum_attempts=1,
+                actor="cli",
+                created_at=FIXED,
+            )
+
+        with pytest.raises(sqlite3.IntegrityError, match="matching running lease"):
+            with transaction(connection, immediate=True):
+                connection.execute(
+                    "UPDATE worker_instances SET current_job_id = ? WHERE id = ?",
+                    (JOB_ID, owner.id),
+                )
+
+        with transaction(connection, immediate=True):
+            claim = queue.claim_next_job(
+                worker_id=owner.id,
+                claimed_at=FIXED + timedelta(seconds=1),
+                lease_duration_seconds=30,
+                actor="cli",
+            )
+            assert claim is not None
+
+        with pytest.raises(sqlite3.IntegrityError, match="matching running lease"):
+            with transaction(connection, immediate=True):
+                connection.execute(
+                    "UPDATE worker_instances SET current_job_id = ? WHERE id = ?",
+                    (JOB_ID, other.id),
+                )
+
+        with transaction(connection, immediate=True):
+            owner_now = workers.get_worker(owner.id)
+            assert owner_now is not None and owner_now.current_job_id == JOB_ID
+            queue.complete_claimed_job(
+                job_id=JOB_ID,
+                worker_id=owner.id,
+                expected_job_version=claim.job.version,
+                completed_at=FIXED + timedelta(seconds=2),
+                result={},
+                actor="cli",
+            )
+            cleared = workers.get_worker(owner.id)
+            assert cleared is not None and cleared.current_job_id is None
+
+
+def test_worker_failure_and_recovery_clear_current_job(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        workers = WorkerRepository(connection)
+        jobs = JobRepository(connection)
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
+            worker = _register(workers, status=WorkerStatus.RUNNING)
+            jobs.create_job(
+                job_id=JOB_ID,
+                job_type="demo.job",
+                payload={},
+                maximum_attempts=2,
+                actor="cli",
+                created_at=FIXED,
+            )
+            claim = queue.claim_next_job(
+                worker_id=worker.id,
+                claimed_at=FIXED,
+                lease_duration_seconds=10,
+                actor="cli",
+            )
+            assert claim is not None
+            occupied = workers.get_worker(worker.id)
+            assert occupied is not None
+            failed = workers.mark_worker_failed(
+                worker.id,
+                expected_version=occupied.version,
+                stopped_at=FIXED + timedelta(seconds=1),
+                error="boom",
+            )
+            assert failed.current_job_id is None
+            assert failed.status is WorkerStatus.FAILED
+
+            worker2 = _register(
+                workers,
+                worker_id=SECOND_WORKER_ID,
+                status=WorkerStatus.RUNNING,
+            )
+            jobs.create_job(
+                job_id=SECOND_JOB_ID,
+                job_type="demo.job",
+                payload={},
+                maximum_attempts=2,
+                actor="cli",
+                created_at=FIXED,
+            )
+            claim2 = queue.claim_next_job(
+                worker_id=worker2.id,
+                claimed_at=FIXED,
+                lease_duration_seconds=10,
+                actor="cli",
+            )
+            assert claim2 is not None
+            connection.execute(
+                "UPDATE jobs SET lease_expires_at = ? WHERE id = ?",
+                (format_utc_timestamp(FIXED - timedelta(seconds=1)), SECOND_JOB_ID),
+            )
+            result = queue.recover_expired_leases(
+                recovered_at=FIXED,
+                actor="recovery",
+                retry_backoff_base_seconds=1,
+                retry_backoff_max_seconds=1,
+                maximum_rows=10,
+            )
+            assert result.requeued_count == 1
+            cleared = workers.get_worker(worker2.id)
+            assert cleared is not None and cleared.current_job_id is None
 
 
 def test_reconcile_stale_workers_marks_running_and_stopping_failed(tmp_path: Path) -> None:

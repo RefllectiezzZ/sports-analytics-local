@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from sports_analytics.core.exceptions import RepositoryError, WorkerError
-from sports_analytics.data.types import validate_positive_finite_number
+from sports_analytics.data.types import validate_positive_duration_seconds
 
 
 def compute_retry_delay_seconds(
@@ -30,8 +30,8 @@ def compute_retry_delay_seconds(
         msg = "attempts must be >= 1"
         raise WorkerError(msg)
     try:
-        base = validate_positive_finite_number(base_seconds, field_name="base_seconds")
-        maximum = validate_positive_finite_number(max_seconds, field_name="max_seconds")
+        base = validate_positive_duration_seconds(base_seconds, field_name="base_seconds")
+        maximum = validate_positive_duration_seconds(max_seconds, field_name="max_seconds")
     except RepositoryError as exc:
         raise WorkerError(str(exc)) from exc
     if maximum < base:
@@ -64,4 +64,8 @@ def compute_retry_available_at(
         base_seconds=base_seconds,
         max_seconds=max_seconds,
     )
-    return failed_at + timedelta(seconds=delay)
+    try:
+        return failed_at + timedelta(seconds=delay)
+    except OverflowError as exc:
+        msg = "retry available_at overflow for the computed delay"
+        raise RepositoryError(msg) from exc

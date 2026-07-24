@@ -22,7 +22,7 @@ from sports_analytics.data.types import (
     validate_identifier,
     validate_limit_offset,
     validate_plain_text,
-    validate_positive_finite_number,
+    validate_positive_duration_seconds,
     validate_strict_int,
 )
 from sports_analytics.jobs.errors import sanitize_error_text
@@ -143,10 +143,13 @@ class WorkerRepository:
         *,
         expected_version: int,
         heartbeat_at: datetime,
-        current_job_id: str | uuid.UUID | None = None,
-        clear_current_job: bool = False,
     ) -> WorkerRecord:
-        """Update heartbeat for a starting, running, or stopping worker."""
+        """Update heartbeat for a starting, running, or stopping worker.
+
+        Preserves ``current_job_id`` exactly. Queue claim, finalization, recovery,
+        and terminal worker transitions are the only operations allowed to change
+        the current-job association.
+        """
         require_active_transaction(self._connection, operation="WorkerRepository.heartbeat_worker")
         expected_version = validate_strict_int(
             expected_version,
@@ -155,9 +158,6 @@ class WorkerRepository:
         )
         if heartbeat_at.tzinfo is None:
             msg = "heartbeat_at must be timezone-aware"
-            raise RepositoryError(msg)
-        if clear_current_job and current_job_id is not None:
-            msg = "clear_current_job cannot be combined with current_job_id"
             raise RepositoryError(msg)
         normalized_id = normalize_uuid(worker_id)
         worker = self.get_worker(normalized_id)
@@ -173,25 +173,17 @@ class WorkerRepository:
                 f"found version={worker.version}"
             )
             raise DatabaseIntegrityError(msg)
-        if clear_current_job:
-            job_id_value: str | None = None
-        elif current_job_id is not None:
-            job_id_value = normalize_uuid(current_job_id)
-        else:
-            job_id_value = worker.current_job_id
         new_version = worker.version + 1
         try:
             cursor = self._connection.execute(
                 f"""
                 UPDATE {WORKER_INSTANCES_TABLE}
                 SET heartbeat_at = ?,
-                    current_job_id = ?,
                     version = ?
                 WHERE id = ? AND version = ? AND status IN ('starting', 'running', 'stopping')
                 """,
                 (
                     format_utc_timestamp(heartbeat_at),
-                    job_id_value,
                     new_version,
                     normalized_id,
                     expected_version,
@@ -391,7 +383,7 @@ class WorkerRepository:
         if now.tzinfo is None:
             msg = "now must be timezone-aware"
             raise RepositoryError(msg)
-        stale_threshold_seconds = validate_positive_finite_number(
+        stale_threshold_seconds = validate_positive_duration_seconds(
             stale_threshold_seconds,
             field_name="stale_threshold_seconds",
         )
