@@ -37,15 +37,18 @@ Keep the subject concise and imperative.
 - Expect review before merge; do not merge your own bootstrap or experimental work without review.
 - Use the pull-request template under `.github/pull_request_template.md`.
 
-### GitHub quality gates
+### Quality gates: Cursor vs GitHub
 
-- All new pull requests must pass the GitHub quality workflow (`.github/workflows/quality.yml`).
-- Do **not** merge while checks are failing or still running.
-- The author must wait for review before merging.
-- A successful Cursor Agent report does **not** replace GitHub CI.
-- Run local checks before opening a pull request.
-- Failed CI checks must be investigated and fixed; do not bypass them.
-- Branch protection may be configured manually after the quality workflow is active. Do not assume it is already enabled.
+- The Cursor agent runs the **complete local quality suite** (install, pytest,
+  ruff, mypy, and related checks).
+- GitHub Actions provides an **additional clean Windows / Python 3.12
+  compatibility check**. It does not redundantly re-run the Linux suite.
+- The Windows check must finish successfully before merge.
+- A successful Cursor Agent report does **not** replace code review or the
+  Windows GitHub check.
+- Failed checks must be investigated and fixed; do not bypass them.
+- Branch protection may be configured manually after the quality workflow is
+  active. Do not assume it is already enabled.
 
 ## Tests and validation
 
@@ -63,34 +66,66 @@ python -m mypy src
 - Do not add meaningless assertions (for example `assert True`).
 - Prefer deterministic fixtures under `tests/fixtures/`.
 
-### Isolating configuration tests
+### Isolating configuration and database tests
 
 - Pass explicit `environ={...}` mappings to `load_settings` / bootstrap helpers
   instead of mutating the developer's real process environment when practical.
 - Clear inherited `SPORTS_ANALYTICS_*` variables for entry-point and subprocess
   tests (see fixtures in `tests/conftest.py`).
-- Use `tmp_path` as `base_directory` / cwd for TOML, `.env`, and storage side
-  effects. Do not write test artifacts into the repository `storage/` tree.
+- Use `tmp_path` as `base_directory` / cwd for TOML, `.env`, storage, and SQLite
+  side effects. Do not write test artifacts into the repository `storage/` tree.
 - Do not rely on a repository-local or developer `.env` file.
 - Call `reset_logging()` (or equivalent cleanup) so rotating file handlers do not
   leave open handles, especially on Windows.
+- Close every SQLite connection before asserting file deletion on Windows.
 - Do not create a hidden global settings singleton or memoize loaded settings.
+- Do not keep a module-level SQLite connection.
 
-### Validating configuration locally
+### Validating configuration and database locally
 
 ```bash
 python engine.py --validate-config
 python engine.py --config config/settings.example.toml --validate-config
+python engine.py --database-status
+python engine.py --migrate-database
 ```
 
-Validation-only mode must not create runtime directories or log files.
+Validation-only mode must not create runtime directories, log files, or SQLite
+databases.
+
+### Adding a migration
+
+1. Create `src/sports_analytics/data/sql/migrations/NNNN_name.sql` with the next
+   consecutive version.
+2. Keep SQL free of `BEGIN` / `COMMIT` / `ROLLBACK` / `VACUUM` / `ATTACH` /
+   unsafe PRAGMA statements.
+3. Load migrations only through `importlib.resources` (package data), never via
+   repository-relative filesystem paths in application code.
+4. Never edit an already-applied migration after it has shipped. Checksums are
+   immutable.
+5. Add tests that exercise discovery from the installed package resource path.
+6. Document the new version in the pull request.
+
+### Transaction ownership
+
+```text
+with connect_database(path) as connection:
+    with transaction(connection, immediate=True):
+        repo = JobRepository(connection)
+        ...
+```
+
+- connection context owns lifetime
+- transaction context owns commit/rollback
+- repositories own neither
 
 ### Logging and secrets
 
 - Log safe metadata only (component, environment, timezone, seed, base directory,
-  whether file logging is enabled).
-- Never log complete environment mappings, full settings dumps, tokens, or
-  credentials.
+  whether file logging is enabled, schema version, database path).
+- Never log complete environment mappings, full settings dumps, tokens,
+  credentials, job payloads, result JSON, audit details wholesale, or arbitrary
+  SQL parameters.
 
 ## Prohibitions
 

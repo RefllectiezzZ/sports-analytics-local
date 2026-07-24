@@ -13,10 +13,15 @@ from typing import Any, Final
 
 import numpy as np
 
-from sports_analytics.core.exceptions import ConfigurationError
+from sports_analytics.core.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    RuntimeBootstrapError,
+)
 from sports_analytics.core.logging import configure_logging, get_component_logger
 from sports_analytics.core.paths import RuntimePaths, create_runtime_directories, resolve_paths
 from sports_analytics.core.settings import Settings, load_settings
+from sports_analytics.data.service import initialize_operational_database
 
 _COMPONENT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
@@ -30,6 +35,8 @@ class RuntimeContext:
     paths: RuntimePaths
     started_at: datetime
     logger: Logger
+    database_path: Path
+    schema_version: int
 
 
 def validate_component_name(component: str) -> str:
@@ -62,7 +69,7 @@ def bootstrap_runtime(
     overrides: Mapping[str, Any] | None = None,
     base_directory: Path | str | None = None,
 ) -> RuntimeContext:
-    """Load settings, prepare local runtime directories, and configure logging."""
+    """Load settings, prepare local runtime directories, migrate SQLite, and configure logging."""
     component_name = validate_component_name(component)
     base_dir = Path(base_directory) if base_directory is not None else Path.cwd()
 
@@ -78,16 +85,25 @@ def bootstrap_runtime(
     seed_deterministic_generators(settings.application.deterministic_seed)
     configure_logging(settings.logging, logs_directory=paths.logs_directory)
     logger = get_component_logger(component_name)
+
+    try:
+        readiness = initialize_operational_database(paths)
+    except DatabaseError as exc:
+        msg = f"database initialization failed for {paths.sqlite_path}: {exc}"
+        raise RuntimeBootstrapError(msg) from exc
+
     started_at = datetime.now(tz=UTC)
     logger.info(
         "runtime bootstrap complete component=%s environment=%s timezone=%s "
-        "seed=%s base_directory=%s file_logging=%s",
+        "seed=%s base_directory=%s file_logging=%s schema_version=%s database_path=%s",
         component_name,
         settings.application.environment,
         settings.application.timezone,
         settings.application.deterministic_seed,
         paths.base_directory,
         settings.logging.file_enabled,
+        readiness.schema_version,
+        readiness.database_path,
     )
     return RuntimeContext(
         component=component_name,
@@ -95,6 +111,8 @@ def bootstrap_runtime(
         paths=paths,
         started_at=started_at,
         logger=logger,
+        database_path=readiness.database_path,
+        schema_version=readiness.schema_version,
     )
 
 
@@ -108,8 +126,8 @@ def validate_configuration(
 ) -> tuple[Settings, RuntimePaths]:
     """Validate settings and resolve paths without runtime side effects.
 
-    Does not create directories, configure persistent logging handlers, or seed
-    global random generators.
+    Does not create directories, configure persistent logging handlers, seed
+    global random generators, create a SQLite file, or apply migrations.
     """
     base_dir = Path(base_directory) if base_directory is not None else Path.cwd()
     try:

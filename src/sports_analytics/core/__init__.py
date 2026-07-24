@@ -2,6 +2,11 @@
 
 from sports_analytics.core.exceptions import (
     ConfigurationError,
+    DatabaseConnectionError,
+    DatabaseError,
+    DatabaseIntegrityError,
+    DatabaseMigrationError,
+    RepositoryError,
     RuntimeBootstrapError,
     SportsAnalyticsError,
 )
@@ -10,6 +15,11 @@ from sports_analytics.core.settings import Settings, load_settings
 
 __all__ = [
     "ConfigurationError",
+    "DatabaseConnectionError",
+    "DatabaseError",
+    "DatabaseIntegrityError",
+    "DatabaseMigrationError",
+    "RepositoryError",
     "RuntimeBootstrapError",
     "RuntimeContext",
     "Settings",

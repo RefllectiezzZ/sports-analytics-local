@@ -95,7 +95,7 @@ def test_normal_placeholder_execution(
     captured = capsys.readouterr()
     assert "not implemented" in captured.out.lower()
     assert (isolated_cwd / "storage").is_dir()
-    assert not (isolated_cwd / "storage" / "operational.sqlite3").exists()
+    assert (isolated_cwd / "storage" / "operational.sqlite3").is_file()
     reset_logging()
 
 

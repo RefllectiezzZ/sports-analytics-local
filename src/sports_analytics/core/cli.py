@@ -7,12 +7,22 @@ import sys
 from collections.abc import Sequence
 from typing import Final
 
-from sports_analytics.core.exceptions import ConfigurationError, RuntimeBootstrapError
+from sports_analytics.core.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    RuntimeBootstrapError,
+)
 from sports_analytics.core.runtime import (
     bootstrap_runtime,
     format_validation_success,
     validate_component_name,
     validate_configuration,
+)
+from sports_analytics.data.cli import (
+    format_migration_result,
+    format_status_or_raise,
+    inspect_database_status,
+    migrate_database,
 )
 
 SUCCESS_EXIT: Final[int] = 0
@@ -44,13 +54,32 @@ def build_argument_parser(component: str, description: str) -> argparse.Argument
         default=None,
         help="Explicit .env file path.",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--validate-config",
         dest="validate_config",
         action="store_true",
         help=(
             "Validate and resolve configuration without creating directories, "
-            "log files, or seeding global random state."
+            "log files, databases, or seeding global random state."
+        ),
+    )
+    mode.add_argument(
+        "--database-status",
+        dest="database_status",
+        action="store_true",
+        help=(
+            "Inspect an existing SQLite database read-only without creating "
+            "directories, applying migrations, or configuring file logging."
+        ),
+    )
+    mode.add_argument(
+        "--migrate-database",
+        dest="migrate_database",
+        action="store_true",
+        help=(
+            "Create the SQLite parent directory if needed and apply pending "
+            "migrations without starting workers or business workflows."
         ),
     )
     return parser
@@ -61,10 +90,10 @@ def run_component(
     description: str,
     argv: Sequence[str] | None = None,
 ) -> int:
-    """Parse CLI arguments and run validation or placeholder bootstrap.
+    """Parse CLI arguments and run validation, database, or placeholder bootstrap.
 
-    Returns ``0`` on success and ``2`` for expected configuration or bootstrap
-    errors. Unexpected programming errors propagate with their traceback.
+    Returns ``0`` on success and ``2`` for expected configuration, database, or
+    bootstrap errors. Unexpected programming errors propagate with their traceback.
     """
     parser = build_argument_parser(component, description)
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -79,6 +108,26 @@ def run_component(
             print(format_validation_success(settings, paths))
             return SUCCESS_EXIT
 
+        if args.database_status:
+            settings, paths = validate_configuration(
+                config_path=args.config,
+                env_file=args.env_file,
+            )
+            status = inspect_database_status(settings, paths)
+            print(format_status_or_raise(status))
+            if not status.is_up_to_date:
+                return CONFIG_ERROR_EXIT
+            return SUCCESS_EXIT
+
+        if args.migrate_database:
+            settings, paths = validate_configuration(
+                config_path=args.config,
+                env_file=args.env_file,
+            )
+            result = migrate_database(settings, paths)
+            print(format_migration_result(result))
+            return SUCCESS_EXIT
+
         context = bootstrap_runtime(
             component_name,
             config_path=args.config,
@@ -91,6 +140,6 @@ def run_component(
         context.logger.info("%s", message)
         print(f"{component}.py: {message}")
         return SUCCESS_EXIT
-    except (ConfigurationError, RuntimeBootstrapError) as exc:
+    except (ConfigurationError, RuntimeBootstrapError, DatabaseError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return CONFIG_ERROR_EXIT

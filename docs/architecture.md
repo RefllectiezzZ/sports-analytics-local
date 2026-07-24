@@ -3,8 +3,9 @@
 This document describes the architecture for `sports-analytics-local`.
 
 The repository currently provides packaging, typed configuration, local runtime
-bootstrap, placeholders, documentation, and quality tooling. Sports analytics
-business logic is **not** implemented yet.
+bootstrap, SQLite operational persistence, migrations, placeholders,
+documentation, and quality tooling. Sports analytics business logic is **not**
+implemented yet.
 
 ## Entry points
 
@@ -16,9 +17,10 @@ business logic is **not** implemented yet.
 | `worker.py` | Executes background jobs outside the Streamlit process. |
 | `run_local.py` | Coordinates local startup of the processes needed for localhost operation. |
 
-Each root script now bootstraps a shared local runtime (or validates
-configuration via `--validate-config`) and then reports that its business
-functionality is not implemented.
+Each root script bootstraps a shared local runtime, validates configuration via
+`--validate-config`, inspects the database via `--database-status`, or applies
+migrations via `--migrate-database`, then reports that business functionality is
+not implemented.
 
 ## Configuration boundary
 
@@ -38,20 +40,48 @@ See [configuration.md](configuration.md) for the full configuration reference.
 - Pure path resolution (`resolve_paths`) converts configured paths into absolute
   `RuntimePaths` against an explicit base directory.
 - Directory creation (`create_runtime_directories`) is a separate side effect and
-  is idempotent. It never creates the SQLite database file.
+  is idempotent. It never creates the SQLite database file itself.
 - Relative paths resolve against the supplied base directory, not against an
   imported module location. Absolute paths remain absolute.
 
 ## Runtime context
 
 `bootstrap_runtime` loads settings, resolves paths, creates runtime directories,
-seeds deterministic generators, configures logging, and returns an immutable
-`RuntimeContext` containing the component name, settings, paths, UTC startup
-timestamp, and component logger.
+seeds deterministic generators, configures logging, ensures the operational
+SQLite database is migrated, and returns an immutable `RuntimeContext` containing
+the component name, settings, paths, UTC startup timestamp, component logger,
+`database_path`, and `schema_version`.
+
+`RuntimeContext` does **not** store an open `sqlite3.Connection`.
 
 `--validate-config` uses `validate_configuration`, which loads and resolves
 settings without creating directories, writing log files, configuring persistent
-handlers, or seeding global random state.
+handlers, seeding global random state, or touching SQLite.
+
+## SQLite operational persistence boundary
+
+- Standard-library `sqlite3` only. No SQLAlchemy, Alembic, or other ORM /
+  migration dependencies.
+- Explicit connection ownership via `connect_database`.
+- Explicit transaction ownership via `transaction`.
+- Repositories receive an explicit connection and never commit on their own.
+- Forward-only packaged SQL migrations with immutable checksums.
+- Automatic idempotent migration during normal bootstrap.
+- Read-only inspection for `--database-status`.
+
+See [database.md](database.md) for connection/transaction rules, migration
+policy, CLI behaviour, and initial tables.
+
+### Initial operational tables
+
+- `application_metadata` — durable key/value application metadata
+- `jobs` — durable background-work records (no claiming yet)
+- `job_events` — append-only job lifecycle events
+- `snapshots` — metadata for future immutable data snapshots
+- `audit_events` — append-only application audit trail
+
+Sports-domain schemas (teams, fixtures, odds, predictions, bets, bankroll,
+features, model training) remain future work.
 
 ## Logging boundary
 
@@ -68,12 +98,14 @@ Runtime bootstrap seeds Python `random` and NumPy's legacy global generator from
 generators where practical. Hash randomization / `PYTHONHASHSEED` is not mutated
 after interpreter startup.
 
-## Storage principles (planned)
+## Storage principles
 
-- **SQLite** will store operational state, metadata, jobs, predictions, and audit records.
+- **SQLite** stores operational state, metadata, jobs, snapshot metadata, and
+  audit records.
 - **Parquet** will store historical and analytical datasets.
-- **Snapshots** will be immutable once written.
-- Runtime-generated files live under `storage/`; only `.gitkeep` markers are tracked in Git.
+- **Snapshots** are immutable once marked ready at the metadata layer.
+- Runtime-generated files live under `storage/`; only `.gitkeep` markers are
+  tracked in Git.
 
 ## Processing principles (planned)
 
@@ -93,7 +125,7 @@ after interpreter startup.
 Application code lives under `src/sports_analytics/` with focused subpackages:
 
 - `core` — configuration, paths, logging, runtime bootstrap, shared CLI
-- `data` — persistence and dataset I/O
+- `data` — SQLite persistence, migrations, repositories, dataset I/O
 - `scrapers` — ingestion adapters
 - `features` — feature engineering
 - `models` — local statistical / ML components
@@ -110,13 +142,17 @@ Implemented:
 - local logging configuration;
 - deterministic seeding;
 - shared runtime bootstrap and CLI options;
+- SQLite connection/transaction foundation;
+- forward-only migrations and initial operational schema;
+- typed repositories for metadata, jobs, snapshots, and audit events;
+- database status / migrate CLI modes;
 - placeholder entry points wired to that bootstrap.
 
 Explicitly **not** implemented yet:
 
-- SQLite schemas and connections;
-- worker job execution loops;
+- worker job claiming / polling loops;
 - scraping adapters and HTTP clients;
 - modelling, feature engineering, predictions, and betting logic;
+- sports-domain tables;
 - Streamlit UI components;
 - process spawning in `run_local.py`.

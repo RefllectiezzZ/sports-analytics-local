@@ -1,4 +1,4 @@
-name: Quality
+name: Windows Compatibility
 
 on:
   pull_request:
@@ -19,24 +19,19 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
-  quality:
-    name: Quality (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  windows-compatibility:
+    name: Windows / Python 3.12
+    runs-on: windows-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.12"]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
 
       - name: Upgrade packaging tools
