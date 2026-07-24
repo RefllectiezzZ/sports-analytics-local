@@ -185,6 +185,18 @@ heartbeat renewal, expired-lease recovery, and finalization rejection for stale
 owners. Prefer explicit `BEGIN IMMEDIATE` contention tests over timing-sensitive
 thread sleeps when practical.
 
+Review-regression tests for the worker/supervisor path should stay
+deterministic and cover:
+
+- heartbeat continuation during graceful shutdown while a handler is still
+  running;
+- post-checkpoint lease-loss races that must prevent success, retry, or failure
+  finalization;
+- occupied-worker claims where `worker_instances.current_job_id` is already set;
+- Windows supervision using a new process group and `CTRL_BREAK_EVENT`;
+- migration upgrade corruption cases, especially legacy v1 `running` jobs that
+  lack a complete lease and must roll back atomically.
+
 On Windows, subprocess tests must clean up children deterministically. Assert
 that supervised worker children receive terminate first, that
 `shutdown_grace_seconds` is respected, and that stubborn children are killed and

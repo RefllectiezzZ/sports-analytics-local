@@ -40,6 +40,7 @@ from sports_analytics.data.types import (
     JobStatus,
     Migration,
     SnapshotStatus,
+    validate_positive_finite_number,
     validate_relative_snapshot_path,
     validate_strict_int,
 )
@@ -517,6 +518,14 @@ def test_strict_integer_validation() -> None:
         validate_strict_int("1", field_name="priority")
     with pytest.raises(RepositoryError):
         validate_strict_int(-1, field_name="offset", minimum=0)
+
+
+def test_positive_finite_number_validation_rejects_bool_nan_and_infinity() -> None:
+    assert validate_positive_finite_number(1, field_name="seconds") == 1.0
+    assert validate_positive_finite_number(0.25, field_name="seconds") == 0.25
+    for value in (True, False, 0, -1, float("nan"), float("inf"), float("-inf"), "1"):
+        with pytest.raises(RepositoryError, match="positive finite number"):
+            validate_positive_finite_number(value, field_name="seconds")
 
 
 def test_sqlite_storage_class_rejects_real_integers(tmp_path: Path) -> None:

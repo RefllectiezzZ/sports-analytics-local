@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from math import isfinite
 from pathlib import Path, PurePosixPath
 from typing import Final
 
@@ -240,6 +241,18 @@ def validate_strict_int(
         msg = f"{field_name} must be <= {maximum}"
         raise RepositoryError(msg)
     return value
+
+
+def validate_positive_finite_number(value: object, *, field_name: str) -> float:
+    """Require a strict positive finite number (reject bool, NaN, and infinities)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        msg = f"{field_name} must be a positive finite number"
+        raise RepositoryError(msg)
+    number = float(value)
+    if not isfinite(number) or number <= 0:
+        msg = f"{field_name} must be a positive finite number"
+        raise RepositoryError(msg)
+    return number
 
 
 def validate_relative_snapshot_path(value: str) -> str:

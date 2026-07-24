@@ -7,11 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from sports_analytics.core.exceptions import PermanentJobError, RetryableJobError, WorkerError
+from sports_analytics.core.exceptions import (
+    JobLeaseError,
+    PermanentJobError,
+    RetryableJobError,
+    WorkerError,
+)
 from sports_analytics.core.runtime import RuntimeContext, bootstrap_runtime
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.repositories.jobs import JobRepository
+from sports_analytics.data.repositories.workers import WorkerRepository
 from sports_analytics.data.types import JobStatus
+from sports_analytics.jobs import runner as runner_module
 from sports_analytics.jobs.context import JobExecutionContext
 from sports_analytics.jobs.registry import HandlerRegistry
 from sports_analytics.jobs.runner import LocalWorker
@@ -19,7 +26,9 @@ from sports_analytics.jobs.types import JobExecutionState, WorkerStatus
 
 FIXED = datetime(2026, 7, 24, 19, 30, 0, tzinfo=UTC)
 WORKER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+SECOND_WORKER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
 JOB_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+SECOND_JOB_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab"
 
 
 class FakeClock:
@@ -59,20 +68,29 @@ def _runtime(tmp_path: Path) -> RuntimeContext:
                 "poll_interval_seconds": 1,
                 "heartbeat_interval_seconds": 0.5,
                 "stale_job_timeout_seconds": 10,
+                "retry_backoff_base_seconds": 0.1,
+                "retry_backoff_max_seconds": 0.1,
                 "shutdown_grace_seconds": 1,
             },
         },
     )
 
 
-def _create_job(context: RuntimeContext, *, maximum_attempts: int = 2) -> str:
+def _create_job(
+    context: RuntimeContext,
+    *,
+    job_id: str = JOB_ID,
+    maximum_attempts: int = 2,
+    priority: int = 100,
+) -> str:
     with connect_database(context.database_path) as connection:
         with transaction(connection, immediate=True):
             job = JobRepository(connection).create_job(
-                job_id=JOB_ID,
+                job_id=job_id,
                 job_type="demo.job",
                 payload={"ok": True},
                 maximum_attempts=maximum_attempts,
+                priority=priority,
                 actor="test",
                 created_at=FIXED,
             )
@@ -85,9 +103,44 @@ def _registry(handler) -> HandlerRegistry:
     return registry
 
 
-def _read_job(context: RuntimeContext):
+def _read_job(context: RuntimeContext, job_id: str = JOB_ID):
     with connect_database(context.database_path, read_only=True) as connection:
-        return JobRepository(connection).get_job(JOB_ID)
+        return JobRepository(connection).get_job(job_id)
+
+
+def _job_events(context: RuntimeContext, job_id: str = JOB_ID) -> list[str]:
+    with connect_database(context.database_path, read_only=True) as connection:
+        return [event.event_type for event in JobRepository(connection).list_job_events(job_id)]
+
+
+def _worker_statuses(context: RuntimeContext) -> dict[str, WorkerStatus]:
+    with connect_database(context.database_path, read_only=True) as connection:
+        return {worker.id: worker.status for worker in WorkerRepository(connection).list_workers()}
+
+
+class _LeaseLostOnStopController:
+    def __init__(self, *, context: JobExecutionContext, **_kwargs: object) -> None:
+        self._context = context
+
+    def start(self) -> None:
+        pass
+
+    def stop(self, *, timeout_seconds: float) -> bool:
+        del timeout_seconds
+        self._context.report_lease_lost()
+        return True
+
+
+class _CleanupTimeoutController:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def stop(self, *, timeout_seconds: float) -> bool:
+        del timeout_seconds
+        return False
 
 
 def test_worker_once_no_job_stops_without_sleeping(tmp_path: Path) -> None:
@@ -203,6 +256,145 @@ def test_invalid_runner_arguments_are_rejected(tmp_path: Path) -> None:
         worker.run(context, once="yes")  # type: ignore[arg-type]
     with pytest.raises(WorkerError, match="max_jobs"):
         worker.run(context, max_jobs=0)
+
+
+def test_once_and_max_jobs_combination_rejected_before_registration(tmp_path: Path) -> None:
+    context = _runtime(tmp_path)
+    worker = LocalWorker(install_signals=False)
+
+    with pytest.raises(WorkerError, match="once and max_jobs"):
+        worker.run(context, registry=HandlerRegistry(), once=True, max_jobs=1)
+
+    with connect_database(context.database_path, read_only=True) as connection:
+        assert WorkerRepository(connection).count_workers() == 0
+
+
+def test_post_checkpoint_lease_loss_prevents_success_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _runtime(tmp_path)
+    _create_job(context)
+    monkeypatch.setattr(runner_module, "LeaseHeartbeatController", _LeaseLostOnStopController)
+
+    def handler(_job_context: JobExecutionContext, _payload: object) -> dict[str, bool]:
+        return {"ok": True}
+
+    worker = LocalWorker(
+        clock=FakeClock(),
+        sleeper=FakeSleeper(),
+        monotonic=FakeMonotonic(),
+        pid=1234,
+        hostname="test-host",
+        uuid_factory=lambda: WORKER_ID,
+        install_signals=False,
+    )
+
+    with pytest.raises(JobLeaseError, match="lost lease"):
+        worker.run(context, registry=_registry(handler), once=True)
+
+    job = _read_job(context)
+    assert job is not None
+    assert job.status is JobStatus.RUNNING
+    assert job.result is None
+    assert _job_events(context) == ["created", "claimed"]
+    assert _worker_statuses(context)[WORKER_ID] is WorkerStatus.FAILED
+
+
+def test_controller_cleanup_timeout_prevents_failure_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _runtime(tmp_path)
+    _create_job(context)
+    monkeypatch.setattr(runner_module, "LeaseHeartbeatController", _CleanupTimeoutController)
+
+    def handler(_job_context: JobExecutionContext, _payload: object) -> object:
+        raise PermanentJobError("do not finalize after cleanup timeout")
+
+    worker = LocalWorker(
+        clock=FakeClock(),
+        sleeper=FakeSleeper(),
+        monotonic=FakeMonotonic(),
+        pid=1234,
+        hostname="test-host",
+        uuid_factory=lambda: WORKER_ID,
+        install_signals=False,
+    )
+
+    with pytest.raises(JobLeaseError, match="lost lease"):
+        worker.run(context, registry=_registry(handler), once=True)
+
+    job = _read_job(context)
+    assert job is not None
+    assert job.status is JobStatus.RUNNING
+    assert job.last_error is None
+    assert _job_events(context) == ["created", "claimed"]
+    assert _worker_statuses(context)[WORKER_ID] is WorkerStatus.FAILED
+
+
+def test_runner_exits_on_lease_loss_and_recovery_processes_first_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _runtime(tmp_path)
+    _create_job(context, job_id=JOB_ID, priority=1)
+    _create_job(context, job_id=SECOND_JOB_ID, priority=100)
+    original_controller = runner_module.LeaseHeartbeatController
+    monkeypatch.setattr(runner_module, "LeaseHeartbeatController", _LeaseLostOnStopController)
+
+    first_worker = LocalWorker(
+        clock=FakeClock(),
+        sleeper=FakeSleeper(),
+        monotonic=FakeMonotonic(),
+        pid=1234,
+        hostname="test-host",
+        uuid_factory=lambda: WORKER_ID,
+        install_signals=False,
+    )
+
+    with pytest.raises(JobLeaseError, match="lost lease"):
+        first_worker.run(
+            context,
+            registry=_registry(lambda _ctx, _payload: {"ok": True}),
+            once=True,
+        )
+
+    first_after_loss = _read_job(context, JOB_ID)
+    second_after_loss = _read_job(context, SECOND_JOB_ID)
+    assert first_after_loss is not None
+    assert second_after_loss is not None
+    assert first_after_loss.status is JobStatus.RUNNING
+    assert second_after_loss.status is JobStatus.PENDING
+    assert _worker_statuses(context)[WORKER_ID] is WorkerStatus.FAILED
+
+    monkeypatch.setattr(runner_module, "LeaseHeartbeatController", original_controller)
+    processed: list[str] = []
+
+    def handler(job_context: JobExecutionContext, _payload: object) -> dict[str, str]:
+        processed.append(job_context.job_id)
+        return {"job_id": job_context.job_id}
+
+    recovery_worker = LocalWorker(
+        clock=FakeClock(start=FIXED + timedelta(seconds=30)),
+        sleeper=FakeSleeper(),
+        monotonic=FakeMonotonic(),
+        pid=1235,
+        hostname="test-host",
+        uuid_factory=lambda: SECOND_WORKER_ID,
+        install_signals=False,
+    )
+
+    result = recovery_worker.run(context, registry=_registry(handler), once=True)
+
+    assert result.jobs_processed == 1
+    assert processed == [JOB_ID]
+    recovered_first = _read_job(context, JOB_ID)
+    untouched_second = _read_job(context, SECOND_JOB_ID)
+    assert recovered_first is not None
+    assert untouched_second is not None
+    assert recovered_first.status is JobStatus.SUCCEEDED
+    assert untouched_second.status is JobStatus.PENDING
 
 
 def test_state_from_finalization_mapping() -> None:

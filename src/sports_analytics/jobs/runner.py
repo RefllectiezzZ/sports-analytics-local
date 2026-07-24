@@ -90,7 +90,9 @@ class LeaseHeartbeatController:
         while not self._stop_requested.wait(self._interval_seconds):
             if self._should_stop():
                 self._context.request_stop()
-            if self._context.is_stop_requested() or self._context.is_lease_lost():
+            # Shutdown requests are cooperative for the handler via checkpoint().
+            # Lease renewal continues until controller stop, lease loss, or failure.
+            if self._context.is_lease_lost():
                 return
             try:
                 self._service.renew_lease(
@@ -162,6 +164,9 @@ class LocalWorker:
         if max_jobs is not None and (type(max_jobs) is not int or max_jobs < 1):
             msg = "max_jobs must be a positive int when provided"
             raise WorkerError(msg)
+        if once and max_jobs is not None:
+            msg = "once and max_jobs cannot be combined"
+            raise WorkerError(msg)
 
         selected_registry = registry if registry is not None else build_default_registry()
         selected_registry.freeze()
@@ -229,6 +234,12 @@ class LocalWorker:
                 )
                 jobs_processed += 1
                 next_idle_heartbeat = self._monotonic() + heartbeat_interval
+                if state is JobExecutionState.LEASE_LOST:
+                    msg = (
+                        f"worker {durable_worker_id} lost lease for job {claim.job.id}; "
+                        "refusing further claims in this process"
+                    )
+                    raise JobLeaseError(msg)
                 if state is JobExecutionState.SHUTDOWN_INTERRUPTED:
                     stop_reason = state.value
                     break
@@ -325,6 +336,7 @@ class LocalWorker:
         )
         failure: tuple[str, bool, JobExecutionState | None] | None = None
         result: JsonValue | None = None
+        early_state: JobExecutionState | None = None
         with self._active_context_lock:
             self._active_context = context
         controller.start()
@@ -343,7 +355,7 @@ class LocalWorker:
             except WorkerShutdownError:
                 context.request_stop()
                 # Leave the running lease in place; recovery requeues after expiry.
-                return JobExecutionState.SHUTDOWN_INTERRUPTED
+                early_state = JobExecutionState.SHUTDOWN_INTERRUPTED
             except JobLeaseError as exc:
                 context.report_lease_lost()
                 logger.warning(
@@ -352,7 +364,7 @@ class LocalWorker:
                     claim.worker_id,
                     sanitize_error_text(exc),
                 )
-                return JobExecutionState.LEASE_LOST
+                early_state = JobExecutionState.LEASE_LOST
             except JobRegistryError as exc:
                 failure = (sanitize_error_text(exc), False, None)
             except Exception as exc:  # noqa: BLE001 - unexpected handler errors are retryable
@@ -373,8 +385,11 @@ class LocalWorker:
             with self._active_context_lock:
                 self._active_context = None
 
-        if context.is_lease_lost():
+        # Any locally observed lease loss after the final checkpoint prevents finalization.
+        if context.is_lease_lost() or early_state is JobExecutionState.LEASE_LOST:
             return JobExecutionState.LEASE_LOST
+        if early_state is JobExecutionState.SHUTDOWN_INTERRUPTED:
+            return early_state
 
         if failure is not None:
             error_text, retryable, preferred_state = failure
@@ -483,7 +498,7 @@ class LocalWorker:
             runtime_context.logger.info("worker received shutdown signal signal=%s", signum)
             self._request_stop(local_stop)
 
-        for signum_name in ("SIGINT", "SIGTERM"):
+        for signum_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             signum = getattr(signal, signum_name, None)
             if signum is None:
                 continue

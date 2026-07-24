@@ -163,11 +163,26 @@ class WorkerSettings(_FrozenModel):
         mode="before",
     )
     @classmethod
-    def _reject_bool_float_settings(cls, value: object) -> object:
+    def _reject_non_finite_timing(cls, value: object) -> object:
+        import math
+
         if isinstance(value, bool):
             msg = "worker timing settings must not be boolean"
             raise ValueError(msg)
-        return value
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except ValueError as exc:
+                msg = "worker timing settings must be positive finite numbers"
+                raise ValueError(msg) from exc
+        if not isinstance(value, int | float):
+            msg = "worker timing settings must be positive finite numbers"
+            raise ValueError(msg)
+        number = float(value)
+        if not math.isfinite(number) or number <= 0:
+            msg = "worker timing settings must be positive finite numbers"
+            raise ValueError(msg)
+        return number
 
     @field_validator("recovery_batch_size", mode="before")
     @classmethod

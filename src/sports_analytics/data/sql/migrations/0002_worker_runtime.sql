@@ -50,7 +50,7 @@ ON worker_instances(status, heartbeat_at);
 CREATE INDEX idx_worker_instances_heartbeat
 ON worker_instances(heartbeat_at);
 
-CREATE INDEX idx_worker_instances_current_job
+CREATE UNIQUE INDEX uq_worker_instances_current_job
 ON worker_instances(current_job_id)
 WHERE current_job_id IS NOT NULL;
 
@@ -85,3 +85,10 @@ BEGIN
         THEN RAISE(ABORT, 'non-running job must not retain a lease')
     END;
 END;
+
+-- Validate every existing jobs row against the new lease invariant.
+-- The BEFORE UPDATE trigger rejects legacy running rows with a NULL lease.
+UPDATE jobs
+SET status = status,
+    lease_owner = lease_owner,
+    lease_expires_at = lease_expires_at;

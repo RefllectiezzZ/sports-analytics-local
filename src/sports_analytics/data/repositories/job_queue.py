@@ -26,6 +26,7 @@ from sports_analytics.data.types import (
     JsonValue,
     normalize_uuid,
     validate_identifier,
+    validate_positive_finite_number,
     validate_strict_int,
 )
 from sports_analytics.jobs.backoff import compute_retry_available_at
@@ -70,13 +71,10 @@ class JobQueueRepository:
         if claimed_at.tzinfo is None:
             msg = "claimed_at must be timezone-aware"
             raise RepositoryError(msg)
-        if (
-            isinstance(lease_duration_seconds, bool)
-            or not isinstance(lease_duration_seconds, int | float)
-            or float(lease_duration_seconds) <= 0
-        ):
-            msg = "lease_duration_seconds must be a positive number"
-            raise RepositoryError(msg)
+        lease_duration_seconds = validate_positive_finite_number(
+            lease_duration_seconds,
+            field_name="lease_duration_seconds",
+        )
         normalized_worker = normalize_uuid(worker_id)
         normalized_actor = validate_identifier(actor, field_name="actor")
         worker = self._workers.get_worker(normalized_worker)
@@ -89,9 +87,15 @@ class JobQueueRepository:
                 f"{worker.status.value}, expected running"
             )
             raise RepositoryError(msg)
+        if worker.current_job_id is not None:
+            msg = (
+                f"cannot claim job: worker {normalized_worker} already has "
+                f"current_job_id={worker.current_job_id}"
+            )
+            raise JobLeaseError(msg)
 
         claimed_text = format_utc_timestamp(claimed_at)
-        lease_expires_at = claimed_at + timedelta(seconds=float(lease_duration_seconds))
+        lease_expires_at = claimed_at + timedelta(seconds=lease_duration_seconds)
         lease_text = format_utc_timestamp(lease_expires_at)
         try:
             row = self._connection.execute(
@@ -188,6 +192,7 @@ class JobQueueRepository:
                 WHERE id = ?
                   AND status = 'running'
                   AND version = ?
+                  AND current_job_id IS NULL
                 """,
                 (
                     job_id,
@@ -199,9 +204,9 @@ class JobQueueRepository:
             if worker_cursor.rowcount != 1:
                 msg = (
                     f"worker {normalized_worker} could not be updated during claim "
-                    "due to concurrent modification"
+                    "because it is occupied or changed concurrently"
                 )
-                raise DatabaseIntegrityError(msg)
+                raise JobLeaseError(msg)
         except (DatabaseIntegrityError, JobLeaseError):
             raise
         except sqlite3.IntegrityError as exc:
@@ -241,14 +246,11 @@ class JobQueueRepository:
             expected_job_version=expected_job_version,
             allow_stopping_worker=True,
         )
-        if (
-            isinstance(lease_duration_seconds, bool)
-            or not isinstance(lease_duration_seconds, int | float)
-            or float(lease_duration_seconds) <= 0
-        ):
-            msg = "lease_duration_seconds must be a positive number"
-            raise RepositoryError(msg)
-        lease_expires_at = heartbeat_at + timedelta(seconds=float(lease_duration_seconds))
+        lease_duration_seconds = validate_positive_finite_number(
+            lease_duration_seconds,
+            field_name="lease_duration_seconds",
+        )
+        lease_expires_at = heartbeat_at + timedelta(seconds=lease_duration_seconds)
         try:
             cursor = self._connection.execute(
                 f"""
@@ -421,6 +423,9 @@ class JobQueueRepository:
             expected_job_version=expected_job_version,
             allow_stopping_worker=True,
         )
+        if type(retryable) is not bool:
+            msg = "retryable must be a bool"
+            raise RepositoryError(msg)
         normalized_actor = validate_identifier(actor, field_name="actor")
         error_text = sanitize_error_text(error)
         event_details = ensure_json_value(details if details is not None else {})
@@ -429,7 +434,7 @@ class JobQueueRepository:
             raise RepositoryError(msg)
         failed_text = format_utc_timestamp(failed_at)
         new_version = job.version + 1
-        schedule_retry = bool(retryable) and job.attempts < job.maximum_attempts
+        schedule_retry = retryable and job.attempts < job.maximum_attempts
         try:
             if schedule_retry:
                 available_at = compute_retry_available_at(
@@ -477,8 +482,8 @@ class JobQueueRepository:
                     "maximum_attempts": job.maximum_attempts,
                     "available_at": available_text,
                     "error": error_text,
+                    "details": event_details,
                 }
-                detail_payload.update(event_details)
                 self._connection.execute(
                     f"""
                     INSERT INTO {JOB_EVENTS_TABLE} (
@@ -532,8 +537,8 @@ class JobQueueRepository:
                     "attempt": job.attempts,
                     "maximum_attempts": job.maximum_attempts,
                     "error": error_text,
+                    "details": event_details,
                 }
-                detail_payload.update(event_details)
                 self._connection.execute(
                     f"""
                     INSERT INTO {JOB_EVENTS_TABLE} (
@@ -805,15 +810,12 @@ class JobQueueRepository:
         if now.tzinfo is None:
             msg = "now must be timezone-aware"
             raise RepositoryError(msg)
-        if (
-            isinstance(stale_worker_threshold_seconds, bool)
-            or not isinstance(stale_worker_threshold_seconds, int | float)
-            or float(stale_worker_threshold_seconds) <= 0
-        ):
-            msg = "stale_worker_threshold_seconds must be a positive number"
-            raise RepositoryError(msg)
+        stale_worker_threshold_seconds = validate_positive_finite_number(
+            stale_worker_threshold_seconds,
+            field_name="stale_worker_threshold_seconds",
+        )
         now_text = format_utc_timestamp(now)
-        cutoff = now - timedelta(seconds=float(stale_worker_threshold_seconds))
+        cutoff = now - timedelta(seconds=stale_worker_threshold_seconds)
         cutoff_text = format_utc_timestamp(cutoff)
 
         def _count(sql: str, params: tuple[object, ...] = ()) -> int:

@@ -29,7 +29,7 @@ EXPECTED_INDEXES: Final[tuple[str, ...]] = (
     "idx_job_events_job_occurred",
     "idx_worker_instances_status_heartbeat",
     "idx_worker_instances_heartbeat",
-    "idx_worker_instances_current_job",
+    "uq_worker_instances_current_job",
     "idx_snapshots_type_status_created",
     "uq_snapshots_relative_path",
     "idx_audit_events_occurred",

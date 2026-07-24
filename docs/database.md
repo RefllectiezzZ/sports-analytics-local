@@ -173,7 +173,7 @@ Current packaged migrations:
 | Version | File | Checksum |
 | --- | --- | --- |
 | 1 | `0001_initial.sql` | `404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de` |
-| 2 | `0002_worker_runtime.sql` | `b3a8d93ae81ce2e21ae9e74a420bf598b345d63fe4ed11d4d84ced6302021faa` |
+| 2 | `0002_worker_runtime.sql` | `3dcc08c2053a3b4a1dcf9026ad2bc1f1d3f49e43062119a28c360e2fe7847f28` |
 
 Migration `0001_initial.sql` is unchanged. Schema version `2` adds the durable
 worker runtime metadata and queue lease integrity described below.
@@ -233,7 +233,7 @@ and adds worker/lease indexes:
 
 - `idx_worker_instances_status_heartbeat`
 - `idx_worker_instances_heartbeat`
-- `idx_worker_instances_current_job`
+- `uq_worker_instances_current_job`
 - `idx_jobs_running_lease_expires`
 
 It also adds triggers:
@@ -262,6 +262,11 @@ invariant at the database boundary:
 
 The partial `idx_jobs_running_lease_expires` index supports recovery scans for
 expired running-job leases ordered by `lease_expires_at`, `updated_at`, and `id`.
+
+The partial unique `uq_worker_instances_current_job` index enforces that a
+non-NULL `worker_instances.current_job_id` is associated with at most one worker
+row. Claiming a job also requires the claiming worker's own `current_job_id` to
+be NULL, so an occupied worker cannot claim a second job.
 
 Retry transitions (`running|failed -> pending`) require an explicit
 `retry=True` argument. Ordinary `transition_job` calls cannot retry. Retries are
@@ -295,6 +300,15 @@ Worker UUIDs fence job ownership. Lease renewal and finalization require the
 current `lease_owner`, expected job version, live lease, and compatible worker
 state. Stale workers and expired leases are recovered through explicit worker
 service operations; there is no force-cancellation path for a running handler.
+
+During upgrade from schema version 1, `0002_worker_runtime` creates the
+running-job lease triggers and then runs a no-op `UPDATE jobs` across existing
+rows. This preflight validates legacy jobs against the new invariant before the
+migration is recorded. Legacy `running` rows without both `lease_owner` and
+`lease_expires_at` abort the migration with `running job requires complete
+lease`; the migration transaction rolls back atomically, so no partial
+`0002` schema objects or migration-history rows are committed and the invalid
+legacy rows remain unchanged for manual repair.
 
 Repository numeric arguments such as priority, attempts bounds, versions,
 row counts, limits, and offsets use strict `int` validation (bools, floats, and

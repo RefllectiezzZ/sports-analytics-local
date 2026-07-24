@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from sports_analytics.core.exceptions import DatabaseMigrationError
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.migrations import (
     apply_migrations,
@@ -19,7 +20,7 @@ from sports_analytics.data.migrations import (
 from sports_analytics.data.schema import EXPECTED_INDEXES, EXPECTED_TRIGGERS, OPERATIONAL_TABLES
 
 CHECKSUM_0001 = "404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de"
-CHECKSUM_0002 = "b3a8d93ae81ce2e21ae9e74a420bf598b345d63fe4ed11d4d84ced6302021faa"
+CHECKSUM_0002 = "3dcc08c2053a3b4a1dcf9026ad2bc1f1d3f49e43062119a28c360e2fe7847f28"
 
 
 def test_migration_0002_discovered_with_expected_checksum() -> None:
@@ -75,6 +76,13 @@ def test_fresh_schema_contains_worker_runtime_objects(tmp_path: Path) -> None:
             ).fetchall()
         }
         assert set(EXPECTED_INDEXES).issubset(indexes)
+        assert "uq_worker_instances_current_job" in indexes
+        assert "idx_worker_instances_current_job" not in indexes
+        current_job_index = connection.execute("PRAGMA index_list(worker_instances)").fetchall()
+        assert any(
+            row["name"] == "uq_worker_instances_current_job" and row["unique"] == 1
+            for row in current_job_index
+        )
 
         triggers = {
             row["name"]
@@ -141,3 +149,42 @@ def test_upgrade_from_version_1_applies_only_0002(tmp_path: Path) -> None:
             ).fetchone()
             is not None
         )
+
+
+def test_upgrade_from_version_1_rejects_running_job_without_lease_atomically(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "ops.sqlite3"
+    migrations = discover_migrations()
+    apply_migrations(db, migrations=(migrations[0],))
+    with connect_database(db) as connection:
+        connection.execute(
+            "INSERT INTO jobs(id, job_type, payload_json, status, priority, attempts, "
+            "maximum_attempts, available_at, lease_owner, lease_expires_at, created_at, "
+            "updated_at, started_at, finished_at, version) VALUES "
+            "('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo.job', '{}', 'running', "
+            "100, 1, 2, 't', NULL, NULL, 't', 't', 't', NULL, 1)"
+        )
+
+    with pytest.raises(DatabaseMigrationError, match="running job requires complete lease"):
+        apply_migrations(db, migrations=migrations)
+
+    with connect_database(db, read_only=True) as connection:
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_instances'"
+            ).fetchone()
+            is None
+        )
+        applied = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [row["version"] for row in applied] == [1]
+        legacy = connection.execute(
+            "SELECT status, lease_owner, lease_expires_at FROM jobs WHERE id = ?",
+            ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",),
+        ).fetchone()
+        assert legacy is not None
+        assert legacy["status"] == "running"
+        assert legacy["lease_owner"] is None
+        assert legacy["lease_expires_at"] is None

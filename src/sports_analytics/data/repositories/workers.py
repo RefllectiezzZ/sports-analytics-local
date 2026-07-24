@@ -22,6 +22,7 @@ from sports_analytics.data.types import (
     validate_identifier,
     validate_limit_offset,
     validate_plain_text,
+    validate_positive_finite_number,
     validate_strict_int,
 )
 from sports_analytics.jobs.errors import sanitize_error_text
@@ -390,14 +391,11 @@ class WorkerRepository:
         if now.tzinfo is None:
             msg = "now must be timezone-aware"
             raise RepositoryError(msg)
-        if (
-            isinstance(stale_threshold_seconds, bool)
-            or not isinstance(stale_threshold_seconds, int | float)
-            or float(stale_threshold_seconds) <= 0
-        ):
-            msg = "stale_threshold_seconds must be a positive number"
-            raise RepositoryError(msg)
-        cutoff = now - timedelta(seconds=float(stale_threshold_seconds))
+        stale_threshold_seconds = validate_positive_finite_number(
+            stale_threshold_seconds,
+            field_name="stale_threshold_seconds",
+        )
+        cutoff = now - timedelta(seconds=stale_threshold_seconds)
         cutoff_text = format_utc_timestamp(cutoff)
         try:
             rows = self._connection.execute(

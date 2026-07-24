@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 
-from sports_analytics.core.exceptions import WorkerError
+from sports_analytics.core.exceptions import RepositoryError, WorkerError
+from sports_analytics.data.types import validate_positive_finite_number
 
 
 def compute_retry_delay_seconds(
@@ -29,29 +29,23 @@ def compute_retry_delay_seconds(
     if attempts < 1:
         msg = "attempts must be >= 1"
         raise WorkerError(msg)
-    for name, value in (
-        ("base_seconds", base_seconds),
-        ("max_seconds", max_seconds),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            msg = f"{name} must be a positive finite number"
-            raise WorkerError(msg)
-        number = float(value)
-        if not math.isfinite(number) or number <= 0:
-            msg = f"{name} must be a positive finite number"
-            raise WorkerError(msg)
-    if float(max_seconds) < float(base_seconds):
+    try:
+        base = validate_positive_finite_number(base_seconds, field_name="base_seconds")
+        maximum = validate_positive_finite_number(max_seconds, field_name="max_seconds")
+    except RepositoryError as exc:
+        raise WorkerError(str(exc)) from exc
+    if maximum < base:
         msg = "max_seconds must be greater than or equal to base_seconds"
         raise WorkerError(msg)
 
     exponent = attempts - 1
     # Cap the exponent to avoid float overflow before applying min().
     if exponent >= 1023:
-        return float(max_seconds)
-    delay = float(base_seconds) * (2.0**exponent)
-    if not math.isfinite(delay):
-        return float(max_seconds)
-    return min(float(max_seconds), delay)
+        return maximum
+    delay = base * (2.0**exponent)
+    if delay != delay or delay == float("inf"):  # NaN or inf guard
+        return maximum
+    return min(maximum, delay)
 
 
 def compute_retry_available_at(

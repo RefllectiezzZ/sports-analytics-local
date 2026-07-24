@@ -148,7 +148,8 @@ backoff, and process shutdown:
 
 Validation relationships:
 
-- all worker timing settings must be positive finite numbers and not booleans;
+- all worker timing settings must be positive finite numbers: `NaN`, positive or
+  negative infinity, booleans, zero, and negative values are rejected;
 - `stale_job_timeout_seconds` must be greater than
   `heartbeat_interval_seconds`;
 - `retry_backoff_max_seconds` must be greater than or equal to

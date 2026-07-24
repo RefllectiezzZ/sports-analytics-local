@@ -7,10 +7,10 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
-from typing import Protocol
+from typing import Protocol, cast
 
 from sports_analytics.core.cli import CONFIG_ERROR_EXIT, handle_common_modes
 from sports_analytics.core.cli import build_argument_parser as build_common_argument_parser
@@ -21,15 +21,19 @@ from sports_analytics.core.exceptions import (
     RuntimeBootstrapError,
     WorkerError,
 )
-from sports_analytics.core.runtime import validate_configuration
-from sports_analytics.data.cli import migrate_database
-from sports_analytics.data.types import normalize_uuid
+from sports_analytics.core.runtime import bootstrap_runtime
+from sports_analytics.core.settings import WorkerSettings
+from sports_analytics.data.types import normalize_uuid, validate_positive_finite_number
 
 SignalHandler = signal.Handlers | int | Callable[[int, FrameType | None], object] | None
 
 
 class ChildProcess(Protocol):
     """Subset of ``subprocess.Popen`` used by the supervisor."""
+
+    @property
+    def pid(self) -> int | None:
+        """Return the child process id when available."""
 
     def poll(self) -> int | None:
         """Return the child exit code if it has exited."""
@@ -38,21 +42,74 @@ class ChildProcess(Protocol):
         """Wait for child exit and return its exit code."""
 
     def terminate(self) -> None:
-        """Request graceful child termination."""
+        """Request forced termination (platform-specific fallback)."""
 
     def kill(self) -> None:
         """Force child termination."""
+
+    def send_signal(self, sig: int) -> None:
+        """Deliver ``sig`` to the child process."""
 
 
 class PopenFactory(Protocol):
     """Factory used to start the worker child process."""
 
-    def __call__(self, command: Sequence[str]) -> ChildProcess:
+    def __call__(
+        self,
+        command: Sequence[str],
+        *,
+        creationflags: int = 0,
+    ) -> ChildProcess:
         """Start ``command`` and return a child-process handle."""
 
 
-def _default_popen(command: Sequence[str]) -> ChildProcess:
-    return subprocess.Popen(list(command), shell=False)
+def _default_popen(command: Sequence[str], *, creationflags: int = 0) -> ChildProcess:
+    return cast(
+        ChildProcess,
+        subprocess.Popen(list(command), shell=False, creationflags=creationflags),
+    )
+
+
+class ProcessShutdownStrategy(Protocol):
+    """Platform-specific child process start and graceful-stop strategy."""
+
+    def creationflags(self) -> int:
+        """Return subprocess creation flags for the child."""
+
+    def request_graceful_stop(self, child: ChildProcess) -> None:
+        """Ask the child to shut down cooperatively."""
+
+
+class PosixShutdownStrategy:
+    """POSIX graceful stop via SIGTERM / ``terminate()``."""
+
+    def creationflags(self) -> int:
+        return 0
+
+    def request_graceful_stop(self, child: ChildProcess) -> None:
+        child.terminate()
+
+
+class WindowsShutdownStrategy:
+    """Windows graceful stop via CTRL_BREAK_EVENT in a new process group."""
+
+    def creationflags(self) -> int:
+        return int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+
+    def request_graceful_stop(self, child: ChildProcess) -> None:
+        ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+        if ctrl_break is None:
+            child.terminate()
+            return
+        child.send_signal(int(ctrl_break))
+
+
+def select_shutdown_strategy(*, platform_name: str | None = None) -> ProcessShutdownStrategy:
+    """Return the shutdown strategy for the current or injected platform."""
+    name = sys.platform if platform_name is None else platform_name
+    if name.startswith("win"):
+        return WindowsShutdownStrategy()
+    return PosixShutdownStrategy()
 
 
 class LocalSupervisor:
@@ -64,6 +121,8 @@ class LocalSupervisor:
         worker_script: Path | str | None = None,
         popen_factory: PopenFactory = _default_popen,
         install_signals: bool = True,
+        shutdown_strategy: ProcessShutdownStrategy | None = None,
+        platform_name: str | None = None,
     ) -> None:
         self._worker_script = (
             Path(worker_script).resolve()
@@ -72,6 +131,12 @@ class LocalSupervisor:
         )
         self._popen_factory = popen_factory
         self._install_signals = install_signals
+        self._shutdown_strategy = (
+            shutdown_strategy
+            if shutdown_strategy is not None
+            else select_shutdown_strategy(platform_name=platform_name)
+        )
+        self._graceful_stop_sent = False
 
     def run(
         self,
@@ -82,9 +147,13 @@ class LocalSupervisor:
         worker_max_jobs: int | None = None,
         worker_id: str | None = None,
     ) -> int:
-        """Ensure the database is ready, start ``worker.py``, and propagate exit status."""
-        settings, paths = validate_configuration(config_path=config, env_file=env_file)
-        migrate_database(settings, paths)
+        """Bootstrap run_local, start ``worker.py``, and propagate exit status."""
+        runtime_context = bootstrap_runtime(
+            "run_local",
+            config_path=config,
+            env_file=env_file,
+        )
+        settings: WorkerSettings = runtime_context.settings.worker
         absolute_config = None if config is None else str(Path(config).resolve())
         absolute_env = None if env_file is None else str(Path(env_file).resolve())
         if worker_id is not None:
@@ -99,15 +168,18 @@ class LocalSupervisor:
             worker_max_jobs=worker_max_jobs,
             worker_id=worker_id,
         )
-        child = self._popen_factory(command)
+        child = self._popen_factory(
+            command,
+            creationflags=self._shutdown_strategy.creationflags(),
+        )
         stop_requested = threading.Event()
-        originals = self._install_signal_handlers(child, stop_requested)
+        originals = self._install_signal_handlers(stop_requested)
         try:
             while True:
                 if stop_requested.is_set():
-                    return self._terminate_child(
+                    return self._shutdown_child(
                         child,
-                        shutdown_grace_seconds=settings.worker.shutdown_grace_seconds,
+                        shutdown_grace_seconds=settings.shutdown_grace_seconds,
                     )
                 try:
                     return child.wait(timeout=0.5)
@@ -140,7 +212,6 @@ class LocalSupervisor:
 
     def _install_signal_handlers(
         self,
-        child: ChildProcess,
         stop_requested: threading.Event,
     ) -> dict[int, SignalHandler]:
         if not self._install_signals or threading.current_thread() is not threading.main_thread():
@@ -151,10 +222,8 @@ class LocalSupervisor:
         def _handler(signum: int, frame: FrameType | None) -> None:
             del signum, frame
             stop_requested.set()
-            if child.poll() is None:
-                child.terminate()
 
-        for signum_name in ("SIGINT", "SIGTERM"):
+        for signum_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             signum = getattr(signal, signum_name, None)
             if signum is None:
                 continue
@@ -163,18 +232,23 @@ class LocalSupervisor:
         return originals
 
     @staticmethod
-    def _restore_signal_handlers(originals: dict[int, SignalHandler]) -> None:
+    def _restore_signal_handlers(originals: Mapping[int, SignalHandler]) -> None:
         for signum, handler in originals.items():
             signal.signal(signum, handler)
 
-    @staticmethod
-    def _terminate_child(child: ChildProcess, *, shutdown_grace_seconds: float) -> int:
+    def _shutdown_child(self, child: ChildProcess, *, shutdown_grace_seconds: float) -> int:
+        grace = validate_positive_finite_number(
+            shutdown_grace_seconds,
+            field_name="shutdown_grace_seconds",
+        )
         code = child.poll()
         if code is not None:
             return code
-        child.terminate()
+        if not self._graceful_stop_sent:
+            self._shutdown_strategy.request_graceful_stop(child)
+            self._graceful_stop_sent = True
         try:
-            return child.wait(timeout=max(0.0, float(shutdown_grace_seconds)))
+            return child.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             child.kill()
             return child.wait()

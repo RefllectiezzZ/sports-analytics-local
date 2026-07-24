@@ -125,6 +125,31 @@ def test_invalid_logging_format_validate_config_exit_code_2(
     assert not list(isolated_cwd.glob("**/*.log"))
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_non_finite_worker_timing_validate_config_exit_code_2(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    config = isolated_cwd / "bad.toml"
+    config.write_text(
+        f"[worker]\npoll_interval_seconds = {value}\n",
+        encoding="utf-8",
+    )
+    code = run_component(
+        "worker",
+        "test",
+        argv=["--config", str(config), "--validate-config"],
+    )
+    assert code == CONFIG_ERROR_EXIT
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "positive finite numbers" in captured.err
+    assert "Traceback" not in captured.err
+    assert not (isolated_cwd / "storage").exists()
+
+
 def test_invalid_component_name_validate_config(
     isolated_cwd: Path,
     clear_sports_analytics_env: None,

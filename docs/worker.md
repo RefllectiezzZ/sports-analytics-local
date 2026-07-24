@@ -91,7 +91,12 @@ On claim the repository:
 - updates the worker `current_job_id` and heartbeat in the same transaction.
 
 Eligibility requires `status=pending`, `available_at <= claimed_at`,
-`attempts < maximum_attempts`, no lease, and a running worker.
+`attempts < maximum_attempts`, no lease, and a running worker whose
+`current_job_id` is NULL. A worker that already points at a current job is
+considered occupied and cannot claim another job.
+
+The database also enforces a unique current-job association: at most one
+`worker_instances` row may reference a given non-NULL `current_job_id`.
 
 ## Lease ownership
 
@@ -107,6 +112,13 @@ A worker may renew, complete, or fail a job only when all of the following hold:
 - expected job lifecycle version matches when required.
 
 Rejected stale finalization writes nothing and appends no event.
+
+The runner additionally treats locally observed lease loss as a hard fence. If
+`context.checkpoint()`, the heartbeat thread, or heartbeat cleanup reports lease
+loss at any point before finalization, including after the handler's final
+checkpoint, the worker does not complete, fail, or retry the job. It leaves the
+running lease for recovery, marks the worker failed, and terminates instead of
+claiming more work in that process.
 
 ## Heartbeat
 
@@ -208,7 +220,8 @@ Idle shutdown stops claiming, marks the worker stopping/stopped, and exits.
 Shutdown during a handler:
 
 - stops new claims;
-- keeps lease heartbeat alive during the configured grace period;
+- keeps lease heartbeat alive during the configured grace period, even after the
+  stop request is visible to the handler;
 - exposes the stop request through `context.checkpoint()`;
 - finalizes the job only if the handler completes safely;
 - otherwise leaves the running lease to expire for later recovery.
@@ -261,11 +274,42 @@ Behaviour:
 - never uses `shell=True`;
 - forwards only validated config/env paths and worker flags;
 - propagates the child exit code;
-- terminates the child on SIGINT/SIGTERM and kills only after
-  `shutdown_grace_seconds`.
+- requests platform-specific child shutdown on SIGINT/SIGTERM/SIGBREAK and kills
+  only after `shutdown_grace_seconds`.
+
+On POSIX platforms the graceful stop request is `SIGTERM` via
+`Popen.terminate()`. On Windows, `run_local.py` starts the worker in a new
+process group and sends `CTRL_BREAK_EVENT` when available, falling back to
+`terminate()` only when that signal is unavailable.
 
 A later PR will add the localhost Streamlit child. No Streamlit process is
 launched now.
+
+## Timing validation
+
+Worker timing settings are strict finite positive numbers. `NaN`, positive or
+negative infinity, booleans, zero, and negative values are rejected for polling,
+heartbeat, stale-job timeout, retry backoff, and shutdown grace settings.
+
+## Migration 0002 upgrade preflight
+
+`0002_worker_runtime.sql` creates the worker runtime table, the unique
+`uq_worker_instances_current_job` index, lease-recovery indexes, and running-job
+lease triggers. After creating the triggers it runs a no-op `UPDATE jobs` over
+existing rows so legacy v1 databases are validated against the new invariant.
+
+If a legacy database contains a `running` job without both `lease_owner` and
+`lease_expires_at`, the trigger aborts the migration. Because the migration SQL
+and migration-history insert share one transaction, the upgrade rolls back
+atomically and leaves the legacy rows unchanged for manual repair.
+
+## Event detail payloads
+
+`job_events.details_json` is a canonical JSON object. Infrastructure-owned keys
+such as `worker_id`, `attempt`, `maximum_attempts`, `available_at`, and `error`
+are reserved by the queue. Caller-supplied event metadata for failure/retry paths
+must be nested under the reserved `details` key so future top-level fields can be
+added without colliding with handler-defined payloads.
 
 ## Connection and transaction ownership
 

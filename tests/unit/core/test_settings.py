@@ -318,6 +318,19 @@ def test_invalid_worker_timing_relationship_fails(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), float("-inf")])
+def test_worker_timing_rejects_non_finite_and_boolean_values(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    with pytest.raises(ConfigurationError, match="positive finite numbers|must not be boolean"):
+        load_settings(
+            overrides={"worker": {"poll_interval_seconds": value}},
+            environ={},
+            base_directory=tmp_path,
+        )
+
+
 def test_invalid_worker_retry_backoff_relationship_fails(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError, match="retry_backoff_max_seconds"):
         load_settings(

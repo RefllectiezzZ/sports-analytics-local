@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -99,6 +100,59 @@ def test_claim_next_job_orders_by_priority_availability_and_updates_worker(tmp_p
         assert worker is not None and worker.current_job_id == first.id
         remaining = JobRepository(connection).list_jobs(status=JobStatus.PENDING)
         assert {job.id for job in remaining} == {later.id, second.id}
+
+
+def test_occupied_worker_cannot_claim_second_job_and_unique_index_rolls_back(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
+            _register_running_worker(connection)
+            first = _create_job(
+                connection,
+                job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            )
+            second = _create_job(
+                connection,
+                job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+            )
+            claim = _claim(connection, at=FIXED)
+            assert claim.job.id == first.id
+            with pytest.raises(JobLeaseError, match="already has current_job_id"):
+                queue.claim_next_job(
+                    worker_id=WORKER_ID,
+                    claimed_at=FIXED + timedelta(seconds=1),
+                    lease_duration_seconds=60,
+                    actor=WORKER_ID,
+                )
+
+        jobs = {job.id: job for job in JobRepository(connection).list_jobs()}
+        assert jobs[second.id].status is JobStatus.PENDING
+        assert jobs[second.id].attempts == 0
+        first_events = JobRepository(connection).list_job_events(first.id)
+        second_events = JobRepository(connection).list_job_events(second.id)
+        assert [event.event_type for event in first_events] == [
+            "created",
+            "claimed",
+        ]
+        assert [event.event_type for event in second_events] == ["created"]
+
+        with pytest.raises(sqlite3.IntegrityError):
+            with transaction(connection, immediate=True):
+                extra_worker = _register_running_worker(
+                    connection,
+                    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+                )
+                connection.execute(
+                    "UPDATE worker_instances SET current_job_id = ? WHERE id = ?",
+                    (first.id, extra_worker),
+                )
+        assert (
+            WorkerRepository(connection).get_worker("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2") is None
+        )
 
 
 def test_claim_requires_running_worker_and_active_transaction(tmp_path: Path) -> None:
@@ -231,6 +285,72 @@ def test_fail_retry_schedule_and_terminal_failure(tmp_path: Path) -> None:
         assert terminal.kind is JobFinalizationKind.FAILED
         assert terminal.job.status is JobStatus.FAILED
         assert terminal.job.finished_at == FIXED + timedelta(seconds=7)
+
+
+def test_fail_claimed_job_rejects_non_bool_retryable_without_writes(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    with connect_database(db) as connection:
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
+            _register_running_worker(connection)
+            _create_job(connection, job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1")
+            claim = _claim(connection, at=FIXED)
+            before_events = JobRepository(connection).list_job_events(claim.job.id)
+            with pytest.raises(RepositoryError, match="retryable must be a bool"):
+                queue.fail_claimed_job(
+                    job_id=claim.job.id,
+                    worker_id=WORKER_ID,
+                    expected_job_version=claim.job.version,
+                    failed_at=FIXED + timedelta(seconds=1),
+                    error="temporary",
+                    retryable=1,  # type: ignore[arg-type]
+                    actor="worker",
+                    retry_backoff_base_seconds=5,
+                    retry_backoff_max_seconds=300,
+                )
+
+        assert JobRepository(connection).get_job(claim.job.id) == claim.job
+        assert JobRepository(connection).list_job_events(claim.job.id) == before_events
+
+
+def test_fail_claimed_job_nests_hostile_details_under_details_key(tmp_path: Path) -> None:
+    db = tmp_path / "ops.sqlite3"
+    ensure_database_ready(db)
+    hostile_details = {
+        "worker_id": "evil",
+        "attempt": 99,
+        "maximum_attempts": 99,
+        "error": "masked",
+        "details": {"nested": "attacker"},
+    }
+    with connect_database(db) as connection:
+        queue = JobQueueRepository(connection)
+        with transaction(connection, immediate=True):
+            _register_running_worker(connection)
+            _create_job(connection, job_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1")
+            claim = _claim(connection, at=FIXED)
+            queue.fail_claimed_job(
+                job_id=claim.job.id,
+                worker_id=WORKER_ID,
+                expected_job_version=claim.job.version,
+                failed_at=FIXED + timedelta(seconds=1),
+                error="temporary",
+                retryable=True,
+                actor="worker",
+                retry_backoff_base_seconds=5,
+                retry_backoff_max_seconds=300,
+                details=hostile_details,
+            )
+
+        events = JobRepository(connection).list_job_events(claim.job.id)
+        retry_event = events[-1]
+        assert retry_event.event_type == "retry_scheduled"
+        assert retry_event.details["worker_id"] == WORKER_ID
+        assert retry_event.details["attempt"] == 1
+        assert retry_event.details["maximum_attempts"] == 2
+        assert retry_event.details["error"] == "temporary"
+        assert retry_event.details["details"] == hostile_details
 
 
 def test_recover_expired_leases_requeues_or_fails_and_clears_workers(tmp_path: Path) -> None:

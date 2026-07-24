@@ -79,14 +79,13 @@ def test_controller_marks_lease_lost_when_renewal_fails() -> None:
     assert context.is_lease_lost()
 
 
-def test_controller_requests_context_stop_before_renewal() -> None:
+def test_controller_continues_renewing_after_shutdown_request() -> None:
     service = _Service()
     context = _context()
-    checked = threading.Event()
+    shutdown_requested = threading.Event()
 
     def should_stop() -> bool:
-        checked.set()
-        return True
+        return shutdown_requested.is_set()
 
     controller = LeaseHeartbeatController(
         service=service,  # type: ignore[arg-type]
@@ -97,7 +96,9 @@ def test_controller_requests_context_stop_before_renewal() -> None:
         should_stop=should_stop,
     )
     controller.start()
-    assert checked.wait(timeout=1)
+    shutdown_requested.set()
+    assert service.called.wait(timeout=1)
     assert controller.stop(timeout_seconds=1)
     assert context.is_stop_requested()
-    assert service.calls == []
+    assert service.calls
+    assert not context.is_lease_lost()
