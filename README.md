@@ -34,6 +34,19 @@ Python **3.12** or newer is required.
 
 ## Setup
 
+Create a virtual environment and install the project with development dependencies.
+
+### Windows (PowerShell)
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+### Linux and macOS
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -62,6 +75,18 @@ Format sources (when needed):
 ```bash
 python -m ruff format .
 ```
+
+## Continuous integration
+
+Pull requests and pushes to `main` are automatically checked on **Ubuntu** and **Windows** with **Python 3.12**. Automated checks include:
+
+- dependency consistency (`pip check`);
+- pytest;
+- Ruff lint;
+- Ruff format verification;
+- mypy.
+
+Local validation remains required before opening a pull request. GitHub-hosted CI validates the same quality gates on both platforms; this repository does not claim broader Windows application testing beyond those checks.
 
 ## Pre-commit
 
@@ -95,6 +120,10 @@ Each file is currently a typed placeholder that prints a not-implemented message
 ├── .gitignore
 ├── .env.example
 ├── .pre-commit-config.yaml
+├── .github/
+│   ├── pull_request_template.md
+│   └── workflows/
+│       └── quality.yml
 ├── config/
 │   └── settings.example.toml
 ├── src/
