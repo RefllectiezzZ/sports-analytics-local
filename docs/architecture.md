@@ -1,10 +1,12 @@
 # Architecture
 
-This document describes the **intended** architecture for `sports-analytics-local`.
+This document describes the architecture for `sports-analytics-local`.
 
-**None of the application components described below are implemented in the current bootstrap task.** The repository currently provides packaging, placeholders, documentation, and quality tooling only.
+The repository currently provides packaging, typed configuration, local runtime
+bootstrap, placeholders, documentation, and quality tooling. Sports analytics
+business logic is **not** implemented yet.
 
-## Entry points (planned)
+## Entry points
 
 | Component | Role |
 | --- | --- |
@@ -13,6 +15,58 @@ This document describes the **intended** architecture for `sports-analytics-loca
 | `engine.py` | Coordinates feature generation, prediction, and combination generation. |
 | `worker.py` | Executes background jobs outside the Streamlit process. |
 | `run_local.py` | Coordinates local startup of the processes needed for localhost operation. |
+
+Each root script now bootstraps a shared local runtime (or validates
+configuration via `--validate-config`) and then reports that its business
+functionality is not implemented.
+
+## Configuration boundary
+
+- Immutable Pydantic v2 models in `sports_analytics.core.settings` define the
+  typed configuration surface (`Settings` and nested sections).
+- Configuration is loaded deterministically from layered sources. Precedence
+  (lowest to highest): built-in defaults, TOML file, `.env` file, operating-system
+  environment variables, explicit programmatic overrides.
+- Unknown sections and fields are rejected. Invalid values raise
+  `ConfigurationError` with concise, actionable messages.
+- There is no module-level settings singleton and no implicit memoization.
+
+See [configuration.md](configuration.md) for the full configuration reference.
+
+## Path resolution and directories
+
+- Pure path resolution (`resolve_paths`) converts configured paths into absolute
+  `RuntimePaths` against an explicit base directory.
+- Directory creation (`create_runtime_directories`) is a separate side effect and
+  is idempotent. It never creates the SQLite database file.
+- Relative paths resolve against the supplied base directory, not against an
+  imported module location. Absolute paths remain absolute.
+
+## Runtime context
+
+`bootstrap_runtime` loads settings, resolves paths, creates runtime directories,
+seeds deterministic generators, configures logging, and returns an immutable
+`RuntimeContext` containing the component name, settings, paths, UTC startup
+timestamp, and component logger.
+
+`--validate-config` uses `validate_configuration`, which loads and resolves
+settings without creating directories, writing log files, configuring persistent
+handlers, or seeding global random state.
+
+## Logging boundary
+
+- Standard-library logging only, under the `sports_analytics` namespace.
+- Console logging always goes to stderr.
+- Optional rotating file logging writes inside the resolved logs directory.
+- Timestamps are UTC. Project-managed handlers are marked and replaced
+  idempotently without calling `logging.basicConfig`.
+
+## Deterministic seeding
+
+Runtime bootstrap seeds Python `random` and NumPy's legacy global generator from
+`application.deterministic_seed`. Future code should prefer explicitly passed
+generators where practical. Hash randomization / `PYTHONHASHSEED` is not mutated
+after interpreter startup.
 
 ## Storage principles (planned)
 
@@ -38,7 +92,7 @@ This document describes the **intended** architecture for `sports-analytics-loca
 
 Application code lives under `src/sports_analytics/` with focused subpackages:
 
-- `core` — shared primitives
+- `core` — configuration, paths, logging, runtime bootstrap, shared CLI
 - `data` — persistence and dataset I/O
 - `scrapers` — ingestion adapters
 - `features` — feature engineering
@@ -47,11 +101,22 @@ Application code lives under `src/sports_analytics/` with focused subpackages:
 - `services` — workflow orchestration
 - `evaluation` — evaluation utilities
 
-## Bootstrap status
+## Current implementation status
 
-At bootstrap time:
+Implemented:
 
-- entry-point scripts are typed placeholders only;
-- no scraper, engine, worker, or Streamlit logic exists;
-- no SQLite schemas or Parquet pipelines exist;
-- no prediction, betting, or combination business logic exists.
+- typed configuration loading and validation;
+- path resolution and safe runtime directory creation;
+- local logging configuration;
+- deterministic seeding;
+- shared runtime bootstrap and CLI options;
+- placeholder entry points wired to that bootstrap.
+
+Explicitly **not** implemented yet:
+
+- SQLite schemas and connections;
+- worker job execution loops;
+- scraping adapters and HTTP clients;
+- modelling, feature engineering, predictions, and betting logic;
+- Streamlit UI components;
+- process spawning in `run_local.py`.

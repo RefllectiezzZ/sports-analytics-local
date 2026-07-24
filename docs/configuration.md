@@ -1,0 +1,192 @@
+# Configuration reference
+
+This document describes the local configuration system for
+`sports-analytics-local`.
+
+## Sections
+
+| Section | Purpose |
+| --- | --- |
+| `application` | Name, environment, timezone, deterministic seed |
+| `storage` | Local filesystem locations for data and logs |
+| `logging` | Console and optional rotating file logging |
+| `worker` | Timing settings for a future background worker |
+| `scraping` | Settings for a future ingestion coordinator |
+| `modelling` | Settings for future local modelling |
+
+All models are immutable after validation and reject unknown fields.
+
+## Built-in defaults
+
+The application starts with valid built-in defaults that correspond closely to
+`config/settings.example.toml`. A settings file is not required merely to start
+a placeholder entry point. Default relative paths remain under `storage/`.
+
+## Supported inputs and precedence
+
+Sources, from lowest to highest precedence:
+
+1. built-in model defaults
+2. TOML configuration file
+3. local `.env` file
+4. operating-system environment variables
+5. explicit programmatic overrides
+
+Each `load_settings(...)` call is deterministic from its explicit inputs. The
+loader does not mutate `os.environ`, does not cache settings globally, and does
+not search parent directories for configuration files.
+
+## TOML loading
+
+- Default path: `config/settings.toml`
+- If the default file is absent, built-in defaults continue.
+- If an explicitly selected file is absent, loading fails with
+  `ConfigurationError`.
+- Invalid TOML fails with `ConfigurationError`.
+- An empty valid TOML document means no overrides.
+- Unknown sections or keys fail validation.
+
+Use the standard-library `tomllib` module only.
+
+## `.env` loading
+
+- Default path: `.env`
+- Absent default `.env` is ignored.
+- An explicitly requested missing env file raises `ConfigurationError`.
+- Loading uses `python-dotenv` (`dotenv_values`) and does not mutate process
+  environment state.
+- Parent-directory `.env` files are not loaded automatically.
+
+## Environment variables
+
+Namespace prefix: `SPORTS_ANALYTICS_`
+
+Nested fields use a double underscore:
+
+```text
+SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=production
+SPORTS_ANALYTICS_APPLICATION__TIMEZONE=Europe/Lisbon
+SPORTS_ANALYTICS_LOGGING__LEVEL=DEBUG
+SPORTS_ANALYTICS_WORKER__POLL_INTERVAL_SECONDS=10
+SPORTS_ANALYTICS_SCRAPING__ENABLED=false
+```
+
+Rules:
+
+- Unrelated variables without the prefix are ignored.
+- Unknown prefixed variables are rejected via strict model validation.
+- Boolean and integer parsing uses Pydantic's typed parsing (for example
+  `true` / `false`), not custom permissive converters.
+
+### Control variable
+
+`SPORTS_ANALYTICS_CONFIG_PATH` selects the TOML file. It is **not** part of the
+validated settings model.
+
+Config-file selection precedence (separate from value precedence):
+
+1. explicit `config_path` / `--config`
+2. `SPORTS_ANALYTICS_CONFIG_PATH` from the operating-system environment mapping
+3. `SPORTS_ANALYTICS_CONFIG_PATH` from the `.env` file
+4. default `config/settings.toml`
+
+## Explicit programmatic overrides
+
+Callers and tests may pass an `overrides` mapping to `load_settings` or
+`bootstrap_runtime`. Overrides win over every other source. Input mappings are
+never mutated.
+
+## Relative path semantics
+
+Relative storage paths are resolved against an explicit base directory supplied
+to the loader / path resolver (normally the process working directory at
+bootstrap time). Absolute paths remain absolute. Resolution does not change the
+process working directory.
+
+## Validation behaviour
+
+Invalid values, unknown fields, malformed TOML, missing explicitly requested
+files, unsafe log file names, invalid timezones, invalid log levels, and invalid
+worker timing relationships all raise `ConfigurationError`. Human-facing messages
+identify the failure and relevant file or field when known. Secrets and complete
+environment dumps are never included.
+
+## CLI usage
+
+All five root entry points support:
+
+```bash
+python engine.py --validate-config
+python engine.py --config path/to/settings.toml
+python engine.py --env-file path/to/.env
+```
+
+### Windows PowerShell
+
+```powershell
+python engine.py --validate-config
+$env:SPORTS_ANALYTICS_LOGGING__LEVEL = "DEBUG"
+python engine.py
+```
+
+### Linux and macOS
+
+```bash
+python engine.py --validate-config
+SPORTS_ANALYTICS_LOGGING__LEVEL=DEBUG python engine.py
+```
+
+`--validate-config` validates and resolves configuration without creating
+runtime directories, writing log files, configuring persistent handlers, or seeding
+global random state.
+
+Normal execution bootstraps the runtime (directories, seeding, logging) and then
+prints that the component business functionality is not implemented.
+
+Exit codes:
+
+- `0` — success
+- `2` — expected configuration or bootstrap error
+
+## Logging
+
+- Console logging always available on stderr
+- Optional rotating file logging inside the resolved logs directory
+- UTC timestamps
+- Project-managed handlers are idempotent and closable for tests
+
+Do not log complete settings objects, environment mappings, tokens, or
+credentials.
+
+## Deterministic seed
+
+`application.deterministic_seed` seeds Python `random` and NumPy's legacy global
+generator during normal bootstrap only.
+
+## Security notes
+
+- Do not store secrets in TOML or committed example files.
+- Do not commit a real `.env`.
+- Do not evaluate configuration as code.
+- Do not load arbitrary Python configuration modules.
+- Do not use pickle for configuration.
+- Do not follow network URLs during configuration loading.
+
+## Representative example
+
+```toml
+[application]
+environment = "development"
+timezone = "UTC"
+deterministic_seed = 42
+
+[logging]
+level = "INFO"
+file_enabled = true
+file_name = "sports-analytics.log"
+```
+
+```bash
+SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=production
+SPORTS_ANALYTICS_LOGGING__LEVEL=WARNING
+```

@@ -1,10 +1,18 @@
 """Data ingestion coordinator entry point (placeholder)."""
 
+from collections.abc import Sequence
 
-def main() -> None:
-    """Print that the scraper coordinator is not implemented yet."""
-    print("scraper.py: Data ingestion coordinator is not implemented yet.")
+from sports_analytics.core.cli import run_component
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Bootstrap the scraper component and report that ingestion is not implemented."""
+    return run_component(
+        "scraper",
+        "Data ingestion coordinator entry point (placeholder).",
+        argv=argv,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
