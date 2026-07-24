@@ -431,5 +431,7 @@ def test_concurrent_claim_fences_single_job_to_one_worker(tmp_path: Path) -> Non
     assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert len(claimed) == 2
-    assert [job_id for _worker_id, job_id in claimed].count("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1") == 1
+    assert [job_id for _worker_id, job_id in claimed].count(
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+    ) == 1
     assert [job_id for _worker_id, job_id in claimed].count(None) == 1

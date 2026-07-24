@@ -7,7 +7,7 @@ phases; this document describes the current SQLite foundation only.
 ## Roles
 
 - **SQLite** stores operational state: application metadata, jobs, job events,
-  snapshot metadata, audit events, and migration history.
+  worker instances, snapshot metadata, audit events, and migration history.
 - **Parquet** (future) will store historical and analytical datasets under
   versioned snapshot directories. Repository methods do not write Parquet files.
 
@@ -74,6 +74,12 @@ repositories        -> own neither
 - Public repository write methods **actively enforce** an open transaction via
   `require_active_transaction(...)` before mutating state. Calling them outside
   `transaction(...)` raises `RepositoryError` and writes nothing.
+- Worker queue operations are mediated by `WorkerService`, which opens a
+  short-lived connection per operation and owns the required transaction. Claim,
+  recovery, lease renewal, completion, failure, and worker-status mutations use
+  `transaction(connection, immediate=True)` where write contention matters.
+- Job handlers run outside SQLite transactions and never share a connection with
+  the worker heartbeat thread.
 
 ## Migrations
 
@@ -84,6 +90,7 @@ Filename pattern:
 
 ```text
 0001_initial.sql
+0002_worker_runtime.sql
 ```
 
 Rules:
@@ -161,6 +168,16 @@ Applied migrations are immutable:
 - history is never rewritten automatically;
 - never edit an applied migration file after it has shipped.
 
+Current packaged migrations:
+
+| Version | File | Checksum |
+| --- | --- | --- |
+| 1 | `0001_initial.sql` | `404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de` |
+| 2 | `0002_worker_runtime.sql` | `b3a8d93ae81ce2e21ae9e74a420bf598b345d63fe4ed11d4d84ced6302021faa` |
+
+Migration `0001_initial.sql` is unchanged. Schema version `2` adds the durable
+worker runtime metadata and queue lease integrity described below.
+
 ## Automatic startup migration
 
 Normal runtime bootstrap:
@@ -192,7 +209,7 @@ All five root scripts support mutually exclusive modes:
 no migrations, and prints:
 
 ```text
-database valid: path=... current_version=1 latest_version=1 pending=0
+database valid: path=... current_version=2 latest_version=2 pending=0
 ```
 
 Expected database failures return exit code `2` with a concise stderr message and
@@ -208,20 +225,43 @@ Migration `0001_initial` creates:
 - `snapshots`
 - `audit_events`
 
+Migration `0002_worker_runtime` creates:
+
+- `worker_instances`
+
+and adds worker/lease indexes:
+
+- `idx_worker_instances_status_heartbeat`
+- `idx_worker_instances_heartbeat`
+- `idx_worker_instances_current_job`
+- `idx_jobs_running_lease_expires`
+
+It also adds triggers:
+
+- `trg_jobs_running_lease_insert`
+- `trg_jobs_running_lease_update`
+
 No sports-domain tables (teams, fixtures, odds, predictions, bets, etc.) exist
 yet.
 
 ### Job priority
 
-Lower integer means higher priority. Default priority is `100`. Future worker
-selection will order pending jobs by:
+Lower integer means higher priority. Default priority is `100`. Worker claim
+selection orders available pending jobs by:
 
 1. `priority` ascending
 2. `available_at` ascending
 3. `created_at` ascending
 4. `id` ascending
 
-Lease columns exist for a future worker PR; this phase does not claim leases.
+Running jobs must hold a complete lease. The `0002` triggers enforce the lease
+invariant at the database boundary:
+
+- `status = 'running'` requires both `lease_owner` and `lease_expires_at`;
+- any non-running status must have both lease columns NULL.
+
+The partial `idx_jobs_running_lease_expires` index supports recovery scans for
+expired running-job leases ordered by `lease_expires_at`, `updated_at`, and `id`.
 
 Retry transitions (`running|failed -> pending`) require an explicit
 `retry=True` argument. Ordinary `transition_job` calls cannot retry. Retries are
@@ -229,6 +269,32 @@ rejected when `attempts >= maximum_attempts`, clear lease fields and
 `finished_at`, preserve `last_error` for history, increment version once, and
 append exactly one event in the same transaction. Starting a job
 (`pending -> running`) is also rejected when attempts are already exhausted.
+
+Worker-driven retries use deterministic backoff:
+
+```text
+min(max, base * 2**(attempts-1))
+```
+
+where `attempts` is the count after the job was claimed.
+
+### Worker instances
+
+`worker_instances` records durable local worker process state:
+
+- canonical worker UUID (`id`);
+- process metadata (`name`, `process_id`, `hostname`);
+- lifecycle timestamps (`started_at`, `heartbeat_at`, `stopping_at`,
+  `stopped_at`);
+- current job pointer;
+- status (`starting`, `running`, `stopping`, `stopped`, `failed`);
+- capabilities JSON;
+- optimistic version.
+
+Worker UUIDs fence job ownership. Lease renewal and finalization require the
+current `lease_owner`, expected job version, live lease, and compatible worker
+state. Stale workers and expired leases are recovered through explicit worker
+service operations; there is no force-cancellation path for a running handler.
 
 Repository numeric arguments such as priority, attempts bounds, versions,
 row counts, limits, and offsets use strict `int` validation (bools, floats, and
@@ -271,7 +337,7 @@ manual database manipulation. Do not edit applied migration history by hand.
 
 ## Current limitations
 
-- No worker polling, lease claiming, or retry scheduler.
+- No sports-domain job handlers.
 - No Parquet writers.
 - No sports-domain schema.
 - No scraping, modelling, betting, or Streamlit UI logic.

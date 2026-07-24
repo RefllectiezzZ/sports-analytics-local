@@ -276,11 +276,7 @@ class WorkerRepository:
             self._connection,
             operation="WorkerRepository.mark_worker_stopped",
         )
-        note = (
-            sanitize_error_text(shutdown_note)
-            if shutdown_note is not None
-            else None
-        )
+        note = sanitize_error_text(shutdown_note) if shutdown_note is not None else None
         return self._transition_status(
             worker_id,
             expected_version=expected_version,
@@ -343,10 +339,7 @@ class WorkerRepository:
             clauses.append("status = ?")
             params.append(status.value)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = (
-            f"SELECT * FROM {WORKER_INSTANCES_TABLE} {where} "
-            "ORDER BY started_at ASC, id ASC"
-        )
+        sql = f"SELECT * FROM {WORKER_INSTANCES_TABLE} {where} ORDER BY started_at ASC, id ASC"
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
@@ -557,16 +550,12 @@ class WorkerRepository:
             started_at=parse_utc_timestamp(str(row["started_at"])),
             heartbeat_at=parse_utc_timestamp(str(row["heartbeat_at"])),
             stopping_at=(
-                None
-                if row["stopping_at"] is None
-                else parse_utc_timestamp(str(row["stopping_at"]))
+                None if row["stopping_at"] is None else parse_utc_timestamp(str(row["stopping_at"]))
             ),
             stopped_at=(
                 None if row["stopped_at"] is None else parse_utc_timestamp(str(row["stopped_at"]))
             ),
-            current_job_id=(
-                None if row["current_job_id"] is None else str(row["current_job_id"])
-            ),
+            current_job_id=(None if row["current_job_id"] is None else str(row["current_job_id"])),
             last_error=None if row["last_error"] is None else str(row["last_error"]),
             capabilities=capabilities,
             version=int(row["version"]),

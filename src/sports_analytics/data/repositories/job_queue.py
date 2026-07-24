@@ -824,9 +824,7 @@ class JobQueueRepository:
                 raise RepositoryError(msg) from exc
             return int(row["count"]) if row is not None else 0
 
-        pending = _count(
-            f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'pending'"
-        )
+        pending = _count(f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'pending'")
         available = _count(
             f"""
             SELECT COUNT(*) AS count FROM {JOBS_TABLE}
@@ -841,18 +839,10 @@ class JobQueueRepository:
             """,
             (now_text,),
         )
-        running = _count(
-            f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'running'"
-        )
-        succeeded = _count(
-            f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'succeeded'"
-        )
-        failed = _count(
-            f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'failed'"
-        )
-        cancelled = _count(
-            f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'cancelled'"
-        )
+        running = _count(f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'running'")
+        succeeded = _count(f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'succeeded'")
+        failed = _count(f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'failed'")
+        cancelled = _count(f"SELECT COUNT(*) AS count FROM {JOBS_TABLE} WHERE status = 'cancelled'")
         expired = _count(
             f"""
             SELECT COUNT(*) AS count FROM {JOBS_TABLE}
@@ -936,9 +926,11 @@ class JobQueueRepository:
         if worker is None:
             msg = f"worker not found: {normalized_worker}"
             raise JobLeaseError(msg)
-        allowed = {WorkerStatus.RUNNING, WorkerStatus.STOPPING} if allow_stopping_worker else {
-            WorkerStatus.RUNNING
-        }
+        allowed = (
+            {WorkerStatus.RUNNING, WorkerStatus.STOPPING}
+            if allow_stopping_worker
+            else {WorkerStatus.RUNNING}
+        )
         if worker.status not in allowed:
             msg = f"worker {normalized_worker} status {worker.status.value} cannot own a lease"
             raise JobLeaseError(msg)
@@ -976,7 +968,5 @@ class JobQueueRepository:
             ),
         )
         if cursor.rowcount != 1:
-            msg = (
-                f"worker {worker_id} current_job_id could not be cleared for job {job_id}"
-            )
+            msg = f"worker {worker_id} current_job_id could not be cleared for job {job_id}"
             raise JobLeaseError(msg)

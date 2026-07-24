@@ -208,11 +208,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the local supervisor CLI."""
     parser = build_argument_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    if (
-        args.validate_config
-        or args.database_status
-        or args.migrate_database
-    ) and (args.worker_once or args.worker_max_jobs is not None or args.worker_id is not None):
+    if (args.validate_config or args.database_status or args.migrate_database) and (
+        args.worker_once or args.worker_max_jobs is not None or args.worker_id is not None
+    ):
         parser.error("worker forwarding options cannot be combined with shared CLI modes")
     try:
         common_exit = handle_common_modes(args)

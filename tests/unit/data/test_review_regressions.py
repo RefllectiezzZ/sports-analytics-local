@@ -565,7 +565,7 @@ def test_retry_limits_cannot_create_unstartable_pending_job(tmp_path: Path) -> N
         queue = JobQueueRepository(connection)
         with transaction(connection):
             _register_running_worker(connection)
-            job = repo.create_job(
+            repo.create_job(
                 job_type="demo.job",
                 payload={},
                 maximum_attempts=1,

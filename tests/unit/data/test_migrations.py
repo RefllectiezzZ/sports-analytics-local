@@ -56,12 +56,8 @@ def test_migration_discovery_deterministic_and_from_package() -> None:
         "0001_initial.sql",
         "0002_worker_runtime.sql",
     ]
-    assert first[0].checksum == (
-        "404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de"
-    )
-    assert first[1].checksum == (
-        "b3a8d93ae81ce2e21ae9e74a420bf598b345d63fe4ed11d4d84ced6302021faa"
-    )
+    assert first[0].checksum == ("404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de")
+    assert first[1].checksum == ("b3a8d93ae81ce2e21ae9e74a420bf598b345d63fe4ed11d4d84ced6302021faa")
     packaged = resources.files("sports_analytics.data.sql.migrations").joinpath("0001_initial.sql")
     assert packaged.is_file()
     text = packaged.read_text(encoding="utf-8")

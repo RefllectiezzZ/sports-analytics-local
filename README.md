@@ -21,10 +21,10 @@ Provide a localhost-only toolchain that:
 ## Current status
 
 This repository is in **pre-alpha** state. Packaging, typed configuration, local
-runtime bootstrap, SQLite operational persistence, migrations, documentation,
-linting, typing, and tests are in place. Application features (scraping,
-modelling, predictions, Streamlit UI, workers, and sports-domain schemas) are
-**not implemented**.
+runtime bootstrap, SQLite operational persistence, migrations, durable worker
+infrastructure, documentation, linting, typing, and tests are in place.
+Application features (scraping, modelling, predictions, Streamlit UI, and
+sports-domain schemas/jobs) are **not implemented**.
 
 ## Supported Python version
 
@@ -113,9 +113,9 @@ Default SQLite location (configurable via `storage.sqlite_path`):
 storage/operational.sqlite3
 ```
 
-No sports-domain data tables or model schemas exist yet. The initial schema covers
-operational foundations only: application metadata, jobs, job events, snapshot
-metadata, and audit events.
+No sports-domain data tables or model schemas exist yet. The current schema
+covers operational foundations only: application metadata, jobs, job events,
+worker instances, snapshot metadata, and audit events.
 
 Logging:
 
@@ -146,6 +146,25 @@ The first `--database-status` call fails when the database is missing and create
 nothing. `--migrate-database` creates the parent directory if needed and applies
 pending migrations. The final `--database-status` call succeeds when the database
 is valid and up to date.
+
+### Worker and local supervisor
+
+```bash
+python worker.py --queue-status
+python worker.py --recover-expired-leases
+python worker.py --once
+python worker.py
+python run_local.py
+python run_local.py --worker-once
+```
+
+`worker.py` runs the durable local job worker. `--queue-status` is read-only,
+`--recover-expired-leases` runs one recovery batch, `--once` claims at most one
+currently available job, and no flag starts the polling loop.
+
+`run_local.py` currently supervises **only** the worker child process. Streamlit
+supervision is planned for a later phase. The built-in `system.noop` job handler
+is infrastructure-only test plumbing; no sports-domain jobs exist yet.
 
 ### Windows PowerShell overrides
 
@@ -205,18 +224,19 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-## Entry-point placeholders
+## Entry points
 
 | File | Future role |
 | --- | --- |
 | `app.py` | Streamlit user interface entry point |
 | `scraper.py` | Coordinates permitted public data ingestion |
 | `engine.py` | Coordinates features, predictions, and combinations |
-| `worker.py` | Runs background jobs outside the Streamlit process |
-| `run_local.py` | Coordinates local multi-process startup |
+| `worker.py` | Runs durable background jobs outside the Streamlit process |
+| `run_local.py` | Supervises the local worker child process |
 
-Each file bootstraps the shared local runtime (or runs a validation / database
-CLI mode) and then reports that its business functionality is not implemented.
+Each file supports shared validation / database CLI modes. `worker.py` and
+`run_local.py` implement durable worker infrastructure; `app.py`, `scraper.py`,
+and `engine.py` remain business-function placeholders after bootstrap.
 
 ## Directory structure
 
@@ -263,7 +283,8 @@ CLI mode) and then reports that its business functionality is not implemented.
     ├── architecture.md
     ├── configuration.md
     ├── database.md
-    └── development.md
+    ├── development.md
+    └── worker.md
 ```
 
 ## High-level future architecture
@@ -271,7 +292,7 @@ CLI mode) and then reports that its business functionality is not implemented.
 - **Streamlit** (`app.py`) for local interactive use.
 - **Scraper coordinator** (`scraper.py`) for permitted public sources only.
 - **Engine** (`engine.py`) for deterministic feature generation, local models, and combination proposals.
-- **Worker** (`worker.py`) for durable background jobs and retries.
+- **Worker** (`worker.py`) for durable background jobs, leases, and retries.
 - **SQLite** for operational state, jobs, snapshot metadata, and audit records.
 - **Parquet** for historical and analytical datasets under versioned snapshots.
 
@@ -281,9 +302,13 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 
 - No scraping, prediction, ML, betting, or UI logic is implemented.
 - No sports-domain database schemas are defined.
-- No background job claiming or worker loop is implemented.
+- Durable worker claiming, lease heartbeat, expired-lease recovery, and
+  `run_local.py` worker supervision are implemented.
+- `run_local.py` supervises only the worker; no Streamlit child process is
+  started yet.
+- `system.noop` is infrastructure-only; no sports-domain jobs exist yet.
 - Configuration, runtime bootstrap, and operational SQLite persistence are implemented.
-- Entry points remain functional placeholders after bootstrap.
+- Non-worker business entry points remain functional placeholders after bootstrap.
 
 ## Contribution workflow
 

@@ -254,7 +254,7 @@ def test_retry_and_failed_requirements(tmp_path: Path) -> None:
         queue = JobQueueRepository(connection)
         with transaction(connection):
             _register_running_worker(connection)
-            job = repo.create_job(
+            repo.create_job(
                 job_type="ingest.refresh",
                 payload={},
                 maximum_attempts=1,

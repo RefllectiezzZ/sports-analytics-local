@@ -213,8 +213,7 @@ def test_state_from_finalization_mapping() -> None:
         is JobExecutionState.RETRY_SCHEDULED
     )
     assert (
-        LocalWorker._state_from_finalization(JobFinalizationKind.FAILED)
-        is JobExecutionState.FAILED
+        LocalWorker._state_from_finalization(JobFinalizationKind.FAILED) is JobExecutionState.FAILED
     )
     assert (
         LocalWorker._state_from_finalization(JobFinalizationKind.SUCCEEDED)

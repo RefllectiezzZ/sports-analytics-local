@@ -30,9 +30,11 @@ def test_migration_0002_discovered_with_expected_checksum() -> None:
     assert migrations[1].name == "worker_runtime"
     assert migrations[1].checksum == CHECKSUM_0002
 
-    text = resources.files("sports_analytics.data.sql.migrations").joinpath(
-        "0002_worker_runtime.sql"
-    ).read_text(encoding="utf-8")
+    text = (
+        resources.files("sports_analytics.data.sql.migrations")
+        .joinpath("0002_worker_runtime.sql")
+        .read_text(encoding="utf-8")
+    )
     assert compute_migration_checksum(text) == CHECKSUM_0002
     statements = split_sql_statements(text)
     assert sum(1 for statement in statements if statement.upper().startswith("CREATE TRIGGER")) == 2
@@ -94,26 +96,25 @@ def test_running_job_lease_triggers_reject_inconsistent_rows(tmp_path: Path) -> 
         )
         with pytest.raises(sqlite3.IntegrityError, match="running job requires complete lease"):
             connection.execute(
-                base
-                + "('j1', 'demo.job', '{}', 'running', 100, 1, 2, 't', NULL, NULL, "
+                base + "('j1', 'demo.job', '{}', 'running', 100, 1, 2, 't', NULL, NULL, "
                 "'t', 't', 't', NULL, 1)"
             )
         with pytest.raises(sqlite3.IntegrityError, match="non-running job must not retain a lease"):
             connection.execute(
-                base
-                + "('j2', 'demo.job', '{}', 'pending', 100, 0, 2, 't', 'worker', "
+                base + "('j2', 'demo.job', '{}', 'pending', 100, 0, 2, 't', 'worker', "
                 "'future', 't', 't', NULL, NULL, 1)"
             )
 
         connection.execute(
-            base
-            + "('j3', 'demo.job', '{}', 'running', 100, 1, 2, 't', 'worker', "
+            base + "('j3', 'demo.job', '{}', 'running', 100, 1, 2, 't', 'worker', "
             "'future', 't', 't', 't', NULL, 1)"
         )
         with pytest.raises(sqlite3.IntegrityError, match="running job requires complete lease"):
             connection.execute("UPDATE jobs SET lease_owner = NULL WHERE id = 'j3'")
         with pytest.raises(sqlite3.IntegrityError, match="non-running job must not retain a lease"):
-            connection.execute("UPDATE jobs SET status = 'failed', finished_at = 't' WHERE id = 'j3'")
+            connection.execute(
+                "UPDATE jobs SET status = 'failed', finished_at = 't' WHERE id = 'j3'"
+            )
 
 
 def test_upgrade_from_version_1_applies_only_0002(tmp_path: Path) -> None:

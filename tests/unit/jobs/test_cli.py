@@ -38,23 +38,29 @@ def test_formatters_are_stable() -> None:
         "queue status: pending=1 available=2 delayed=3 running=4 expired=8 "
         "succeeded=5 failed=6 cancelled=7 workers_active=9 workers_stale=10"
     )
-    assert cli.format_lease_recovery(
-        LeaseRecoveryResult(
-            scanned_count=3,
-            requeued_count=2,
-            failed_count=1,
-            requeued_job_ids=("a", "b"),
-            failed_job_ids=("c",),
+    assert (
+        cli.format_lease_recovery(
+            LeaseRecoveryResult(
+                scanned_count=3,
+                requeued_count=2,
+                failed_count=1,
+                requeued_job_ids=("a", "b"),
+                failed_job_ids=("c",),
+            )
         )
-    ) == "lease recovery: scanned=3 requeued=2 failed=1"
-    assert cli.format_worker_result(
-        WorkerRunResult(
-            worker_id="worker",
-            jobs_processed=4,
-            stop_reason="max_jobs",
-            status=WorkerStatus.STOPPED,
+        == "lease recovery: scanned=3 requeued=2 failed=1"
+    )
+    assert (
+        cli.format_worker_result(
+            WorkerRunResult(
+                worker_id="worker",
+                jobs_processed=4,
+                stop_reason="max_jobs",
+                status=WorkerStatus.STOPPED,
+            )
         )
-    ) == "worker stopped: worker_id=worker jobs_processed=4 stop_reason=max_jobs status=stopped"
+        == "worker stopped: worker_id=worker jobs_processed=4 stop_reason=max_jobs status=stopped"
+    )
 
 
 def test_worker_once_mode_runs_without_jobs(
@@ -85,9 +91,9 @@ def test_queue_status_is_read_only_for_existing_database(
     ensure_database_ready(db)
     config = isolated_cwd / "settings.toml"
     config.write_text(
-        "[application]\nenvironment = \"test\"\n"
+        '[application]\nenvironment = "test"\n'
         "[logging]\nfile_enabled = false\n"
-        "[storage]\nsqlite_path = \"storage/operational.sqlite3\"\n",
+        '[storage]\nsqlite_path = "storage/operational.sqlite3"\n',
         encoding="utf-8",
     )
     before = db.stat().st_mtime_ns

@@ -105,9 +105,14 @@ databases.
 3. Load migrations only through `importlib.resources` (package data), never via
    repository-relative filesystem paths in application code.
 4. Never edit an already-applied migration after it has shipped. Checksums are
-   immutable.
+   immutable. In particular, `0001_initial.sql` must remain unchanged; its
+   checksum is
+   `404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de`.
 5. Add tests that exercise discovery from the installed package resource path.
-6. Document the new version in the pull request.
+6. When adding tests for `0002_worker_runtime.sql`, cover the
+   `worker_instances` table, worker indexes, `idx_jobs_running_lease_expires`,
+   and the running-job lease triggers for both insert and update paths.
+7. Document the new version and checksum in the pull request.
 
 ### Transaction ownership
 
@@ -144,6 +149,46 @@ with connect_database(path) as connection:
 - cleanup tests should assert that rollback/close failures do not replace an
   already-active caller or commit exception, while close failures after a
   successful body still propagate
+
+### Durable worker handlers
+
+Handlers implement the `JobHandler` protocol:
+
+```python
+def handler(context: JobExecutionContext, payload: JsonValue) -> JsonValue:
+    context.checkpoint()
+    ...
+    return {"ok": True}
+```
+
+Guidelines:
+
+- register handlers through a local `HandlerRegistry`; do not load executable
+  code from job payloads, database rows, environment variables, arbitrary module
+  paths, or user-entered import strings;
+- keep handlers idempotent before they perform side effects. The queue is
+  at-least-once, so a job can run again after crash, lease expiry, and recovery;
+- call `context.checkpoint()` around meaningful work so cooperative shutdown and
+  lease-loss checks are observed;
+- raise `RetryableJobError` for transient failures and `PermanentJobError` for
+  terminal validation/business failures;
+- return canonical JSON-compatible data only;
+- do not log payloads, result JSON, credentials, tokens, or raw external
+  responses;
+- treat `system.noop` as infrastructure-only test plumbing. Do not enqueue it as
+  product work and do not build sports-domain behaviour on top of it.
+
+Worker tests should inject clocks, sleepers, monotonic time, UUID factories, and
+process metadata rather than relying on wall-clock sleeps or host-specific
+values. Concurrency tests should exercise atomic claim ordering, lease fencing,
+heartbeat renewal, expired-lease recovery, and finalization rejection for stale
+owners. Prefer explicit `BEGIN IMMEDIATE` contention tests over timing-sensitive
+thread sleeps when practical.
+
+On Windows, subprocess tests must clean up children deterministically. Assert
+that supervised worker children receive terminate first, that
+`shutdown_grace_seconds` is respected, and that stubborn children are killed and
+waited on before temporary files or SQLite databases are removed.
 
 ### Logging and secrets
 

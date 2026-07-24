@@ -54,9 +54,9 @@ def test_supervisor_run_migrates_database_and_starts_worker_with_absolute_paths(
     config = isolated_cwd / "settings.toml"
     env_file = isolated_cwd / ".env"
     config.write_text(
-        "[application]\nenvironment = \"test\"\n"
+        '[application]\nenvironment = "test"\n'
         "[logging]\nfile_enabled = false\n"
-        "[storage]\nsqlite_path = \"storage/operational.sqlite3\"\n",
+        '[storage]\nsqlite_path = "storage/operational.sqlite3"\n',
         encoding="utf-8",
     )
     env_file.write_text("SPORTS_ANALYTICS_LOGGING__LEVEL=INFO\n", encoding="utf-8")
