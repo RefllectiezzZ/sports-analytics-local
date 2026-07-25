@@ -10,7 +10,6 @@ from sports_analytics.core.exceptions import FeatureError, PredictionError
 from sports_analytics.core.paths import RuntimePaths
 from sports_analytics.features.football.datasets import load_feature_artifact
 from sports_analytics.features.football.specification import FOOTBALL_1X2_FEATURE_NAMES_V1
-from sports_analytics.sports.football.markets import match_result_1x2_selection
 from sports_analytics.models.artifacts import (
     ModelArtifact,
     infer_calibrated_probabilities,
@@ -31,6 +30,7 @@ from sports_analytics.predictions.football import (
     _model_input_snapshots,
     predict_football_1x2,
 )
+from sports_analytics.sports.football.markets import match_result_1x2_selection
 
 
 @dataclass(frozen=True, slots=True)
