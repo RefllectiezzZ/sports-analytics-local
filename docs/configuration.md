@@ -10,7 +10,7 @@ This document describes the local configuration system for
 | `application` | Name, environment, timezone, deterministic seed |
 | `storage` | Local filesystem locations for data and logs |
 | `logging` | Console and optional rotating file logging |
-| `worker` | Timing settings for a future background worker |
+| `worker` | Durable local worker timing, lease, retry, and shutdown settings |
 | `scraping` | Settings for a future ingestion coordinator |
 | `modelling` | Settings for future local modelling |
 
@@ -77,6 +77,12 @@ SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=production
 SPORTS_ANALYTICS_APPLICATION__TIMEZONE=Europe/Lisbon
 SPORTS_ANALYTICS_LOGGING__LEVEL=DEBUG
 SPORTS_ANALYTICS_WORKER__POLL_INTERVAL_SECONDS=10
+SPORTS_ANALYTICS_WORKER__HEARTBEAT_INTERVAL_SECONDS=5
+SPORTS_ANALYTICS_WORKER__STALE_JOB_TIMEOUT_SECONDS=60
+SPORTS_ANALYTICS_WORKER__RETRY_BACKOFF_BASE_SECONDS=5
+SPORTS_ANALYTICS_WORKER__RETRY_BACKOFF_MAX_SECONDS=300
+SPORTS_ANALYTICS_WORKER__SHUTDOWN_GRACE_SECONDS=30
+SPORTS_ANALYTICS_WORKER__RECOVERY_BATCH_SIZE=100
 SPORTS_ANALYTICS_SCRAPING__ENABLED=false
 ```
 
@@ -125,6 +131,48 @@ Component identifiers are validated in **both** normal bootstrap and
 `--validate-config` CLI modes. Invalid component names return exit code `2`
 without creating directories or log files.
 
+### Worker settings
+
+The `worker` section controls durable queue polling, lease ownership, retry
+backoff, and process shutdown:
+
+| Field | Default | Meaning |
+| --- | ---: | --- |
+| `poll_interval_seconds` | `30` | Idle sleep between claim attempts when no job is available. |
+| `heartbeat_interval_seconds` | `15` | Interval for idle worker heartbeats and running-job lease renewals. |
+| `stale_job_timeout_seconds` | `300` | Lease duration and stale-worker threshold. |
+| `retry_backoff_base_seconds` | `5` | First retry delay after a failed claimed attempt. |
+| `retry_backoff_max_seconds` | `300` | Maximum deterministic retry delay. |
+| `shutdown_grace_seconds` | `30` | Grace period for worker heartbeat cleanup and supervised child termination. |
+| `recovery_batch_size` | `100` | Maximum expired running-job leases recovered in one pass. |
+
+Validation relationships:
+
+- all worker timing settings must be positive finite representable durations:
+  `NaN`, positive or negative infinity, booleans, zero, negative values, and
+  values above the maximum supported duration (30 days /
+  `MAX_DURATION_SECONDS`) are rejected before filesystem, logging, random,
+  database, worker, or subprocess side effects;
+- `stale_job_timeout_seconds` must be greater than
+  `heartbeat_interval_seconds`;
+- `retry_backoff_max_seconds` must be greater than or equal to
+  `retry_backoff_base_seconds`;
+- `recovery_batch_size` must be a strict positive integer from `1` through
+  `MAX_RECOVERY_BATCH_SIZE` (`5000`): real `int` values in range, or canonical
+  decimal digit strings matching `^[1-9][0-9]*$` within that range. Booleans,
+  floats (including `1.0`), scientific notation, signed forms, whitespace
+  padding, leading zeros, empty strings, zero, negatives, values above the
+  maximum, and excessively long digit strings are rejected before `int()`
+  conversion. Accepted values are normalized to `int` before field validation.
+
+Retry scheduling is deterministic and has no jitter:
+
+```text
+min(max, base * 2**(attempts-1))
+```
+
+where `attempts` is the count after the job was claimed.
+
 ### Test isolation
 
 Configuration and entry-point tests must isolate:
@@ -148,6 +196,10 @@ python engine.py --database-status
 python engine.py --migrate-database
 python engine.py --config path/to/settings.toml
 python engine.py --env-file path/to/.env
+python worker.py --queue-status
+python worker.py --recover-expired-leases
+python worker.py --once
+python run_local.py --worker-once
 ```
 
 ### Windows PowerShell
@@ -177,9 +229,11 @@ migrations. Missing or inconsistent databases return exit code `2`.
 needed, applies pending migrations, and exits without starting workers or
 business workflows.
 
-Normal execution bootstraps the runtime (directories, seeding, logging, automatic
-idempotent SQLite migration) and then prints that the component business
-functionality is not implemented.
+Normal non-worker execution bootstraps the runtime (directories, seeding,
+logging, automatic idempotent SQLite migration) and then prints that the
+component business functionality is not implemented. `worker.py` starts the
+durable local worker, and `run_local.py` currently supervises only that worker
+child.
 
 Default SQLite path: `storage/operational.sqlite3` (`storage.sqlite_path`).
 
@@ -220,6 +274,15 @@ environment = "development"
 timezone = "UTC"
 deterministic_seed = 42
 
+[worker]
+poll_interval_seconds = 30
+heartbeat_interval_seconds = 15
+stale_job_timeout_seconds = 300
+retry_backoff_base_seconds = 5
+retry_backoff_max_seconds = 300
+shutdown_grace_seconds = 30
+recovery_batch_size = 100
+
 [logging]
 level = "INFO"
 file_enabled = true
@@ -229,4 +292,6 @@ file_name = "sports-analytics.log"
 ```bash
 SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=production
 SPORTS_ANALYTICS_LOGGING__LEVEL=WARNING
+SPORTS_ANALYTICS_WORKER__HEARTBEAT_INTERVAL_SECONDS=10
+SPORTS_ANALYTICS_WORKER__STALE_JOB_TIMEOUT_SECONDS=120
 ```

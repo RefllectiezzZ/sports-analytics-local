@@ -40,6 +40,7 @@ _PLACEHOLDER_MESSAGES: Final[dict[str, str]] = {
 def build_argument_parser(component: str, description: str) -> argparse.ArgumentParser:
     """Build the shared argparse parser for a root component."""
     parser = argparse.ArgumentParser(prog=component, description=description)
+    parser.set_defaults(_component=component)
     parser.add_argument(
         "--config",
         dest="config",
@@ -85,6 +86,46 @@ def build_argument_parser(component: str, description: str) -> argparse.Argument
     return parser
 
 
+def has_common_mode(args: argparse.Namespace) -> bool:
+    """Return whether parsed arguments select a shared one-shot mode."""
+    return bool(args.validate_config or args.database_status or args.migrate_database)
+
+
+def handle_common_modes(args: argparse.Namespace) -> int | None:
+    """Handle shared validation and database modes, returning ``None`` otherwise."""
+    component_name = validate_component_name(str(args._component))
+    if args.validate_config:
+        settings, paths = validate_configuration(
+            config_path=args.config,
+            env_file=args.env_file,
+        )
+        print(format_validation_success(settings, paths))
+        return SUCCESS_EXIT
+
+    if args.database_status:
+        settings, paths = validate_configuration(
+            config_path=args.config,
+            env_file=args.env_file,
+        )
+        status = inspect_database_status(settings, paths)
+        print(format_status_or_raise(status))
+        if not status.is_up_to_date:
+            return CONFIG_ERROR_EXIT
+        return SUCCESS_EXIT
+
+    if args.migrate_database:
+        settings, paths = validate_configuration(
+            config_path=args.config,
+            env_file=args.env_file,
+        )
+        result = migrate_database(settings, paths)
+        print(format_migration_result(result))
+        return SUCCESS_EXIT
+
+    del component_name
+    return None
+
+
 def run_component(
     component: str,
     description: str,
@@ -100,33 +141,9 @@ def run_component(
 
     try:
         component_name = validate_component_name(component)
-        if args.validate_config:
-            settings, paths = validate_configuration(
-                config_path=args.config,
-                env_file=args.env_file,
-            )
-            print(format_validation_success(settings, paths))
-            return SUCCESS_EXIT
-
-        if args.database_status:
-            settings, paths = validate_configuration(
-                config_path=args.config,
-                env_file=args.env_file,
-            )
-            status = inspect_database_status(settings, paths)
-            print(format_status_or_raise(status))
-            if not status.is_up_to_date:
-                return CONFIG_ERROR_EXIT
-            return SUCCESS_EXIT
-
-        if args.migrate_database:
-            settings, paths = validate_configuration(
-                config_path=args.config,
-                env_file=args.env_file,
-            )
-            result = migrate_database(settings, paths)
-            print(format_migration_result(result))
-            return SUCCESS_EXIT
+        common_exit = handle_common_modes(args)
+        if common_exit is not None:
+            return common_exit
 
         context = bootstrap_runtime(
             component_name,

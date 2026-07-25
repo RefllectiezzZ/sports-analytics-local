@@ -11,6 +11,27 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 from sports_analytics.core.exceptions import RepositoryError
+from sports_analytics.core.validation import (
+    MAX_DURATION_SECONDS as MAX_DURATION_SECONDS,
+)
+from sports_analytics.core.validation import (
+    MAX_RECOVERY_BATCH_SIZE as MAX_RECOVERY_BATCH_SIZE,
+)
+from sports_analytics.core.validation import (
+    add_duration as add_duration,
+)
+from sports_analytics.core.validation import (
+    parse_positive_decimal_int as parse_positive_decimal_int,
+)
+from sports_analytics.core.validation import (
+    subtract_duration as subtract_duration,
+)
+from sports_analytics.core.validation import (
+    validate_positive_duration_seconds as validate_positive_duration_seconds,
+)
+from sports_analytics.core.validation import (
+    validate_positive_finite_number as validate_positive_finite_number,
+)
 
 JsonPrimitive = None | bool | int | float | str
 JsonValue = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]

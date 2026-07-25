@@ -1,17 +1,13 @@
-"""Local startup coordinator entry point (placeholder)."""
+"""Local startup coordinator entry point."""
 
 from collections.abc import Sequence
 
-from sports_analytics.core.cli import run_component
+from sports_analytics.local.supervisor import main as supervisor_main
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Bootstrap run_local and report that process coordination is not implemented."""
-    return run_component(
-        "run_local",
-        "Local startup coordinator entry point (placeholder).",
-        argv=argv,
-    )
+    """Run the local worker process supervisor CLI."""
+    return supervisor_main(argv)
 
 
 if __name__ == "__main__":

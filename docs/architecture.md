@@ -3,9 +3,9 @@
 This document describes the architecture for `sports-analytics-local`.
 
 The repository currently provides packaging, typed configuration, local runtime
-bootstrap, SQLite operational persistence, migrations, placeholders,
-documentation, and quality tooling. Sports analytics business logic is **not**
-implemented yet.
+bootstrap, SQLite operational persistence, migrations, durable local job worker
+infrastructure, a worker-only local supervisor, documentation, and quality
+tooling. Sports analytics business logic is **not** implemented yet.
 
 ## Entry points
 
@@ -14,13 +14,14 @@ implemented yet.
 | `app.py` | Streamlit entry point for local interactive analytics and review. |
 | `scraper.py` | Coordinates data ingestion from permitted public sources. |
 | `engine.py` | Coordinates feature generation, prediction, and combination generation. |
-| `worker.py` | Executes background jobs outside the Streamlit process. |
-| `run_local.py` | Coordinates local startup of the processes needed for localhost operation. |
+| `worker.py` | Executes durable background jobs outside the Streamlit process. |
+| `run_local.py` | Supervises the local worker child process. |
 
-Each root script bootstraps a shared local runtime, validates configuration via
-`--validate-config`, inspects the database via `--database-status`, or applies
-migrations via `--migrate-database`, then reports that business functionality is
-not implemented.
+Each root script supports shared configuration and database modes:
+`--validate-config`, `--database-status`, and `--migrate-database`. The worker
+entry point also exposes queue status, expired-lease recovery, and worker-run
+modes. `app.py`, `scraper.py`, and `engine.py` still report that their business
+functionality is not implemented.
 
 ## Configuration boundary
 
@@ -65,6 +66,9 @@ handlers, seeding global random state, or touching SQLite.
 - Explicit connection ownership via `connect_database`.
 - Explicit transaction ownership via `transaction`.
 - Repositories receive an explicit connection and never commit on their own.
+- Worker queue operations use `WorkerService`, which owns short-lived SQLite
+  connections and transaction boundaries for claim, heartbeat, recovery, and
+  finalization calls.
 - Forward-only packaged SQL migrations with immutable checksums.
 - Automatic idempotent migration during normal bootstrap.
 - Read-only inspection for `--database-status`.
@@ -75,8 +79,9 @@ policy, CLI behaviour, and initial tables.
 ### Initial operational tables
 
 - `application_metadata` — durable key/value application metadata
-- `jobs` — durable background-work records (no claiming yet)
+- `jobs` — durable background-work records and lease ownership
 - `job_events` — append-only job lifecycle events
+- `worker_instances` — durable worker process metadata and heartbeats
 - `snapshots` — metadata for future immutable data snapshots
 - `audit_events` — append-only application audit trail
 
@@ -114,6 +119,39 @@ after interpreter startup.
 - Sports models and market models will eventually be **separated**.
 - Failures must be **explicit and auditable** (no silent data loss or silent retries without records).
 
+## Durable worker boundary
+
+The local worker is a separate process boundary from future Streamlit UI code.
+It is intentionally sequential: one claimed job executes at a time per worker
+process. The worker uses a static in-process `HandlerRegistry`, freezes it before
+execution, and exposes registered job types as worker capabilities. Job payloads
+do not select import paths or executable code.
+
+Queue coordination is SQLite-backed:
+
+- `WorkerService` owns short-lived connections and explicit transactions;
+- `claim_next_job` atomically moves one available job from `pending` to
+  `running`;
+- claim order is `priority`, `available_at`, `created_at`, then `id` ascending;
+- `lease_owner` is the worker UUID, not a PID or hostname;
+- a daemon heartbeat renews the running job lease while the handler runs;
+- expired leases are recovered into delayed pending retries or terminal failure;
+- retry backoff is deterministic:
+  `min(max, base * 2**(attempts-1))`;
+- execution is at-least-once, not exactly-once.
+
+Handlers run outside SQLite transactions. They must be idempotent before they
+perform side effects, because a crash after external work but before queue
+finalization can lead to another attempt after lease expiry.
+
+`run_local.py` currently supervises only `worker.py`. It validates configuration,
+ensures the database is migrated, starts the worker with `sys.executable` and
+`shell=False`, propagates the worker exit code, and uses
+`worker.shutdown_grace_seconds` before force-killing a stubborn child. A later
+phase will add the Streamlit child process.
+
+See [worker.md](worker.md) for the full worker and queue lifecycle.
+
 ## External dependency boundaries
 
 - External AI, LLM, or cloud inference services will **not** be runtime dependencies.
@@ -143,16 +181,19 @@ Implemented:
 - deterministic seeding;
 - shared runtime bootstrap and CLI options;
 - SQLite connection/transaction foundation;
-- forward-only migrations and initial operational schema;
+- forward-only migrations through schema version 2;
 - typed repositories for metadata, jobs, snapshots, and audit events;
 - database status / migrate CLI modes;
-- placeholder entry points wired to that bootstrap.
+- durable worker claiming, lease heartbeats, recovery, and static handler
+  registry;
+- worker-only `run_local.py` supervisor;
+- placeholder non-worker entry points wired to shared bootstrap.
 
 Explicitly **not** implemented yet:
 
-- worker job claiming / polling loops;
 - scraping adapters and HTTP clients;
 - modelling, feature engineering, predictions, and betting logic;
 - sports-domain tables;
+- sports-domain job handlers;
 - Streamlit UI components;
-- process spawning in `run_local.py`.
+- Streamlit child process spawning in `run_local.py`.

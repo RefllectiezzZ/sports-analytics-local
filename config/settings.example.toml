@@ -30,6 +30,10 @@ backup_count = 5
 poll_interval_seconds = 30
 heartbeat_interval_seconds = 15
 stale_job_timeout_seconds = 300
+retry_backoff_base_seconds = 5
+retry_backoff_max_seconds = 300
+shutdown_grace_seconds = 30
+recovery_batch_size = 100
 
 [scraping]
 enabled = false

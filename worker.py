@@ -1,17 +1,13 @@
-"""Background worker entry point (placeholder)."""
+"""Background worker entry point."""
 
 from collections.abc import Sequence
 
-from sports_analytics.core.cli import run_component
+from sports_analytics.jobs.cli import main as worker_main
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Bootstrap the worker component and report that the worker is not implemented."""
-    return run_component(
-        "worker",
-        "Background worker entry point (placeholder).",
-        argv=argv,
-    )
+    """Run the local durable-job worker CLI."""
+    return worker_main(argv)
 
 
 if __name__ == "__main__":

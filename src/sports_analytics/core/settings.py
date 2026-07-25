@@ -21,7 +21,12 @@ from pydantic import (
     model_validator,
 )
 
-from sports_analytics.core.exceptions import ConfigurationError
+from sports_analytics.core.exceptions import ConfigurationError, RepositoryError
+from sports_analytics.core.validation import (
+    MAX_DURATION_SECONDS,
+    MAX_RECOVERY_BATCH_SIZE,
+    parse_positive_decimal_int,
+)
 
 ENV_PREFIX: Final[str] = "SPORTS_ANALYTICS_"
 NESTED_DELIMITER: Final[str] = "__"
@@ -143,18 +148,81 @@ class LoggingSettings(_FrozenModel):
 
 
 class WorkerSettings(_FrozenModel):
-    """Background worker timing settings (loop not implemented)."""
+    """Background worker timing, lease, retry, and shutdown settings."""
 
     poll_interval_seconds: float = Field(default=30, gt=0)
     heartbeat_interval_seconds: float = Field(default=15, gt=0)
     stale_job_timeout_seconds: float = Field(default=300, gt=0)
+    retry_backoff_base_seconds: float = Field(default=5, gt=0)
+    retry_backoff_max_seconds: float = Field(default=300, gt=0)
+    shutdown_grace_seconds: float = Field(default=30, gt=0)
+    recovery_batch_size: int = Field(default=100, gt=0, le=MAX_RECOVERY_BATCH_SIZE)
+
+    @field_validator(
+        "poll_interval_seconds",
+        "heartbeat_interval_seconds",
+        "stale_job_timeout_seconds",
+        "retry_backoff_base_seconds",
+        "retry_backoff_max_seconds",
+        "shutdown_grace_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _reject_non_finite_timing(cls, value: object) -> object:
+        import math
+
+        if isinstance(value, bool):
+            msg = "worker timing settings must not be boolean"
+            raise ValueError(msg)
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except (OverflowError, ValueError) as exc:
+                msg = "worker timing settings must be positive finite numbers"
+                raise ValueError(msg) from exc
+        if not isinstance(value, int | float):
+            msg = "worker timing settings must be positive finite numbers"
+            raise ValueError(msg)
+        try:
+            number = float(value)
+        except (OverflowError, ValueError, TypeError) as exc:
+            msg = "worker timing settings must be positive finite numbers"
+            raise ValueError(msg) from exc
+        if not math.isfinite(number) or number <= 0:
+            msg = "worker timing settings must be positive finite numbers"
+            raise ValueError(msg)
+        if number > MAX_DURATION_SECONDS:
+            msg = (
+                "worker timing settings must be <= "
+                f"{MAX_DURATION_SECONDS} seconds (maximum supported duration)"
+            )
+            raise ValueError(msg)
+        return number
+
+    @field_validator("recovery_batch_size", mode="before")
+    @classmethod
+    def _normalize_recovery_batch_size(cls, value: object) -> int:
+        try:
+            return parse_positive_decimal_int(
+                value,
+                field_name="worker.recovery_batch_size",
+                maximum=MAX_RECOVERY_BATCH_SIZE,
+            )
+        except RepositoryError as exc:
+            raise ValueError(str(exc)) from exc
 
     @model_validator(mode="after")
-    def _stale_after_heartbeat(self) -> Self:
+    def _validate_worker_relations(self) -> Self:
         if self.stale_job_timeout_seconds <= self.heartbeat_interval_seconds:
             msg = (
                 "worker.stale_job_timeout_seconds must be greater than "
                 "worker.heartbeat_interval_seconds"
+            )
+            raise ValueError(msg)
+        if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
+            msg = (
+                "worker.retry_backoff_max_seconds must be greater than or equal to "
+                "worker.retry_backoff_base_seconds"
             )
             raise ValueError(msg)
         return self

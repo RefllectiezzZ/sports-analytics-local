@@ -105,9 +105,14 @@ databases.
 3. Load migrations only through `importlib.resources` (package data), never via
    repository-relative filesystem paths in application code.
 4. Never edit an already-applied migration after it has shipped. Checksums are
-   immutable.
+   immutable. In particular, `0001_initial.sql` must remain unchanged; its
+   checksum is
+   `404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de`.
 5. Add tests that exercise discovery from the installed package resource path.
-6. Document the new version in the pull request.
+6. When adding tests for `0002_worker_runtime.sql`, cover the
+   `worker_instances` table, worker indexes, `idx_jobs_running_lease_expires`,
+   and the running-job lease triggers for both insert and update paths.
+7. Document the new version and checksum in the pull request.
 
 ### Transaction ownership
 
@@ -144,6 +149,74 @@ with connect_database(path) as connection:
 - cleanup tests should assert that rollback/close failures do not replace an
   already-active caller or commit exception, while close failures after a
   successful body still propagate
+
+### Durable worker handlers
+
+Handlers implement the `JobHandler` protocol:
+
+```python
+def handler(context: JobExecutionContext, payload: JsonValue) -> JsonValue:
+    context.checkpoint()
+    ...
+    return {"ok": True}
+```
+
+Guidelines:
+
+- register handlers through a local `HandlerRegistry`; do not load executable
+  code from job payloads, database rows, environment variables, arbitrary module
+  paths, or user-entered import strings;
+- keep handlers idempotent before they perform side effects. The queue is
+  at-least-once, so a job can run again after crash, lease expiry, and recovery;
+- call `context.checkpoint()` around meaningful work so cooperative shutdown and
+  lease-loss checks are observed;
+- raise `RetryableJobError` for transient failures and `PermanentJobError` for
+  terminal validation/business failures;
+- return canonical JSON-compatible data only;
+- do not log payloads, result JSON, credentials, tokens, or raw external
+  responses;
+- treat `system.noop` as infrastructure-only test plumbing. Do not enqueue it as
+  product work and do not build sports-domain behaviour on top of it.
+
+Worker tests should inject clocks, sleepers, monotonic time, UUID factories, and
+process metadata rather than relying on wall-clock sleeps or host-specific
+values. Concurrency tests should exercise atomic claim ordering, lease fencing,
+heartbeat renewal, expired-lease recovery, and finalization rejection for stale
+owners. Prefer explicit `BEGIN IMMEDIATE` contention tests over timing-sensitive
+thread sleeps when practical.
+
+Review-regression tests for the worker/supervisor path should stay
+deterministic and cover:
+
+- heartbeat continuation during graceful shutdown while a handler is still
+  running;
+- post-checkpoint lease-loss races that must prevent success, retry, or failure
+  finalization;
+- occupied-worker claims where `worker_instances.current_job_id` is already set;
+- heartbeat assignment bypasses (ordinary heartbeat must not assign, replace, or
+  clear `current_job_id`; reciprocal lease triggers reject invalid direct SQL);
+- signal arrival while the active-context lock is already held (handler only sets
+  an Event and must return without blocking);
+- partial signal-handler installation failures that restore already-changed
+  handlers and still clean up the child;
+- signal restoration failures that preserve an existing primary wait exception
+  or raise `WorkerError` when no primary exists;
+- cleanup interrupted by `KeyboardInterrupt` / `SystemExit` that must not replace
+  the original primary exception;
+- supervisor reuse across sequential runs, exceptional child cleanup, and
+  cleanup failures that preserve the primary exception;
+- `datetime.min` / `datetime.max` duration arithmetic through shared helpers;
+- oversized recovery-batch / SQLite `LIMIT` parameters rejected before SQL;
+- very large finite duration values and non-canonical `recovery_batch_size`
+  inputs rejected as project-specific configuration/repository errors;
+- Windows supervision using a new process group and `CTRL_BREAK_EVENT`;
+- migration upgrade corruption cases, especially legacy v1 `running` jobs that
+  lack a complete lease and must roll back atomically.
+
+On Windows, subprocess tests must clean up children deterministically. Assert
+that supervised worker children receive terminate first, that
+`shutdown_grace_seconds` is respected, and that stubborn children are killed and
+waited on before temporary files or SQLite databases are removed.
 
 ### Logging and secrets
 

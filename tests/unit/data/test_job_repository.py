@@ -11,11 +11,41 @@ from sports_analytics.core.exceptions import DatabaseIntegrityError, RepositoryE
 from sports_analytics.data.codec import dumps_canonical_json
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.migrations import ensure_database_ready
+from sports_analytics.data.repositories.job_queue import JobQueueRepository
 from sports_analytics.data.repositories.jobs import JobRepository
+from sports_analytics.data.repositories.workers import WorkerRepository
 from sports_analytics.data.types import JobStatus
+from sports_analytics.jobs.types import JobClaim, WorkerStatus
 
 FIXED = datetime(2026, 7, 24, 19, 30, 0, tzinfo=UTC)
 JOB_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+WORKER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def _register_running_worker(connection) -> str:
+    worker_repo = WorkerRepository(connection)
+    worker = worker_repo.register_worker(
+        worker_id=WORKER_ID,
+        name="test-worker",
+        process_id=1234,
+        hostname="test-host",
+        started_at=FIXED,
+        heartbeat_at=FIXED,
+        capabilities={"job_types": ["ingest.refresh", "demo.job", "demo.job2"]},
+        status=WorkerStatus.RUNNING,
+    )
+    return worker.id
+
+
+def _claim_next_job(connection, *, worker_id: str = WORKER_ID) -> JobClaim:
+    claim = JobQueueRepository(connection).claim_next_job(
+        worker_id=worker_id,
+        claimed_at=FIXED.replace(microsecond=1),
+        lease_duration_seconds=60,
+        actor=worker_id,
+    )
+    assert claim is not None
+    return claim
 
 
 def test_create_read_defaults_and_event(tmp_path: Path) -> None:
@@ -135,6 +165,7 @@ def test_transitions_and_failures(tmp_path: Path) -> None:
     ensure_database_ready(db)
     with connect_database(db) as connection:
         repo = JobRepository(connection)
+        queue = JobQueueRepository(connection)
         with transaction(connection):
             job = repo.create_job(
                 job_id=JOB_ID,
@@ -144,25 +175,39 @@ def test_transitions_and_failures(tmp_path: Path) -> None:
                 actor="cli",
                 created_at=FIXED,
             )
-            running = repo.transition_job(
-                job.id,
-                expected_status=JobStatus.PENDING,
-                expected_version=1,
-                new_status=JobStatus.RUNNING,
-                actor="worker",
-                occurred_at=FIXED.replace(microsecond=1),
-            )
-            assert running.status is JobStatus.RUNNING
-            assert running.attempts == 1
-            assert running.version == 2
-            succeeded = repo.transition_job(
-                job.id,
-                expected_status=JobStatus.RUNNING,
-                expected_version=2,
-                new_status=JobStatus.SUCCEEDED,
-                actor="worker",
-                occurred_at=FIXED.replace(microsecond=2),
+            _register_running_worker(connection)
+
+            with pytest.raises(RepositoryError, match="claim_next_job"):
+                repo.transition_job(
+                    job.id,
+                    expected_status=JobStatus.PENDING,
+                    expected_version=1,
+                    new_status=JobStatus.RUNNING,
+                    actor="worker",
+                    occurred_at=FIXED.replace(microsecond=1),
+                )
+            running = _claim_next_job(connection)
+            assert running.job.status is JobStatus.RUNNING
+            assert running.job.attempts == 1
+            assert running.job.version == 2
+
+            with pytest.raises(RepositoryError, match="complete_claimed_job|fail_claimed_job"):
+                repo.transition_job(
+                    job.id,
+                    expected_status=JobStatus.RUNNING,
+                    expected_version=2,
+                    new_status=JobStatus.SUCCEEDED,
+                    actor="worker",
+                    occurred_at=FIXED.replace(microsecond=2),
+                    result={"ok": True},
+                )
+            succeeded = queue.complete_claimed_job(
+                job_id=job.id,
+                worker_id=WORKER_ID,
+                expected_job_version=running.job.version,
+                completed_at=FIXED.replace(microsecond=2),
                 result={"ok": True},
+                actor="worker",
             )
             assert succeeded.status is JobStatus.SUCCEEDED
             assert succeeded.finished_at is not None
@@ -182,7 +227,7 @@ def test_transitions_and_failures(tmp_path: Path) -> None:
                 )
 
         before_events = connection.execute("SELECT COUNT(*) AS c FROM job_events").fetchone()["c"]
-        with pytest.raises(DatabaseIntegrityError):
+        with pytest.raises(RepositoryError, match="fail_claimed_job"):
             with transaction(connection):
                 repo.transition_job(
                     job.id,
@@ -206,44 +251,45 @@ def test_retry_and_failed_requirements(tmp_path: Path) -> None:
     ensure_database_ready(db)
     with connect_database(db) as connection:
         repo = JobRepository(connection)
+        queue = JobQueueRepository(connection)
         with transaction(connection):
-            job = repo.create_job(
+            _register_running_worker(connection)
+            repo.create_job(
                 job_type="ingest.refresh",
                 payload={},
                 maximum_attempts=1,
                 actor="cli",
                 created_at=FIXED,
             )
-            running = repo.transition_job(
-                job.id,
-                expected_status=JobStatus.PENDING,
-                expected_version=1,
-                new_status=JobStatus.RUNNING,
-                actor="worker",
-                occurred_at=FIXED.replace(microsecond=1),
-            )
-            with pytest.raises(RepositoryError, match="last_error"):
-                repo.transition_job(
-                    running.id,
-                    expected_status=JobStatus.RUNNING,
-                    expected_version=2,
-                    new_status=JobStatus.FAILED,
+            running = _claim_next_job(connection)
+            with pytest.raises(RepositoryError, match="error text"):
+                queue.fail_claimed_job(
+                    job_id=running.job.id,
+                    worker_id=WORKER_ID,
+                    expected_job_version=running.job.version,
+                    failed_at=FIXED.replace(microsecond=2),
+                    error="",
+                    retryable=False,
                     actor="worker",
-                    occurred_at=FIXED.replace(microsecond=2),
+                    retry_backoff_base_seconds=5,
+                    retry_backoff_max_seconds=300,
                 )
-            failed = repo.transition_job(
-                running.id,
-                expected_status=JobStatus.RUNNING,
-                expected_version=2,
-                new_status=JobStatus.FAILED,
+            failed = queue.fail_claimed_job(
+                job_id=running.job.id,
+                worker_id=WORKER_ID,
+                expected_job_version=running.job.version,
+                failed_at=FIXED.replace(microsecond=2),
+                error="boom",
+                retryable=True,
                 actor="worker",
-                occurred_at=FIXED.replace(microsecond=2),
-                last_error="boom",
+                retry_backoff_base_seconds=5,
+                retry_backoff_max_seconds=300,
             )
-            assert failed.last_error == "boom"
+            assert failed.job.status is JobStatus.FAILED
+            assert failed.job.last_error == "boom"
             with pytest.raises(RepositoryError, match="retry=True"):
                 repo.transition_job(
-                    failed.id,
+                    failed.job.id,
                     expected_status=JobStatus.FAILED,
                     expected_version=3,
                     new_status=JobStatus.PENDING,
@@ -252,7 +298,7 @@ def test_retry_and_failed_requirements(tmp_path: Path) -> None:
                 )
             with pytest.raises(RepositoryError, match="maximum_attempts"):
                 repo.transition_job(
-                    failed.id,
+                    failed.job.id,
                     expected_status=JobStatus.FAILED,
                     expected_version=3,
                     new_status=JobStatus.PENDING,
