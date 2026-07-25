@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
 
 from sports_analytics.core.cli import CONFIG_ERROR_EXIT, SUCCESS_EXIT, handle_common_modes
 from sports_analytics.core.cli import build_argument_parser as build_common_argument_parser
@@ -269,5 +268,4 @@ def _verify_snapshot(config: str | None, env_file: str | None, snapshot_id: str)
         f"games={result.games_count} files={result.file_count} "
         f"manifest_sha256={result.manifest_checksum_sha256}"
     )
-    del datetime, UTC
     return SUCCESS_EXIT

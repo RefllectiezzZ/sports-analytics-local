@@ -59,8 +59,7 @@ def build_source_game_key(
 ) -> str:
     """Construct the canonical source game key used for game identity."""
     return (
-        f"{source_name}|{competition_id}|{season_id}|{event_date}|"
-        f"{home_team_key}|{away_team_key}"
+        f"{source_name}|{competition_id}|{season_id}|{event_date}|{home_team_key}|{away_team_key}"
     )
 
 
@@ -74,11 +73,8 @@ def parse_canonical_season(value: str) -> tuple[str, int, int, str]:
 
     Rejects whitespace, signs, two-digit inputs, non-consecutive years, and
     start years outside the documented conservative range
-    [{MIN_SUPPORTED_START_YEAR}, {MAX_SUPPORTED_START_YEAR}].
-    """.format(
-        MIN_SUPPORTED_START_YEAR=MIN_SUPPORTED_START_YEAR,
-        MAX_SUPPORTED_START_YEAR=MAX_SUPPORTED_START_YEAR,
-    )
+    [1993, 2092].
+    """
     if not isinstance(value, str):
         msg = "season must be a string in YYYY-YYYY format"
         raise NormalizationError(msg)

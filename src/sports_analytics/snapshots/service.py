@@ -72,7 +72,9 @@ class SnapshotPublicationService:
                             entity_id=existing.id,
                             actor=actor,
                             correlation_id=correlation_id,
-                            details=self._audit_details(prepared, reused=True, snapshot_id=existing.id),
+                            details=self._audit_details(
+                                prepared, reused=True, snapshot_id=existing.id
+                            ),
                             occurred_at=prepared.source_observed_at_utc,
                         )
                         return self._from_record(existing, prepared=prepared, reused=True)
@@ -300,8 +302,7 @@ class SnapshotPublicationService:
             statistics_rows_count=prepared.statistics_rows_count,
             duplicate_rows_discarded=prepared.duplicate_rows_discarded,
             warnings_count=prepared.warnings_count,
-            manifest_checksum_sha256=record.checksum_sha256
-            or prepared.manifest_checksum_sha256,
+            manifest_checksum_sha256=record.checksum_sha256 or prepared.manifest_checksum_sha256,
             source_observed_at_utc=prepared.source_observed_at_utc,
         )
 

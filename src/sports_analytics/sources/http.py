@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import http.client
 import socket
 import ssl
-import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
@@ -14,7 +14,11 @@ from email.utils import parsedate_to_datetime
 from typing import Protocol
 from urllib.parse import urlparse
 
-from sports_analytics.core.exceptions import PermanentSourceError, RetryableSourceError, SourceNotFoundError
+from sports_analytics.core.exceptions import (
+    PermanentSourceError,
+    RetryableSourceError,
+    SourceNotFoundError,
+)
 from sports_analytics.sources.types import ALLOWED_FOOTBALL_DATA_HOST, DEFAULT_USER_AGENT
 
 Clock = Callable[[], datetime]
@@ -32,7 +36,7 @@ class HttpTransport(Protocol):
         timeout_seconds: float,
         headers: dict[str, str],
         maximum_redirects: int,
-    ) -> "HttpResponse":
+    ) -> HttpResponse:
         """Perform one GET and return a closable response."""
 
 
@@ -119,9 +123,6 @@ class UrllibHttpTransport:
             except ssl.SSLError as exc:
                 msg = "TLS verification or handshake failed"
                 raise RetryableSourceError(msg) from exc
-            except socket.timeout as exc:
-                msg = "HTTPS request timed out"
-                raise RetryableSourceError(msg) from exc
             except urllib.error.URLError as exc:
                 reason = exc.reason
                 if isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError)):
@@ -160,14 +161,20 @@ class UrllibHttpTransport:
                 raw.close()
                 _raise_for_status(metadata.status_code)
 
-            def _iter() -> Iterator[bytes]:
+            body_handle = raw
+
+            def _iter(handle: http.client.HTTPResponse = body_handle) -> Iterator[bytes]:
                 while True:
-                    chunk = raw.read(65_536)
+                    chunk = handle.read(65_536)
                     if not chunk:
                         break
                     yield chunk
 
-            return HttpResponse(metadata=metadata, _body_iter=_iter(), _close=raw.close)
+            return HttpResponse(
+                metadata=metadata,
+                _body_iter=_iter(),
+                _close=body_handle.close,
+            )
 
 
 def _validate_allowed_url(url: str) -> None:

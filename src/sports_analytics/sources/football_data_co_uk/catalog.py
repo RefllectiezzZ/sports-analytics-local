@@ -33,7 +33,9 @@ _COMPETITIONS: tuple[FootballDataCompetition, ...] = (
 )
 
 
-def _validate_catalog(entries: tuple[FootballDataCompetition, ...]) -> tuple[FootballDataCompetition, ...]:
+def _validate_catalog(
+    entries: tuple[FootballDataCompetition, ...],
+) -> tuple[FootballDataCompetition, ...]:
     ids: set[str] = set()
     divisions: set[str] = set()
     ordered = tuple(sorted(entries, key=lambda item: item.competition_id))

@@ -119,11 +119,14 @@ def test_ingest_handler_downloads_with_fake_transport_and_publishes(
     records = _snapshot_records(runtime)
     assert len(records) == 1
     assert records[0].status is SnapshotStatus.READY
-    assert verify_snapshot_directory(
-        snapshots_directory=runtime.paths.snapshots_directory,
-        relative_manifest_path=str(result["snapshot_relative_path"]),
-        expected_snapshot=records[0],
-    ).games_count == 1
+    assert (
+        verify_snapshot_directory(
+            snapshots_directory=runtime.paths.snapshots_directory,
+            relative_manifest_path=str(result["snapshot_relative_path"]),
+            expected_snapshot=records[0],
+        ).games_count
+        == 1
+    )
 
 
 def test_ingest_handler_reuses_cached_raw_sha_without_http(tmp_path: Path) -> None:

@@ -259,3 +259,38 @@ pre-commit install
 ```
 
 Hooks enforce whitespace, end-of-file, YAML/TOML validity, private-key detection, Ruff lint (with safe fixes), and Ruff formatting.
+
+
+## Adding a source adapter
+
+1. Add a static catalog entry and fixed URL construction under `sources/`.
+2. Implement allowlisted HTTPS retrieval and content-addressed raw storage reuse.
+3. Parse with the standard-library `csv` module; never trust pandas inference.
+4. Normalize into a versioned canonical contract, not source column names.
+5. Register an explicit job handler in `build_default_registry()` only.
+6. Add offline synthetic fixtures; never commit downloaded source datasets.
+7. Hosted CI must not depend on live network access to the source.
+
+## Adding a competition catalog entry
+
+Extend the static Football-Data.co.uk catalog with a new immutable entry. Do not
+accept arbitrary division codes from users or job payloads.
+
+## Changing a canonical schema
+
+Introduce a new schema version identifier. Do not mutate historical READY
+snapshots. Update explicit PyArrow schemas, fingerprints, manifests, docs, and
+tests together.
+
+## Migration immutability
+
+Merged migrations are immutable. Do not edit `0001_initial.sql` or
+`0002_worker_runtime.sql`. Add a new numbered migration instead.
+
+## Synthetic fixtures and Windows cleanup
+
+- Use small hand-authored CSV fixtures with fictional clubs.
+- Close Parquet/SQLite/file handles before asserting deletion on Windows.
+- Prefer barriers/events over fragile sleeps in concurrency tests.
+- Snapshot and Parquet tests should assert schemas, nullability, ordering, and
+  checksums without promising cross-PyArrow-version byte identity.

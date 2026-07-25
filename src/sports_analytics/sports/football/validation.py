@@ -116,10 +116,7 @@ def parse_decimal_odds(value: str, *, field_name: str) -> Decimal | None:
         msg = f"{field_name} must be greater than 1"
         raise NormalizationError(msg)
     if odds < MIN_DECIMAL_ODDS or odds > MAX_DECIMAL_ODDS:
-        msg = (
-            f"{field_name} must be between {MIN_DECIMAL_ODDS} and "
-            f"{MAX_DECIMAL_ODDS} inclusive"
-        )
+        msg = f"{field_name} must be between {MIN_DECIMAL_ODDS} and {MAX_DECIMAL_ODDS} inclusive"
         raise NormalizationError(msg)
     # Quantize to schema scale without silent binary float rounding.
     quantized = odds.quantize(Decimal("0.0001"))

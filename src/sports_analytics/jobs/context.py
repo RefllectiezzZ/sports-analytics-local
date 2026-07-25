@@ -44,7 +44,9 @@ class JobExecutionContext:
     _raw_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
     _snapshots_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
     _scraping: ScrapingSettings | None = field(default=None, init=False, repr=False, compare=False)
-    _http_transport: HttpTransport | None = field(default=None, init=False, repr=False, compare=False)
+    _http_transport: HttpTransport | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
     _monotonic_clock: MonotonicClock | None = field(
         default=None, init=False, repr=False, compare=False
     )

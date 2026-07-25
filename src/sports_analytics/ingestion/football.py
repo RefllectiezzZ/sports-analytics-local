@@ -9,7 +9,13 @@ from sports_analytics.core.exceptions import ConfigurationError, PermanentSource
 from sports_analytics.core.settings import ScrapingSettings
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.repositories.jobs import JobRepository
-from sports_analytics.data.types import DEFAULT_JOB_PRIORITY, JobRecord, validate_sha256_checksum, validate_strict_int
+from sports_analytics.data.types import (
+    DEFAULT_JOB_PRIORITY,
+    JobRecord,
+    JsonValue,
+    validate_sha256_checksum,
+    validate_strict_int,
+)
 from sports_analytics.ingestion.types import (
     DEFAULT_INGESTION_MAXIMUM_ATTEMPTS,
     INGEST_FOOTBALL_DATA_CSV_JOB_TYPE,
@@ -52,7 +58,7 @@ def enqueue_football_data_ingestion(
     except Exception as exc:  # noqa: BLE001
         raise ConfigurationError(str(exc)) from exc
 
-    payload = {
+    payload: dict[str, JsonValue] = {
         "competition_id": competition.competition_id,
         "season": season,
         "raw_sha256": raw_sha256,

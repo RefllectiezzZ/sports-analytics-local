@@ -21,7 +21,7 @@ Implemented now:
 Not implemented in this release:
 
 - Streamlit child process;
-- sports ingestion, modelling, predictions, or betting jobs;
+- modelling, predictions, or betting jobs;
 - parallel job execution inside one worker process;
 - cooperative cancellation of an already-running job handler.
 
@@ -377,3 +377,24 @@ added without colliding with handler-defined payloads.
 - no Streamlit supervision yet;
 - at-least-once, not exactly-once;
 - handlers must eventually be idempotent when they perform side effects.
+
+
+## Football ingestion handler
+
+Registered job type: `ingest.football-data-csv`
+
+Payload keys:
+
+- required: `competition_id`, `season`
+- optional: `raw_sha256`
+- unknown keys rejected; arbitrary URL/path/division controls rejected
+
+The handler checkpoints between major stages (before download/cache, after raw
+acquisition, after parsing, after normalization, before publication, after
+publication). Transient source/network and snapshot-busy errors map to
+`RetryableJobError`. Malformed CSV, unsupported competition/season, HTTP 404/410,
+integrity conflicts, and similar failures map to `PermanentJobError`.
+
+Snapshot READY reuse makes identical source-content reprocessing idempotent at
+the snapshot layer. No SQLite transaction remains open during download, CSV
+parsing, or Parquet writing.

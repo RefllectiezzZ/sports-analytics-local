@@ -159,15 +159,11 @@ class OddsColumnFamily:
 
 # Explicit supported odds column families only.
 SUPPORTED_ODDS_FAMILIES: Final[tuple[OddsColumnFamily, ...]] = (
-    OddsColumnFamily(
-        "bookmaker", "bet365", "opening", "B365H", "B365D", "B365A", "b365-opening"
-    ),
+    OddsColumnFamily("bookmaker", "bet365", "opening", "B365H", "B365D", "B365A", "b365-opening"),
     OddsColumnFamily(
         "bookmaker", "bet365", "closing", "B365CH", "B365CD", "B365CA", "b365-closing"
     ),
-    OddsColumnFamily(
-        "bookmaker", "pinnacle", "opening", "PSH", "PSD", "PSA", "pinnacle-opening"
-    ),
+    OddsColumnFamily("bookmaker", "pinnacle", "opening", "PSH", "PSD", "PSA", "pinnacle-opening"),
     OddsColumnFamily(
         "bookmaker", "pinnacle", "closing", "PSCH", "PSCD", "PSCA", "pinnacle-closing"
     ),
@@ -472,6 +468,7 @@ def normalize_football_rows(
                 msg = f"row {index}: FTR is required for finished games"
                 raise NormalizationError(msg)
             full_time_result = map_result_code(ftr_raw, field_name="FTR")
+            assert ftag is not None
             expected = expected_result_from_goals(fthg, ftag)
             if full_time_result != expected:
                 msg = f"row {index}: FTR inconsistent with FTHG/FTAG"
@@ -494,6 +491,7 @@ def normalize_football_rows(
                 msg = f"row {index}: HTR is required when half-time goals are present"
                 raise NormalizationError(msg)
             half_time_result = map_result_code(htr_raw, field_name="HTR")
+            assert htag is not None
             if half_time_result != expected_result_from_goals(hthg, htag):
                 msg = f"row {index}: HTR inconsistent with HTHG/HTAG"
                 raise NormalizationError(msg)
@@ -558,8 +556,7 @@ def normalize_football_rows(
                 continue
             if not all(present):
                 msg = (
-                    f"row {index}: odds family {family.family_id} requires a complete "
-                    "H/D/A triple"
+                    f"row {index}: odds family {family.family_id} requires a complete H/D/A triple"
                 )
                 raise NormalizationError(msg)
             assert home_odds is not None and draw_odds is not None and away_odds is not None

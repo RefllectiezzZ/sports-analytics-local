@@ -126,8 +126,11 @@ def test_local_worker_once_processes_enqueued_football_ingestion_from_cached_raw
     assert completed.result["games_count"] == 1
     assert len(snapshots) == 1
     assert snapshots[0].status is SnapshotStatus.READY
-    assert verify_snapshot_directory(
-        snapshots_directory=runtime.paths.snapshots_directory,
-        relative_manifest_path=snapshots[0].relative_path,
-        expected_snapshot=snapshots[0],
-    ).games_count == 1
+    assert (
+        verify_snapshot_directory(
+            snapshots_directory=runtime.paths.snapshots_directory,
+            relative_manifest_path=snapshots[0].relative_path,
+            expected_snapshot=snapshots[0],
+        ).games_count
+        == 1
+    )

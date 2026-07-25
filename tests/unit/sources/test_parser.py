@@ -57,8 +57,7 @@ def test_parse_accepts_utf8_bom() -> None:
 
 def test_parse_falls_back_to_cp1252_when_utf8_fails() -> None:
     content = (
-        "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
-        "E0,01/05/2024,Caf\xe9 FC,Southport Athletic,,,\n"
+        "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nE0,01/05/2024,Caf\xe9 FC,Southport Athletic,,,\n"
     ).encode("cp1252")
 
     parsed = parse_football_data_csv(content, expected_division_code="E0")

@@ -4,8 +4,10 @@ This document describes the architecture for `sports-analytics-local`.
 
 The repository currently provides packaging, typed configuration, local runtime
 bootstrap, SQLite operational persistence, migrations, durable local job worker
-infrastructure, a worker-only local supervisor, documentation, and quality
-tooling. Sports analytics business logic is **not** implemented yet.
+infrastructure, a worker-only local supervisor, Football-Data.co.uk CSV
+ingestion into immutable Parquet snapshots, documentation, and quality tooling.
+Modelling, predictions, recommendations, and Streamlit pages are **not**
+implemented yet.
 
 ## Entry points
 
@@ -20,8 +22,29 @@ tooling. Sports analytics business logic is **not** implemented yet.
 Each root script supports shared configuration and database modes:
 `--validate-config`, `--database-status`, and `--migrate-database`. The worker
 entry point also exposes queue status, expired-lease recovery, and worker-run
-modes. `app.py`, `scraper.py`, and `engine.py` still report that their business
-functionality is not implemented.
+modes. `scraper.py` exposes source/competition listing, enqueue, snapshot list,
+and verification commands. `app.py` and `engine.py` still report that their
+business functionality is not implemented.
+
+## Ingestion boundary
+
+Football ingestion is split into explicit layers:
+
+1. **Source adapter** (`sports_analytics.sources`) — static catalog, allowlisted
+   HTTPS download, content-addressed raw storage, strict CSV parsing.
+2. **Canonical normalization** (`sports_analytics.sports.football`) — versioned
+   `football-canonical-v1` records and explicit PyArrow schemas.
+3. **Parquet snapshots** (`sports_analytics.snapshots`) — deterministic multi-file
+   snapshot directories, manifests, publication, and verification.
+4. **Worker integration** (`sports_analytics.ingestion`) — job handler
+   `ingest.football-data-csv`, enqueue service, and scraper CLI.
+
+Long-running HTTP, CSV, and Parquet work never holds an open SQLite transaction.
+Handlers never receive a raw SQLite connection. `RuntimeContext` never contains
+an open connection.
+
+See [sources.md](sources.md), [data-contracts.md](data-contracts.md), and
+[snapshots.md](snapshots.md).
 
 ## Configuration boundary
 

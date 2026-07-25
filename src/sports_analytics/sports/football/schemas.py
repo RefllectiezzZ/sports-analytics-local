@@ -8,6 +8,7 @@ from typing import Final
 import pyarrow as pa
 
 from sports_analytics.data.codec import dumps_canonical_json
+from sports_analytics.data.types import JsonValue
 from sports_analytics.sports.football.contracts import (
     DATASET_COMPETITIONS,
     DATASET_GAMES,
@@ -182,7 +183,7 @@ SCHEMA_BY_DATASET: Final[dict[str, pa.Schema]] = {
 
 def schema_fingerprint(schema: pa.Schema) -> str:
     """Return a deterministic SHA-256 fingerprint of a logical Arrow schema."""
-    fields: list[dict[str, object]] = []
+    fields: list[JsonValue] = []
     for field in schema:
         fields.append(
             {
@@ -192,10 +193,9 @@ def schema_fingerprint(schema: pa.Schema) -> str:
             }
         )
     metadata = {
-        key.decode("utf-8"): value.decode("utf-8")
-        for key, value in (schema.metadata or {}).items()
+        key.decode("utf-8"): value.decode("utf-8") for key, value in (schema.metadata or {}).items()
     }
-    payload = {
+    payload: dict[str, JsonValue] = {
         "fields": fields,
         "metadata": {key: metadata[key] for key in sorted(metadata)},
     }

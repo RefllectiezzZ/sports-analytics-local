@@ -317,7 +317,12 @@ class ScrapingSettings(_FrozenModel):
             if value != value.strip() or not value:
                 msg = "scraping.maximum_retries must be a non-negative integer"
                 raise ValueError(msg)
-            if value.startswith("-") or value.startswith("+") or "." in value or "e" in value.lower():
+            if (
+                value.startswith("-")
+                or value.startswith("+")
+                or "." in value
+                or "e" in value.lower()
+            ):
                 msg = "scraping.maximum_retries must be a non-negative integer"
                 raise ValueError(msg)
             if not value.isdigit():

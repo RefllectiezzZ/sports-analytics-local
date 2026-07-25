@@ -10,7 +10,11 @@ from pathlib import Path
 import pyarrow as pa
 
 from sports_analytics.core.exceptions import SnapshotIntegrityError, SnapshotVerificationError
-from sports_analytics.data.codec import dumps_canonical_json, format_utc_timestamp, loads_canonical_json
+from sports_analytics.data.codec import (
+    dumps_canonical_json,
+    format_utc_timestamp,
+    loads_canonical_json,
+)
 from sports_analytics.data.types import JsonValue
 from sports_analytics.sports.football.contracts import (
     CANONICAL_DATASETS,

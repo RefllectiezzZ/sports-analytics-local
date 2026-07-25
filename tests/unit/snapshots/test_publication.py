@@ -252,10 +252,13 @@ def test_orphan_final_directory_is_adopted_when_metadata_is_missing(tmp_path: Pa
     assert published.snapshot_status is SnapshotStatus.READY
     assert published.snapshot_reused is False
     assert published.snapshot_id == prepared.snapshot_id
-    assert verify_snapshot_directory(
-        snapshots_directory=snapshots_directory,
-        relative_manifest_path=published.snapshot_relative_path,
-    ).games_count == 1
+    assert (
+        verify_snapshot_directory(
+            snapshots_directory=snapshots_directory,
+            relative_manifest_path=published.snapshot_relative_path,
+        ).games_count
+        == 1
+    )
 
 
 def test_conflicting_orphan_directory_is_not_overwritten(tmp_path: Path) -> None:

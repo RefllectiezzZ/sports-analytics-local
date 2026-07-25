@@ -22,9 +22,10 @@ Provide a localhost-only toolchain that:
 
 This repository is in **pre-alpha** state. Packaging, typed configuration, local
 runtime bootstrap, SQLite operational persistence, migrations, durable worker
-infrastructure, documentation, linting, typing, and tests are in place.
-Application features (scraping, modelling, predictions, Streamlit UI, and
-sports-domain schemas/jobs) are **not implemented**.
+infrastructure, Football-Data.co.uk CSV ingestion into immutable Parquet
+snapshots, documentation, linting, typing, and tests are in place. Modelling,
+predictions, recommendations, combinations, settlement, bankroll management, and
+Streamlit UI pages are **not implemented**.
 
 ## Supported Python version
 
@@ -113,9 +114,9 @@ Default SQLite location (configurable via `storage.sqlite_path`):
 storage/operational.sqlite3
 ```
 
-No sports-domain data tables or model schemas exist yet. The current schema
-covers operational foundations only: application metadata, jobs, job events,
-worker instances, snapshot metadata, and audit events.
+No sports-domain tables exist in SQLite. Analytical football datasets are stored
+as immutable Parquet snapshots under the configured snapshots directory, with
+operational metadata in SQLite.
 
 Logging:
 
@@ -163,8 +164,47 @@ python run_local.py --worker-once
 currently available job, and no flag starts the polling loop.
 
 `run_local.py` currently supervises **only** the worker child process. Streamlit
-supervision is planned for a later phase. The built-in `system.noop` job handler
-is infrastructure-only test plumbing; no sports-domain jobs exist yet.
+supervision is planned for a later phase. Built-in handlers include `system.noop`
+and `ingest.football-data-csv`.
+
+### Football ingestion workflow
+
+Enable scraping in a local config (do not commit secrets or operational data):
+
+```toml
+[scraping]
+enabled = true
+```
+
+Then:
+
+```bash
+python scraper.py --config config/settings.toml --migrate-database
+python scraper.py --config config/settings.toml --list-competitions
+python scraper.py \
+  --config config/settings.toml \
+  --enqueue-football-data \
+  --competition eng-premier-league \
+  --season 2023-2024
+python worker.py --config config/settings.toml --once
+python scraper.py --config config/settings.toml --list-snapshots
+python scraper.py --config config/settings.toml --verify-snapshot <SNAPSHOT_UUID>
+```
+
+The scraper enqueues a job; the worker performs the HTTPS download, raw storage,
+normalization, and Parquet publication. Real downloads depend on the external
+Football-Data.co.uk website and network availability. Users must review and
+respect the source’s current terms.
+
+Additional scraper modes:
+
+```bash
+python scraper.py --list-sources
+python scraper.py --list-competitions
+```
+
+See [docs/sources.md](docs/sources.md), [docs/snapshots.md](docs/snapshots.md),
+and [docs/data-contracts.md](docs/data-contracts.md).
 
 ### Windows PowerShell overrides
 

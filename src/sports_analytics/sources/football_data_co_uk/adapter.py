@@ -10,7 +10,10 @@ from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.core.settings import ScrapingSettings
 from sports_analytics.data.types import validate_sha256_checksum
 from sports_analytics.sources.football_data_co_uk.catalog import build_csv_url, get_competition
-from sports_analytics.sources.football_data_co_uk.parser import ParsedFootballCsv, parse_football_data_csv
+from sports_analytics.sources.football_data_co_uk.parser import (
+    ParsedFootballCsv,
+    parse_football_data_csv,
+)
 from sports_analytics.sources.http import (
     Clock,
     HttpTransport,

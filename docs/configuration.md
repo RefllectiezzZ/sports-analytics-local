@@ -11,7 +11,7 @@ This document describes the local configuration system for
 | `storage` | Local filesystem locations for data and logs |
 | `logging` | Console and optional rotating file logging |
 | `worker` | Durable local worker timing, lease, retry, and shutdown settings |
-| `scraping` | Settings for a future ingestion coordinator |
+| `scraping` | Football-Data.co.uk HTTP adapter and enqueue gating |
 | `modelling` | Settings for future local modelling |
 
 All models are immutable after validation and reject unknown fields.

@@ -8,8 +8,9 @@ phases; this document describes the current SQLite foundation only.
 
 - **SQLite** stores operational state: application metadata, jobs, job events,
   worker instances, snapshot metadata, audit events, and migration history.
-- **Parquet** (future) will store historical and analytical datasets under
-  versioned snapshot directories. Repository methods do not write Parquet files.
+- **Parquet** stores historical and analytical football snapshots under
+  versioned directories. `SnapshotRepository` stores metadata only and never writes
+  Parquet files itself.
 
 ## Connection ownership
 
@@ -371,3 +372,19 @@ manual database manipulation. Do not edit applied migration history by hand.
 - No sports-domain schema.
 - No scraping, modelling, betting, or Streamlit UI logic.
 - No paid API or external AI runtime dependency.
+
+
+## Migration 0003
+
+Filename: `0003_snapshot_source_deduplication.sql`
+
+Adds operational indexes only. No sports-domain SQLite tables are created.
+
+- `uq_snapshots_active_source_version` — unique partial index preventing two
+  active (`building`/`ready`) snapshots for the same
+  `(snapshot_type, source_name, source_version, schema_version)`.
+- `idx_snapshots_source_version_status` — lookup index for source identity and
+  status.
+
+Failed snapshots are excluded from the unique key so replacements can proceed.
+Migrations `0001` and `0002` remain immutable.

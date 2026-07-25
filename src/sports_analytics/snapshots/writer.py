@@ -13,6 +13,7 @@ from sports_analytics.core.exceptions import SnapshotIntegrityError
 from sports_analytics.data.types import JsonValue, normalize_uuid, validate_relative_snapshot_path
 from sports_analytics.snapshots.manifest import build_manifest_document, write_manifest
 from sports_analytics.snapshots.parquet import write_bundle_parquet_files
+from sports_analytics.sources.raw_store import RawSourceArtifact
 from sports_analytics.sports.football.contracts import (
     FOOTBALL_CANONICAL_SCHEMA_VERSION,
     FOOTBALL_INGESTION_SNAPSHOT_TYPE,
@@ -20,7 +21,6 @@ from sports_analytics.sports.football.contracts import (
 )
 from sports_analytics.sports.football.identifiers import build_season_id, build_source_version
 from sports_analytics.sports.football.normalization import NormalizedFootballBundle
-from sports_analytics.sources.raw_store import RawSourceArtifact
 
 
 @dataclass(frozen=True, slots=True)

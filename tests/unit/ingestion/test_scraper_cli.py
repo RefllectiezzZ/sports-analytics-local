@@ -126,3 +126,46 @@ def test_scraper_enqueue_requires_competition_and_season(tmp_path: Path) -> None
 
     assert result.returncode == 2
     assert "--enqueue-football-data requires --competition and --season" in result.stderr
+
+
+def test_scraper_enqueue_requires_scraping_enabled(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.toml").write_text(
+        "[logging]\nfile_enabled = false\n[scraping]\nenabled = false\n",
+        encoding="utf-8",
+    )
+    result = _run_scraper(
+        tmp_path,
+        "--enqueue-football-data",
+        "--competition",
+        "eng-premier-league",
+        "--season",
+        "2023-2024",
+    )
+    assert result.returncode == 2
+    assert "scraping.enabled" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_scraper_list_snapshots_missing_database_returns_two(tmp_path: Path) -> None:
+    result = _run_scraper(tmp_path, "--list-snapshots")
+    assert result.returncode == 2
+    assert "error:" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    assert not (tmp_path / "storage").exists()
+
+
+def test_scraper_incompatible_modes_rejected(tmp_path: Path) -> None:
+    result = _run_scraper(tmp_path, "--list-sources", "--list-competitions")
+    assert result.returncode == 2
+    assert "mutually exclusive" in result.stderr.lower() or "error" in result.stderr.lower()
+
+
+def test_scraper_validate_config_still_works(tmp_path: Path) -> None:
+    config = tmp_path / "settings.toml"
+    config.write_text('[application]\nenvironment = "test"\n', encoding="utf-8")
+    result = _run_scraper(tmp_path, "--config", str(config), "--validate-config")
+    assert result.returncode == 0
+    assert "configuration valid" in result.stdout
+    assert not (tmp_path / "storage").exists()
