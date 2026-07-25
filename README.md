@@ -39,14 +39,18 @@ Implemented now:
 - worker job integration: the `ingest.football-data-csv` handler is registered in
   the frozen default registry;
 - snapshot listing and verification through `scraper.py`;
+- leakage-safe football full-match 1X2 feature engineering
+  (`football-1x2-prematch-features-v1`);
+- deterministic rolling-origin training, temperature calibration, evaluation, and
+  pickle-free model artifacts (`football-1x2-logistic-v1`) via `engine.py`;
 - documentation, linting, typing, and tests.
 
 **Not implemented**: Betclic; Betano; current bookmaker prices; browser scraping
 or automation; additional sports; markets beyond production 1X2 plus a synthetic
-contract proof; models; features; predictions; combinations and accumulators;
-backtesting; settlement; bankroll management; Streamlit UI pages; an opportunity
-search engine; an automatic bet builder; user bet filters; cross-source fuzzy
-resolution.
+contract proof; player/lineup/injury features; opportunity discovery; expected
+value; Kelly staking; bet recommendations; combinations and accumulators;
+settlement; bankroll management; Streamlit UI pages; an automatic bet builder;
+user bet filters; cross-source fuzzy resolution.
 
 ## Supported Python version
 
@@ -237,6 +241,27 @@ adapter exists.
 
 See [docs/sources.md](docs/sources.md), [docs/snapshots.md](docs/snapshots.md),
 and [docs/data-contracts.md](docs/data-contracts.md).
+
+### Football 1X2 modelling workflow
+
+After one or more READY football snapshots exist for a single competition:
+
+```bash
+python engine.py --config config/settings.toml --build-football-1x2-features \
+  --snapshot football-ingestion/football-canonical-v2/<competition>/<season>/<uuid>/manifest.json \
+  --snapshot football-ingestion/football-canonical-v2/<competition>/<season2>/<uuid>/manifest.json
+
+python engine.py --config config/settings.toml --train-football-1x2 \
+  --features football/football-1x2-prematch-features-v1/<competition>/<artifact-id>
+
+python engine.py --config config/settings.toml --verify-model \
+  football/football-1x2-logistic-v1/<competition>/<artifact-id>/model.json
+```
+
+This baseline is team-level historical football 1X2 only. It is not a betting
+recommendation engine, does not use players/injuries/lineups, does not use
+bookmaker odds as model features, and does not produce expected value or
+accumulators. See [docs/modelling.md](docs/modelling.md).
 
 ### Windows PowerShell overrides
 

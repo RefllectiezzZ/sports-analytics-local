@@ -59,7 +59,7 @@ def test_normal_placeholder_execution(
     clear_sports_analytics_env: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = run_component("engine", "test", argv=[])
+    code = run_component("app", "test", argv=[])
     assert code == SUCCESS_EXIT
     captured = capsys.readouterr()
     assert "not implemented" in captured.out.lower()

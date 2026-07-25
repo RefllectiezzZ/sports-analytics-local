@@ -102,12 +102,19 @@ def test_normal_placeholder_execution(
         argv = ["--worker-once"]
     elif module_name == "scraper":
         argv = ["--list-sources"]
+    elif module_name == "engine":
+        with pytest.raises(SystemExit) as excinfo:
+            module.main([])
+        assert excinfo.value.code == 2
+        captured = capsys.readouterr()
+        assert "build-football-1x2-features" in captured.err or "engine mode" in captured.err
+        return
     else:
         argv = []
     code = module.main(argv)
     assert code == 0
     captured = capsys.readouterr()
-    if module_name in {"app", "engine"}:
+    if module_name == "app":
         assert "not implemented" in captured.out.lower()
     elif module_name == "scraper":
         source_lines = captured.out.splitlines()
