@@ -44,7 +44,9 @@ storage/snapshots/football-ingestion/football-canonical-v2/<competition_id>/<YYY
     seasons.parquet
     participants.parquet
     source_participants.parquet
+    participant_reconciliations.parquet
     events.parquet
+    source_events.parquet
     event_reconciliations.parquet
     market_quotes.parquet
     post_match_statistics.parquet
@@ -59,6 +61,12 @@ partition value (`competition_id`, then `season_label`), then the snapshot UUID.
 configured snapshots directory. `row_count` stores the primary dataset count,
 which is the `events` row count. Absolute paths are never stored in SQLite or
 manifests.
+
+The `football-canonical-v2` suite has ten datasets: `competitions`, `seasons`,
+`participants`, `source_participants`, `participant_reconciliations`, `events`,
+`source_events`, `event_reconciliations`, `market_quotes`, and
+`post_match_statistics`. The `events` file is canonical-only; source-event
+provenance, including unresolved source rows, lives in `source_events`.
 
 ## Manifest
 
@@ -83,7 +91,7 @@ Required top-level keys:
 | `source_observed_at_utc` | Canonical UTC observation timestamp |
 | `partition_keys` | Generic partition key/value object |
 | `domain_metadata` | Domain facts the shared layer does not interpret |
-| `producer_versions` | Adapter, parser, normalizer, and reconciliation versions |
+| `producer_versions` | Adapter, parser, normalizer, participant reconciliation, and event reconciliation versions |
 | `raw_artifact` | Relative path, SHA-256, byte count, encoding |
 | `http_metadata` | Retrieval metadata including `network_retrieved` |
 | `python_version` | Interpreter version that produced the snapshot |

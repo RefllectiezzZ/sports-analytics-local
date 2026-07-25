@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,28 @@ def _suite_without(dataset_name: str) -> SnapshotDatasetSuite:
     )
 
 
+def _suite_with_mutated_events_descriptor(*, mutation: str) -> SnapshotDatasetSuite:
+    suite = football_snapshot_suite()
+    descriptors = list(suite.descriptors)
+    index = suite.dataset_names.index("events")
+    descriptor = descriptors[index]
+    if mutation == "filename":
+        descriptors[index] = replace(descriptor, relative_filename="canonical_events.parquet")
+    elif mutation == "schema":
+        field_index = descriptor.schema.get_field_index("competition_id")
+        schema = descriptor.schema.set(
+            field_index,
+            descriptor.schema.field(field_index).with_nullable(True),
+        )
+        descriptors[index] = replace(descriptor, schema=schema)
+    else:  # pragma: no cover - defensive for future test edits
+        raise AssertionError(f"unknown mutation {mutation}")
+    return SnapshotDatasetSuite(
+        descriptors=tuple(descriptors),
+        primary_dataset_name=suite.primary_dataset_name,
+    )
+
+
 def test_publish_prepared_snapshot_marks_ready_and_verifies_directory(tmp_path: Path) -> None:
     database = database_path(tmp_path)
     snapshots_directory = tmp_path / "snapshots"
@@ -135,7 +158,7 @@ def test_publish_prepared_snapshot_marks_ready_and_verifies_directory(tmp_path: 
     assert result.row_counts == published.metrics.row_counts
     assert result.primary_row_count == 1
     assert result.partition_keys == published.partition_keys
-    assert result.file_count == 8
+    assert result.file_count == 10
 
 
 def test_ready_snapshot_is_reused_for_same_source_version(tmp_path: Path) -> None:
@@ -385,3 +408,26 @@ def test_publication_service_rejects_a_foreign_dataset_suite(tmp_path: Path) -> 
     service.discard_prepared(prepared)
 
     assert not prepared.temporary_directory.exists()
+
+
+@pytest.mark.parametrize("mutation", ["filename", "schema"])
+def test_publication_service_rejects_same_dataset_names_with_different_suite_contract(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    database = database_path(tmp_path)
+    snapshots_directory = tmp_path / "snapshots"
+    prepared = prepare(tmp_path, snapshots_directory=snapshots_directory, snapshot_id=UUID_A)
+    service = SnapshotPublicationService(
+        database_path=database,
+        snapshots_directory=snapshots_directory,
+        suite=_suite_with_mutated_events_descriptor(mutation=mutation),
+    )
+
+    with pytest.raises(SnapshotIntegrityError, match="does not match the publication service"):
+        service.publish_or_reuse(prepared, actor="test")
+
+    assert prepared.temporary_directory.exists()
+    assert _records(database) == []
+
+    service.discard_prepared(prepared)

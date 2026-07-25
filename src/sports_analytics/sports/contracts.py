@@ -188,10 +188,15 @@ class SeasonRecord:
 
 @dataclass(frozen=True, slots=True)
 class CanonicalParticipant:
-    """A source-independent competitor identity."""
+    """A source-independent competitor identity.
+
+    ``competition_id`` scopes the identity for the current domestic-league exact
+    policy so the same normalized name in two competitions cannot silently merge.
+    """
 
     canonical_participant_id: str
     sport_code: str
+    competition_id: str
     participant_type: str
     canonical_key: str
     display_name: str
@@ -199,6 +204,7 @@ class CanonicalParticipant:
 
     def __post_init__(self) -> None:
         validate_domain_identifier(self.sport_code, field_name="sport_code")
+        validate_domain_identifier(self.competition_id, field_name="competition_id")
         validate_domain_identifier(self.participant_type, field_name="participant_type")
         validate_canonical_key(self.canonical_key, field_name="canonical_key")
         validate_display_name(self.display_name, field_name="display_name")
@@ -206,12 +212,17 @@ class CanonicalParticipant:
 
 @dataclass(frozen=True, slots=True)
 class SourceParticipantReference:
-    """How one source names a participant, linked to canonical identity."""
+    """How one source names a participant.
+
+    Representable before canonical resolution: ``canonical_participant_id`` is
+    null until an exact, probable, or manual reconciliation succeeds.
+    """
 
     source_participant_id: str
     source_name: str
     source_participant_key: str
-    canonical_participant_id: str
+    canonical_participant_id: str | None
+    competition_id: str
     participant_type: str
     display_name: str
     normalized_name: str
@@ -219,18 +230,72 @@ class SourceParticipantReference:
 
     def __post_init__(self) -> None:
         validate_domain_identifier(self.source_name, field_name="source_name")
+        validate_domain_identifier(self.competition_id, field_name="competition_id")
         validate_domain_identifier(self.participant_type, field_name="participant_type")
         validate_display_name(self.display_name, field_name="display_name")
 
 
 @dataclass(frozen=True, slots=True)
+class ParticipantReconciliation:
+    """Auditable, versioned link between a source participant and a canonical one."""
+
+    source_name: str
+    source_participant_id: str
+    source_participant_key: str
+    canonical_participant_id: str | None
+    state: str
+    confidence: float
+    policy_version: str
+    match_key: str | None
+    reason: str | None
+    source_observed_at_utc: datetime
+    schema_version: str
+
+    def __post_init__(self) -> None:
+        validate_domain_identifier(self.source_name, field_name="source_name")
+        validate_domain_identifier(self.policy_version, field_name="reconciliation_policy_version")
+        validate_reconciliation_state(self.state)
+        validate_confidence(self.confidence)
+        _validate_state_confidence(self.state, self.confidence)
+        object.__setattr__(
+            self,
+            "source_observed_at_utc",
+            require_utc(self.source_observed_at_utc, field_name="source_observed_at_utc"),
+        )
+        if self.reason is not None and len(self.reason) > MAX_REASON_LENGTH:
+            msg = f"reconciliation reason exceeds maximum length of {MAX_REASON_LENGTH}"
+            raise NormalizationError(msg)
+        if self.state == ReconciliationState.UNRESOLVED.value:
+            if self.canonical_participant_id is not None:
+                msg = "unresolved participant reconciliation must not claim a canonical id"
+                raise NormalizationError(msg)
+            if self.reason is None:
+                msg = "unresolved participant reconciliation requires an explicit reason"
+                raise NormalizationError(msg)
+        elif self.canonical_participant_id is None:
+            msg = f"{self.state} participant reconciliation requires a canonical participant id"
+            raise NormalizationError(msg)
+
+    @property
+    def is_downstream_safe(self) -> bool:
+        """Whether downstream readers may treat the participant as reconciled."""
+        return ReconciliationState(self.state) in DOWNSTREAM_SAFE_RECONCILIATION_STATES
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalEvent:
-    """A source-independent fixture identity plus its canonical outcome."""
+    """A source-independent fixture identity plus its canonical outcome.
+
+    ``event_date`` and ``scheduled_start_utc`` are mutable scheduling metadata.
+    Immutable identity is ``canonical_event_id``, derived from participants and
+    ``event_occurrence_key`` rather than from the scheduled date.
+    """
 
     canonical_event_id: str
     sport_code: str
     competition_id: str
     season_id: str
+    event_occurrence_key: str
     event_date: date
     scheduled_start_utc: datetime | None
     start_time_precision: str
@@ -247,9 +312,16 @@ class CanonicalEvent:
         validate_domain_identifier(self.sport_code, field_name="sport_code")
         validate_domain_identifier(self.competition_id, field_name="competition_id")
         validate_domain_identifier(self.season_id, field_name="season_id")
+        validate_domain_identifier(self.event_occurrence_key, field_name="event_occurrence_key")
         if self.home_canonical_participant_id == self.away_canonical_participant_id:
             msg = "canonical event participants must differ"
             raise NormalizationError(msg)
+        if self.scheduled_start_utc is not None:
+            object.__setattr__(
+                self,
+                "scheduled_start_utc",
+                require_utc(self.scheduled_start_utc, field_name="scheduled_start_utc"),
+            )
         if self.status == EventStatus.FINISHED.value:
             if self.home_score is None or self.away_score is None:
                 msg = "finished canonical events require both scores"
@@ -267,12 +339,16 @@ class CanonicalEvent:
 
 @dataclass(frozen=True, slots=True)
 class SourceEventReference:
-    """Source-scoped fixture identity and row-level provenance."""
+    """Source-scoped fixture identity and row-level provenance.
+
+    Representable before canonical resolution: ``canonical_event_id`` is null
+    until event reconciliation succeeds.
+    """
 
     source_event_id: str
     source_name: str
     source_event_key: str
-    canonical_event_id: str
+    canonical_event_id: str | None
     source_row_number: int
     source_observed_at_utc: datetime
     source_file_sha256: str
@@ -280,7 +356,11 @@ class SourceEventReference:
 
     def __post_init__(self) -> None:
         validate_domain_identifier(self.source_name, field_name="source_name")
-        require_utc(self.source_observed_at_utc, field_name="source_observed_at_utc")
+        object.__setattr__(
+            self,
+            "source_observed_at_utc",
+            require_utc(self.source_observed_at_utc, field_name="source_observed_at_utc"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +385,11 @@ class EventReconciliation:
         validate_reconciliation_state(self.state)
         validate_confidence(self.confidence)
         _validate_state_confidence(self.state, self.confidence)
+        object.__setattr__(
+            self,
+            "source_observed_at_utc",
+            require_utc(self.source_observed_at_utc, field_name="source_observed_at_utc"),
+        )
         if self.reason is not None and len(self.reason) > MAX_REASON_LENGTH:
             msg = f"reconciliation reason exceeds maximum length of {MAX_REASON_LENGTH}"
             raise NormalizationError(msg)
@@ -327,19 +412,87 @@ class EventReconciliation:
 
 @dataclass(frozen=True, slots=True)
 class IngestedParticipant:
-    """One canonical participant together with the source reference that produced it."""
+    """One source participant reference with its reconciliation and optional canonical."""
 
-    canonical: CanonicalParticipant
     source_reference: SourceParticipantReference
+    reconciliation: ParticipantReconciliation
+    canonical: CanonicalParticipant | None
+
+    def __post_init__(self) -> None:
+        if self.reconciliation.is_downstream_safe:
+            if self.canonical is None:
+                msg = "downstream-safe participant reconciliation requires a canonical participant"
+                raise NormalizationError(msg)
+            if self.source_reference.canonical_participant_id != (
+                self.canonical.canonical_participant_id
+            ):
+                msg = "source participant canonical id must match the reconciled canonical"
+                raise NormalizationError(msg)
+        elif (
+            self.canonical is not None or self.source_reference.canonical_participant_id is not None
+        ):
+            msg = "unresolved participants must not claim a canonical participant"
+            raise NormalizationError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class IngestedSourceEvent:
+    """One source event candidate with scheduling, participants, and reconciliation.
+
+    Every source event is retained, including unresolved ones. Odds and
+    post-match statistics for unresolved events must not enter downstream-safe
+    datasets.
+    """
+
+    source_reference: SourceEventReference
+    reconciliation: EventReconciliation
+    competition_id: str
+    season_id: str
+    event_occurrence_key: str | None
+    event_date: date | None
+    scheduled_start_utc: datetime | None
+    start_time_precision: str
+    status: str
+    home_source_participant_id: str
+    away_source_participant_id: str
+    home_canonical_participant_id: str | None
+    away_canonical_participant_id: str | None
+    home_score: int | None
+    away_score: int | None
+    result_code: str | None
+    outcome_availability_stage: str
+    schema_version: str
+
+    def __post_init__(self) -> None:
+        if self.scheduled_start_utc is not None:
+            object.__setattr__(
+                self,
+                "scheduled_start_utc",
+                require_utc(self.scheduled_start_utc, field_name="scheduled_start_utc"),
+            )
+        if self.reconciliation.is_downstream_safe:
+            if self.source_reference.canonical_event_id is None:
+                msg = "downstream-safe source events require a canonical event id"
+                raise NormalizationError(msg)
+        elif self.source_reference.canonical_event_id is not None:
+            msg = "unresolved source events must not claim a canonical event id"
+            raise NormalizationError(msg)
 
 
 @dataclass(frozen=True, slots=True)
 class IngestedEvent:
-    """One canonical event with its source reference and reconciliation decision."""
+    """One downstream-safe canonical event produced by successful reconciliation."""
 
     canonical: CanonicalEvent
-    source_reference: SourceEventReference
     reconciliation: EventReconciliation
+
+    def __post_init__(self) -> None:
+        if not self.reconciliation.is_downstream_safe:
+            msg = "ingested canonical events require a downstream-safe reconciliation"
+            raise NormalizationError(msg)
+        if self.reconciliation.canonical_event_id != self.canonical.canonical_event_id:
+            msg = "event reconciliation canonical id must match the canonical event"
+            raise NormalizationError(msg)
 
 
 def validate_reconciliation_state(value: str) -> str:

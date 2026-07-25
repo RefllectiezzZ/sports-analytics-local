@@ -31,8 +31,9 @@ Implemented now:
 - one Football-Data.co.uk **ingestion adapter** covering two competitions
   (`eng-premier-league`, `prt-primeira-liga`), with allowlisted HTTPS retrieval,
   content-addressed raw storage, and strict CSV parsing;
-- sport-agnostic canonical participant and event contracts with source references,
-  plus conservative versioned event reconciliation;
+- sport-agnostic canonical participant and event contracts with source
+  participant/event provenance datasets, plus conservative versioned participant
+  and event reconciliation;
 - a generic canonical market quote contract, with historical 1X2 mapped into it;
 - immutable generic Parquet snapshots;
 - worker job integration: the `ingest.football-data-csv` handler is registered in
@@ -403,8 +404,8 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
   emitted into the generic market contract. A synthetic totals fixture proves the
   contract generalizes, but no adapter produces other markets.
 - Cross-source resolution is limited to exact canonical identity. There is no
-  fuzzy or machine-learning matching; ambiguous events stay unresolved and are
-  excluded from the `events` dataset.
+  fuzzy or machine-learning matching; unresolved source events stay in
+  `source_events` and are excluded from downstream-safe datasets.
 - No feature engineering, models, predictions, combinations, accumulators,
   backtesting, settlement, or bankroll management.
 - No opportunity search engine, automatic bet builder, or user bet filters.

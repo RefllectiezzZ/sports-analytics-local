@@ -49,16 +49,23 @@ the scraper CLI.
 ### Identity boundary
 
 Canonical participant and event identities are deterministic UUIDv5 values
-derived only from source-independent facts (sport, competition, season, event
-date, canonical participants). They never contain or depend on `source_name`.
+derived only from source-independent facts. Participant identity is scoped by
+sport, competition, participant type, and normalized canonical name; raw display
+names are not global identities. Event identity is scoped by sport, competition,
+season, canonical participants, and `event_occurrence_key`; `event_date` and
+kickoff are mutable scheduling metadata.
+
 Source-scoped identities (`source_participant_id`, `source_event_id`,
 `source_event_key`) always include `source_name` and exist for provenance and
-adapter tracing. Every event row carries both `canonical_event_id` and
-`source_event_id`. Source-scoped entities are never described as canonical.
+adapter tracing. Canonical `events` rows are unique by `canonical_event_id` and do
+not carry per-source duplication. The `source_events` dataset retains every
+source event candidate, including unresolved rows, with row-level provenance.
+Source-scoped entities are never described as canonical.
 
-Cross-source event reconciliation is conservative and versioned
-(`event-reconciliation-v1`): only `exact` matches are produced automatically, and
-unresolved candidates are recorded with a reason instead of being merged.
+Participant and event reconciliation are conservative and versioned
+(`participant-reconciliation-v1`, `event-reconciliation-v1`): only `exact`
+matches are produced automatically, and unresolved candidates are recorded with a
+reason instead of being merged. There is no fuzzy matching or silent alias merge.
 
 ### Market boundary
 
@@ -288,8 +295,9 @@ Implemented:
 - one Football-Data.co.uk ingestion adapter with allowlisted HTTPS retrieval,
   content-addressed raw storage, and strict CSV parsing;
 - two football competitions (`eng-premier-league`, `prt-primeira-liga`);
-- canonical participant and event contracts with source references;
-- conservative versioned event reconciliation;
+- competition-scoped canonical participants, occurrence-key canonical events,
+  and source participant/event provenance datasets;
+- conservative versioned participant and event reconciliation;
 - the generic canonical market quote contract, with historical 1X2 mapped into
   it;
 - immutable generic Parquet snapshots with `snapshot-manifest-v2`;

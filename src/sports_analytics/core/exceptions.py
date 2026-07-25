@@ -85,6 +85,10 @@ class NormalizationError(SportsAnalyticsError):
     """Raised when canonical normalization rejects source row content."""
 
 
+class SourceIntegrityError(NormalizationError):
+    """Raised when source identities conflict and cannot be safely reconciled."""
+
+
 class SnapshotError(SportsAnalyticsError):
     """Base exception for snapshot preparation, publication, or verification."""
 

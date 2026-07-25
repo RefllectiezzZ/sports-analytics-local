@@ -1,9 +1,7 @@
 """Football snapshot dataset suite and football-specific Arrow schema.
 
-The football ingestion snapshot combines the shared canonical datasets
-(competitions, seasons, participants, source participants, events, event
-reconciliations, market quotes) with one football-specific dataset for post-match
-statistics.
+The football ingestion snapshot combines shared canonical and source-scoped
+datasets with one football-specific post-match statistics dataset.
 """
 
 from __future__ import annotations
@@ -39,8 +37,10 @@ from sports_analytics.sports.schemas import (
     DATASET_COMPETITIONS,
     DATASET_EVENT_RECONCILIATIONS,
     DATASET_EVENTS,
+    DATASET_PARTICIPANT_RECONCILIATIONS,
     DATASET_PARTICIPANTS,
     DATASET_SEASONS,
+    DATASET_SOURCE_EVENTS,
     DATASET_SOURCE_PARTICIPANTS,
     competition_rows,
     competitions_schema,
@@ -48,10 +48,14 @@ from sports_analytics.sports.schemas import (
     event_reconciliations_schema,
     event_rows,
     events_schema,
+    participant_reconciliation_rows,
+    participant_reconciliations_schema,
     participant_rows,
     participants_schema,
     season_rows,
     seasons_schema,
+    source_event_rows,
+    source_events_schema,
     source_participant_rows,
     source_participants_schema,
 )
@@ -155,9 +159,22 @@ def _build_suite() -> SnapshotDatasetSuite:
             schema=source_participants_schema(schema_version=version, sport_code=SPORT_FOOTBALL),
         ),
         DatasetDescriptor(
+            dataset_name=DATASET_PARTICIPANT_RECONCILIATIONS,
+            relative_filename="participant_reconciliations.parquet",
+            schema=participant_reconciliations_schema(
+                schema_version=version,
+                sport_code=SPORT_FOOTBALL,
+            ),
+        ),
+        DatasetDescriptor(
             dataset_name=DATASET_EVENTS,
             relative_filename="events.parquet",
             schema=events_schema(schema_version=version, sport_code=SPORT_FOOTBALL),
+        ),
+        DatasetDescriptor(
+            dataset_name=DATASET_SOURCE_EVENTS,
+            relative_filename="source_events.parquet",
+            schema=source_events_schema(schema_version=version, sport_code=SPORT_FOOTBALL),
         ),
         DatasetDescriptor(
             dataset_name=DATASET_EVENT_RECONCILIATIONS,
@@ -215,19 +232,16 @@ def football_schema_fingerprints() -> dict[str, str]:
 
 def bundle_to_tables(bundle: NormalizedFootballBundle) -> dict[str, pa.Table]:
     """Convert a normalized football bundle into explicitly typed Arrow tables."""
-    source_participant_ids = {
-        item.canonical.canonical_participant_id: item.source_reference.source_participant_id
-        for item in bundle.participants
-    }
     rows_by_dataset: dict[str, list[dict[str, Any]]] = {
         DATASET_COMPETITIONS: competition_rows(bundle.competitions),
         DATASET_SEASONS: season_rows(bundle.seasons),
         DATASET_PARTICIPANTS: participant_rows(bundle.participants),
         DATASET_SOURCE_PARTICIPANTS: source_participant_rows(bundle.participants),
-        DATASET_EVENTS: event_rows(
-            bundle.events,
-            source_participant_ids=source_participant_ids,
+        DATASET_PARTICIPANT_RECONCILIATIONS: participant_reconciliation_rows(
+            bundle.participant_reconciliations
         ),
+        DATASET_EVENTS: event_rows(tuple(item.canonical for item in bundle.events)),
+        DATASET_SOURCE_EVENTS: source_event_rows(bundle.source_events),
         DATASET_EVENT_RECONCILIATIONS: event_reconciliation_rows(bundle.reconciliations),
         DATASET_MARKET_QUOTES: market_quote_rows(bundle.market_quotes),
         DATASET_POST_MATCH_STATISTICS: post_match_statistics_rows(bundle.post_match_statistics),

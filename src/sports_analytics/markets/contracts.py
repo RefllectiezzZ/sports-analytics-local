@@ -251,7 +251,11 @@ class MarketDefinition:
             if self.line_value is None:
                 msg = f"line_value is required when line_type is {self.line_type}"
                 raise NormalizationError(msg)
-            validate_line_value(self.line_value)
+            object.__setattr__(
+                self,
+                "line_value",
+                validate_line_value(self.line_value),
+            )
         scoped = {ParticipantScope.TEAM.value, ParticipantScope.PLAYER.value}
         if self.participant_scope in scoped and self.canonical_participant_id is None:
             msg = f"canonical_participant_id is required for {self.participant_scope} markets"
@@ -282,6 +286,13 @@ class MarketSelection:
 class OddsQuote:
     """A priced market selection observed from one provider at one moment.
 
+    Identity is split deliberately:
+
+    ``quote_series_id``
+        stable identity for the canonical event, selection, and provider;
+    ``quote_observation_id``
+        one concrete observation distinguished by source provenance and time.
+
     Temporal semantics are explicit and never conflated:
 
     ``source_observed_at_utc``
@@ -296,8 +307,10 @@ class OddsQuote:
         source-supplied validity window, ``None`` when the source supplies none.
     """
 
-    quote_id: str
+    quote_series_id: str
+    quote_observation_id: str
     canonical_event_id: str
+    source_name: str
     source_event_id: str
     selection: MarketSelection
     provider_type: str
@@ -318,6 +331,7 @@ class OddsQuote:
     schema_version: str
 
     def __post_init__(self) -> None:
+        validate_domain_identifier(self.source_name, field_name="source_name")
         validate_domain_identifier(self.provider_id, field_name="provider_id")
         _validate_enum(self.provider_type, ProviderType, field_name="provider_type")
         _validate_enum(self.quote_phase, QuotePhase, field_name="quote_phase")
@@ -330,10 +344,18 @@ class OddsQuote:
         _validate_enum(self.selection_status, SelectionStatus, field_name="selection_status")
         _validate_enum(self.quality_status, QuoteQualityStatus, field_name="quality_status")
         _validate_optional_reference(self.source_field, field_name="source_field")
-        validate_decimal_odds(self.decimal_odds)
-        require_utc(self.source_observed_at_utc, field_name="source_observed_at_utc")
+        object.__setattr__(self, "decimal_odds", validate_decimal_odds(self.decimal_odds))
+        object.__setattr__(
+            self,
+            "source_observed_at_utc",
+            require_utc(self.source_observed_at_utc, field_name="source_observed_at_utc"),
+        )
         if self.quoted_at_utc is not None:
-            require_utc(self.quoted_at_utc, field_name="quoted_at_utc")
+            object.__setattr__(
+                self,
+                "quoted_at_utc",
+                require_utc(self.quoted_at_utc, field_name="quoted_at_utc"),
+            )
         precision = self.quote_timestamp_precision
         if self.quoted_at_utc is None and precision in {
             QuoteTimestampPrecision.EXACT.value,
@@ -348,9 +370,17 @@ class OddsQuote:
             msg = "observation-only precision must not be paired with a quote timestamp"
             raise NormalizationError(msg)
         if self.quote_valid_from_utc is not None:
-            require_utc(self.quote_valid_from_utc, field_name="quote_valid_from_utc")
+            object.__setattr__(
+                self,
+                "quote_valid_from_utc",
+                require_utc(self.quote_valid_from_utc, field_name="quote_valid_from_utc"),
+            )
         if self.quote_valid_to_utc is not None:
-            require_utc(self.quote_valid_to_utc, field_name="quote_valid_to_utc")
+            object.__setattr__(
+                self,
+                "quote_valid_to_utc",
+                require_utc(self.quote_valid_to_utc, field_name="quote_valid_to_utc"),
+            )
         if (
             self.quote_valid_from_utc is not None
             and self.quote_valid_to_utc is not None

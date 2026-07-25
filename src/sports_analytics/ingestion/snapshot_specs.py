@@ -112,7 +112,7 @@ def build_football_snapshot_spec(
         "duplicate_rows_discarded": bundle.duplicate_rows_discarded,
         "warnings_count": len(bundle.warnings),
         "pinnacle_caution_quote_count": bundle.pinnacle_caution_quote_count,
-        "unresolved_event_count": len(bundle.unresolved_reconciliations),
+        "unresolved_event_count": bundle.unresolved_event_count,
     }
     return SnapshotSpec(
         identity=identity,
@@ -131,7 +131,8 @@ def build_football_snapshot_spec(
             "adapter": FOOTBALL_DATA_ADAPTER_VERSION,
             "parser": FOOTBALL_PARSER_VERSION,
             "normalizer": FOOTBALL_NORMALIZER_VERSION,
-            "reconciliation": bundle.reconciliation_policy_version,
+            "event_reconciliation": bundle.reconciliation_policy_version,
+            "participant_reconciliation": bundle.participant_reconciliation_policy_version,
         },
         domain_metadata=domain_metadata,
         quality_summary=quality_summary,

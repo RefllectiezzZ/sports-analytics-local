@@ -73,7 +73,9 @@ EXPECTED_ROW_COUNTS = {
     "seasons": 1,
     "participants": 2,
     "source_participants": 2,
+    "participant_reconciliations": 2,
     "events": 1,
+    "source_events": 1,
     "event_reconciliations": 1,
     "market_quotes": 3,
     "post_match_statistics": 1,
@@ -172,7 +174,13 @@ def test_manifest_document_records_every_producer_version(
 ) -> None:
     producer_versions = cached_document["producer_versions"]
 
-    assert set(producer_versions) == {"adapter", "parser", "normalizer", "reconciliation"}
+    assert set(producer_versions) == {
+        "adapter",
+        "parser",
+        "normalizer",
+        "event_reconciliation",
+        "participant_reconciliation",
+    }
     assert all(isinstance(value, str) and value for value in producer_versions.values())
 
 

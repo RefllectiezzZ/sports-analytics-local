@@ -39,8 +39,10 @@ def market_quotes_schema(*, schema_version: str) -> pa.Schema:
     """
     return pa.schema(
         [
-            pa.field("quote_id", pa.string(), nullable=False),
+            pa.field("quote_series_id", pa.string(), nullable=False),
+            pa.field("quote_observation_id", pa.string(), nullable=False),
             pa.field("canonical_event_id", pa.string(), nullable=False),
+            pa.field("source_name", dictionary_string(), nullable=False),
             pa.field("source_event_id", pa.string(), nullable=False),
             pa.field("sport_code", dictionary_string(), nullable=False),
             pa.field("provider_type", dictionary_string(), nullable=False),
@@ -86,8 +88,10 @@ def market_quote_rows(quotes: tuple[OddsQuote, ...]) -> list[dict[str, Any]]:
         definition = selection.definition
         rows.append(
             {
-                "quote_id": quote.quote_id,
+                "quote_series_id": quote.quote_series_id,
+                "quote_observation_id": quote.quote_observation_id,
                 "canonical_event_id": quote.canonical_event_id,
+                "source_name": quote.source_name,
                 "source_event_id": quote.source_event_id,
                 "sport_code": definition.sport_code,
                 "provider_type": quote.provider_type,
@@ -136,5 +140,5 @@ def quote_sort_key(quote: OddsQuote) -> tuple[str, ...]:
         quote.provider_id,
         quote.quote_phase,
         quote.selection.outcome_key,
-        quote.quote_id,
+        quote.quote_observation_id,
     )

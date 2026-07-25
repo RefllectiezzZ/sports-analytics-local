@@ -183,15 +183,24 @@ row's `Div` must match the catalog division.
 
 Each ingested row produces both identities:
 
-- canonical participant and event IDs derived only from source-independent facts,
-  never from `source_name`;
+- canonical participant IDs derived from sport, competition, participant type,
+  and normalized name, never from `source_name`;
+- canonical event IDs derived from sport, competition, season, canonical
+  participants, and `event_occurrence_key`, never from `event_date` or kickoff;
 - source-scoped participant and event references that always include
   `source_name`, retained for provenance and adapter tracing.
 
-Because this is the only registered source, every reconciliation is either
-`exact` or `unresolved` under policy `event-reconciliation-v1`. Unresolved rows
-appear only in `event_reconciliations` and are excluded from the `events`
-dataset. See [data-contracts.md](data-contracts.md).
+For Football-Data.co.uk domestic leagues, the occurrence key is
+`season-ordered-pair-home-1`: one home fixture per ordered pair per season.
+Because Football-Data.co.uk does not provide round or matchday, cups, legs, and
+other multi-meeting formats need different occurrence-key policies later.
+
+Participant reconciliation uses policy `participant-reconciliation-v1`; event
+reconciliation uses policy `event-reconciliation-v1`. Only exact automatic
+matches are produced. Unresolved source events are retained in `source_events`
+and `event_reconciliations`, but are excluded from canonical `events`,
+`market_quotes`, and `post_match_statistics`. See
+[data-contracts.md](data-contracts.md).
 
 ### Odds columns mapped into the generic market contract
 

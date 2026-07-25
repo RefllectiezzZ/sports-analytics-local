@@ -1,9 +1,4 @@
-"""Generic market contract tests, including a synthetic line market.
-
-The production adapter only emits football 1X2 quotes. The synthetic totals
-market below exists to prove the canonical contract is not structurally limited
-to 1X2, without adding a production adapter for it.
-"""
+"""Generic market contract tests, including a synthetic line market."""
 
 from __future__ import annotations
 
@@ -33,7 +28,11 @@ from sports_analytics.markets.contracts import (
     validate_decimal_odds,
     validate_line_value,
 )
-from sports_analytics.markets.identifiers import build_market_key, build_quote_id
+from sports_analytics.markets.identifiers import (
+    build_market_key,
+    build_quote_observation_id,
+    build_quote_series_id,
+)
 from sports_analytics.markets.schemas import (
     market_quote_rows,
     market_quotes_schema,
@@ -46,8 +45,10 @@ from sports_analytics.sports.football.markets import (
 from sports_analytics.sports.identifiers import SPORT_FOOTBALL
 
 OBSERVED_AT = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+LATER_OBSERVED_AT = datetime(2024, 1, 15, 12, 5, tzinfo=UTC)
 QUOTED_AT = datetime(2024, 1, 15, 11, 30, tzinfo=UTC)
 CANONICAL_EVENT_ID = "1a9f6458-3f3b-53f3-bd63-3d908acd41f6"
+SOURCE_NAME = "fixture-source"
 SOURCE_EVENT_ID = "3b638feb-1e83-54fd-abc3-0ffffb0ebc08"
 CANONICAL_PARTICIPANT_ID = "8bd4c0c4-6d21-5f3f-9e64-1c9a1e5f6a77"
 SCHEMA_VERSION = "football-canonical-v2"
@@ -78,6 +79,7 @@ def _quote(
     *,
     decimal_odds: str = "1.9000",
     quote_phase: str = QuotePhase.CURRENT.value,
+    source_observed_at_utc: datetime = OBSERVED_AT,
     quoted_at_utc: datetime | None = QUOTED_AT,
     precision: str = QuoteTimestampPrecision.MINUTE.value,
     valid_from: datetime | None = None,
@@ -86,27 +88,46 @@ def _quote(
     selection_status: str = SelectionStatus.ACTIVE.value,
     quality_status: str = QuoteQualityStatus.SOURCE_PROVIDED.value,
     quality_reason: str | None = None,
+    source_name: str = SOURCE_NAME,
+    source_event_id: str = SOURCE_EVENT_ID,
     provider_type: str = ProviderType.BOOKMAKER.value,
     provider_id: str = "fixture-bookmaker",
+    source_file_sha256: str = RAW_SHA,
     source_field: str | None = None,
 ) -> OddsQuote:
-    return OddsQuote(
-        quote_id=build_quote_id(
-            canonical_event_id=CANONICAL_EVENT_ID,
-            selection=selection,
-            provider_type=provider_type,
-            provider_id=provider_id,
-            quote_phase=quote_phase,
-            source_field=source_field,
-        ),
+    quote_series_id = build_quote_series_id(
         canonical_event_id=CANONICAL_EVENT_ID,
-        source_event_id=SOURCE_EVENT_ID,
+        selection=selection,
+        provider_type=provider_type,
+        provider_id=provider_id,
+    )
+    quote_observation_id = build_quote_observation_id(
+        quote_series_id=quote_series_id,
+        source_name=source_name,
+        source_event_id=source_event_id,
+        selection=selection,
+        provider_type=provider_type,
+        provider_id=provider_id,
+        quote_phase=quote_phase,
+        source_observed_at_utc=source_observed_at_utc,
+        quoted_at_utc=(
+            None if quoted_at_utc is not None and quoted_at_utc.tzinfo is None else quoted_at_utc
+        ),
+        source_file_sha256=source_file_sha256,
+        source_field=source_field,
+    )
+    return OddsQuote(
+        quote_series_id=quote_series_id,
+        quote_observation_id=quote_observation_id,
+        canonical_event_id=CANONICAL_EVENT_ID,
+        source_name=source_name,
+        source_event_id=source_event_id,
         selection=selection,
         provider_type=provider_type,
         provider_id=provider_id,
         decimal_odds=Decimal(decimal_odds),
         quote_phase=quote_phase,
-        source_observed_at_utc=OBSERVED_AT,
+        source_observed_at_utc=source_observed_at_utc,
         quoted_at_utc=quoted_at_utc,
         quote_timestamp_precision=precision,
         quote_valid_from_utc=valid_from,
@@ -116,7 +137,7 @@ def _quote(
         source_field=source_field,
         quality_status=quality_status,
         quality_reason=quality_reason,
-        source_file_sha256=RAW_SHA,
+        source_file_sha256=source_file_sha256,
         schema_version=SCHEMA_VERSION,
     )
 
@@ -159,8 +180,62 @@ def test_football_1x2_selection_uses_the_generic_contract() -> None:
     assert selection.source_selection_id is None
 
 
-def test_totals_over_under_market_round_trips_through_parquet(tmp_path: Path) -> None:
+def test_line_values_canonicalize_to_same_line_and_series_id() -> None:
+    quotes = [
+        _quote(MarketSelection(definition=_totals_definition(line), outcome_key="over"))
+        for line in ("2.5", "2.50", "2.500")
+    ]
+
+    assert {quote.selection.definition.line_value for quote in quotes} == {Decimal("2.50")}
+    assert len({quote.quote_series_id for quote in quotes}) == 1
+
+
+def test_identical_observations_have_same_observation_id() -> None:
+    selection = MarketSelection(definition=_totals_definition(), outcome_key="over")
+
+    first = _quote(selection)
+    second = _quote(selection)
+
+    assert first == second
+    assert first.quote_series_id == second.quote_series_id
+    assert first.quote_observation_id == second.quote_observation_id
+
+
+def test_different_observation_times_have_different_observation_ids() -> None:
+    selection = MarketSelection(definition=_totals_definition(), outcome_key="over")
+
+    first = _quote(selection, source_observed_at_utc=OBSERVED_AT)
+    later = _quote(selection, source_observed_at_utc=LATER_OBSERVED_AT)
+
+    assert first.quote_series_id == later.quote_series_id
+    assert first.quote_observation_id != later.quote_observation_id
+
+
+def test_different_source_selection_ids_have_different_observation_ids_without_collision() -> None:
     definition = _totals_definition()
+    first = _quote(
+        MarketSelection(
+            definition=definition,
+            outcome_key="over",
+            source_market_id="totals-1",
+            source_selection_id="over-2-5-a",
+        )
+    )
+    second = _quote(
+        MarketSelection(
+            definition=definition,
+            outcome_key="over",
+            source_market_id="totals-1",
+            source_selection_id="over-2-5-b",
+        )
+    )
+
+    assert first.quote_series_id == second.quote_series_id
+    assert first.quote_observation_id != second.quote_observation_id
+
+
+def test_totals_over_under_market_round_trips_through_parquet(tmp_path: Path) -> None:
+    definition = _totals_definition("2.500")
     over = _quote(MarketSelection(definition=definition, outcome_key="over"))
     under = _quote(
         MarketSelection(definition=definition, outcome_key="under"),
@@ -176,11 +251,44 @@ def test_totals_over_under_market_round_trips_through_parquet(tmp_path: Path) ->
     assert read_back.schema == schema
     assert read_back.num_rows == 2
     rows = read_back.to_pylist()
+    assert {row["quote_series_id"] for row in rows} == {
+        over.quote_series_id,
+        under.quote_series_id,
+    }
+    assert {row["quote_observation_id"] for row in rows} == {
+        over.quote_observation_id,
+        under.quote_observation_id,
+    }
+    assert {row["source_name"] for row in rows} == {SOURCE_NAME}
     assert {row["outcome_key"] for row in rows} == {"over", "under"}
     assert {row["line_type"] for row in rows} == {"total"}
     assert {row["line_value"] for row in rows} == {Decimal("2.50")}
     assert {row["market_family"] for row in rows} == {"totals"}
-    assert rows[0]["decimal_odds"] == Decimal("1.9000")
+    assert rows[0]["decimal_odds"] == over.decimal_odds
+    assert rows[0]["source_observed_at_utc"] == over.source_observed_at_utc
+    assert rows[0]["quoted_at_utc"] == over.quoted_at_utc
+
+
+def test_parquet_values_equal_in_memory_canonical_contract_values(tmp_path: Path) -> None:
+    quote = _quote(
+        MarketSelection(definition=_totals_definition("2.500"), outcome_key="over"),
+        decimal_odds="1.9",
+        quote_phase=QuotePhase.OPENING.value,
+        source_field="book-over",
+    )
+
+    schema = market_quotes_schema(schema_version=SCHEMA_VERSION)
+    path = tmp_path / "single_quote.parquet"
+    pq.write_table(pa.Table.from_pylist(market_quote_rows((quote,)), schema=schema), path)
+    (row,) = pq.read_table(path).to_pylist()
+
+    assert row["quote_series_id"] == quote.quote_series_id
+    assert row["quote_observation_id"] == quote.quote_observation_id
+    assert row["source_name"] == quote.source_name
+    assert row["line_value"] == quote.selection.definition.line_value
+    assert row["decimal_odds"] == quote.decimal_odds
+    assert row["quote_phase"] == quote.quote_phase
+    assert row["source_field"] == quote.source_field
 
 
 def test_null_and_non_null_line_values_share_one_dataset(tmp_path: Path) -> None:
@@ -379,7 +487,7 @@ def test_unknown_enum_values_are_rejected() -> None:
         _quote(selection, quote_phase="halftime")
 
 
-def test_quote_ids_separate_providers_phases_and_outcomes() -> None:
+def test_quote_series_ids_separate_providers_outcomes_and_lines() -> None:
     selection = match_result_1x2_selection("home")
     base = _quote(selection, quote_phase=QuotePhase.OPENING.value)
     closing = _quote(selection, quote_phase=QuotePhase.CLOSING.value)
@@ -388,15 +496,16 @@ def test_quote_ids_separate_providers_phases_and_outcomes() -> None:
     totals = _quote(MarketSelection(definition=_totals_definition(), outcome_key="over"))
     other_line = _quote(MarketSelection(definition=_totals_definition("3.5"), outcome_key="over"))
 
-    ids = {
-        base.quote_id,
-        closing.quote_id,
-        other_provider.quote_id,
-        other_outcome.quote_id,
-        totals.quote_id,
-        other_line.quote_id,
+    assert base.quote_series_id == closing.quote_series_id
+    series_ids = {
+        base.quote_series_id,
+        other_provider.quote_series_id,
+        other_outcome.quote_series_id,
+        totals.quote_series_id,
+        other_line.quote_series_id,
     }
-    assert len(ids) == 6
+    assert len(series_ids) == 5
+    assert base.quote_observation_id != closing.quote_observation_id
 
 
 def test_quote_sort_key_is_deterministic_and_line_aware() -> None:

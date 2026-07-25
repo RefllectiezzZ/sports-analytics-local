@@ -14,6 +14,7 @@ this release.
 | `football-data-co-uk-adapter-v1` | Football-Data.co.uk ingestion adapter version recorded in manifests |
 | `football-data-csv-parser-v1` | Parser implementation version recorded in manifests |
 | `football-normalizer-v2` | Normalizer implementation version recorded in manifests |
+| `participant-reconciliation-v1` | Cross-source participant reconciliation policy version |
 | `event-reconciliation-v1` | Cross-source event reconciliation policy version |
 | `football-data-co-uk-policy-v1` | Source-quality policy version |
 
@@ -25,30 +26,43 @@ Schema versioning policy:
 
 ## Identity model
 
-The platform separates four distinct identity concepts. Conflating them is a
-contract violation.
+The platform separates canonical identity, source-scoped provenance, and
+reconciliation decisions. Conflating them is a contract violation.
 
 | Concept | Contract | Depends on `source_name` |
 | --- | --- | --- |
 | Canonical participant | `CanonicalParticipant` | No |
 | Source participant reference | `SourceParticipantReference` | Yes |
+| Participant reconciliation | `ParticipantReconciliation` | Yes |
 | Canonical event | `CanonicalEvent` | No |
 | Source event reference | `SourceEventReference` | Yes |
+| Event reconciliation | `EventReconciliation` | Yes |
 
 ### Canonical identity
 
 Canonical identifiers are deterministic UUIDv5 values derived **only** from
-source-independent facts. They never contain and never depend on `source_name`,
-so two different sources describing the same real-world participant or fixture
-derive the same canonical identity.
+source-independent facts. They never contain and never depend on `source_name`.
 
 | Identifier | Derived from |
 | --- | --- |
-| `canonical_participant_id` | `sport_code`, `participant_type`, case-folded `canonical_key` |
-| `canonical_event_id` | `sport_code`, `competition_id`, `season_id`, `event_date`, both canonical participant IDs |
+| `canonical_participant_id` | `sport_code`, `competition_id`, `participant_type`, case-folded `canonical_key` |
+| `canonical_event_id` | `sport_code`, `competition_id`, `season_id`, both canonical participant IDs, `event_occurrence_key` |
 
-Both use a project-owned canonical UUIDv5 namespace that is distinct from the
-source namespace, so a source-scoped key can never collide with a canonical key.
+Canonical participant IDs are competition-scoped. A normalized display name in
+one competition is not a global identity and must not silently merge with the
+same normalized display name in another competition.
+
+Canonical event IDs use `event_occurrence_key`, not `event_date` or kickoff time.
+Dates and scheduled starts are mutable metadata so postponed or rescheduled
+fixtures retain one canonical identity. For the current Football-Data.co.uk
+domestic-league adapter, the occurrence key is
+`season-ordered-pair-home-1`: one home fixture for an ordered home/away pair in a
+season. Football-Data.co.uk does not provide round or matchday, so cups, legs,
+replays, playoffs, or competitions with multiple same-home meetings will need a
+different occurrence key policy later.
+
+Canonical and source identifiers use distinct project-owned UUIDv5 namespaces, so
+a source-scoped key can never collide with a canonical key.
 
 ### Source identity
 
@@ -58,85 +72,103 @@ described as canonical.
 
 | Identifier | Derived from |
 | --- | --- |
-| `source_participant_key` | `source_name`, `sport_code`, normalized name |
+| `source_participant_key` | `source_name`, `sport_code`, `competition_id`, normalized name |
 | `source_participant_id` | UUIDv5 of `source_participant_key` in the source namespace |
 | `source_event_key` | `source_name`, `competition_id`, `season_id`, `event_date`, both source participant keys |
 | `source_event_id` | UUIDv5 of `source_event_key` in the source namespace |
 
-Every row of the `events` dataset exposes **both** `canonical_event_id` and
-`source_event_id`, plus `source_event_key`, `source_name`, and
-`source_row_number`, so a canonical fact can always be traced back to the exact
-source row that produced it.
+The `source_events` dataset retains every source event candidate, including
+unresolved rows, with row-level provenance. The `events` dataset is canonical
+only, unique by `canonical_event_id`, and contains no per-source duplication or
+source provenance columns.
 
 Other identifiers:
 
 - competition IDs are stable catalog strings (for example `eng-premier-league`);
 - season IDs are `{competition_id}:{YYYY-YYYY}`;
-- quote IDs are deterministic UUIDv5 values from canonical event identity, the
-  canonical market dimensions, the provider, the phase, and the source field.
+- market quote identity is split between `quote_series_id` and
+  `quote_observation_id`.
+
+## Participant reconciliation
+
+Policy version: `participant-reconciliation-v1`.
+
+Participant reconciliation is the auditable, versioned decision that links a
+source participant reference to a competition-scoped canonical participant. Every
+decision carries an explicit state and a bounded confidence between `0.0` and
+`1.0` inclusive.
+
+| State | Confidence | Produced automatically | Meaning |
+| --- | --- | --- | --- |
+| `exact` | `1.0` | Yes | Competition-scoped normalized name is known and unambiguous |
+| `probable` | strictly between `0.0` and `1.0` | No | Reserved by the contract for future scored matching |
+| `manual` | strictly between `0.0` and `1.0` | No | Reserved by the contract for an operator-confirmed link |
+| `unresolved` | `0.0` | Yes | Identity is incomplete, duplicated, conflicting, or an unsupported alias |
+
+Only `exact` is produced by an automatic rule in this release. There is no fuzzy
+name matching. Aliases are not merged unless an explicit supported alias mapping
+names the canonical key.
 
 ## Event reconciliation
 
 Policy version: `event-reconciliation-v1`.
 
-Reconciliation is the auditable, versioned decision that links a source event
-reference to a canonical event. Every decision carries an explicit state and a
-bounded confidence between `0.0` and `1.0` inclusive.
+Event reconciliation is the auditable, versioned decision that links a source
+event reference to a canonical event. Every decision carries an explicit state and
+a bounded confidence between `0.0` and `1.0` inclusive.
 
 | State | Confidence | Produced automatically | Meaning |
 | --- | --- | --- | --- |
-| `exact` | `1.0` | Yes | Every canonical identity component is known and unambiguous, and no candidate contradicts another for the same canonical event |
+| `exact` | `1.0` | Yes | Sport, competition, season, both canonical participants, and `event_occurrence_key` are known and unambiguous |
 | `probable` | strictly between `0.0` and `1.0` | No | Reserved by the contract for future scored matching |
 | `manual` | strictly between `0.0` and `1.0` | No | Reserved by the contract for an operator-confirmed link |
-| `unresolved` | `0.0` | Yes | Identity is incomplete or two candidates conflict |
+| `unresolved` | `0.0` | Yes | Identity is incomplete or source candidates conflict |
 
-Only `exact` is produced by an automatic rule in this release. `probable` and
-`manual` exist in the contract so later work can add scored matching and an
-operator workflow without a schema change.
+Only `exact` is produced by an automatic rule in this release. Scheduled date and
+kickoff are evidence/metadata only; they do not form canonical event identity.
 
 A candidate becomes `unresolved` when:
 
-- the event date is missing;
+- `event_occurrence_key` is missing;
 - a canonical home or away participant could not be derived;
 - the two canonical participants are identical;
-- two source events from the same source map ambiguously onto one canonical
-  event (duplicate source events);
-- two sources report conflicting scheduled start times for one canonical event.
+- duplicate source events or duplicate occurrence candidates make the mapping
+  ambiguous.
 
-Unresolved events appear **only** in the `event_reconciliations` dataset, with a
-null `canonical_event_id` and an explicit reason. They are deliberately excluded
-from the `events` dataset and from downstream-safe consumption, so a reader
-cannot mistake them for usable candidates. Market quotes and post-match
-statistics for an unresolved source event are dropped along with it.
+Unresolved source events stay in `source_events` and
+`event_reconciliations`, with a null `canonical_event_id` and an explicit reason.
+They are deliberately excluded from `events`, `market_quotes`, and
+`post_match_statistics`, so downstream-safe datasets contain only resolved
+canonical facts.
 
 There is no fuzzy name matching, no scored heuristic, and no machine-learning
 matcher. Cross-source resolution beyond exact canonical identity is not
-implemented.
-
-Downstream-safe states are `exact` and `manual`.
+implemented. Downstream-safe states are `exact` and `manual`.
 
 ## Datasets
 
-Each football snapshot writes these Parquet files.
+Each `football-canonical-v2` snapshot writes these ten Parquet files.
 
 | Dataset | File | Purpose |
 | --- | --- | --- |
 | competitions | `competitions.parquet` | One competition row for the requested catalog entry |
 | seasons | `seasons.parquet` | One season row for the requested `YYYY-YYYY` label |
-| participants | `participants.parquet` | Canonical, source-independent participants |
-| source_participants | `source_participants.parquet` | How this source names each participant |
-| events | `events.parquet` | Reconciled canonical events with source references |
-| event_reconciliations | `event_reconciliations.parquet` | Every reconciliation decision, including unresolved ones |
-| market_quotes | `market_quotes.parquet` | Generic canonical market quotes |
-| post_match_statistics | `post_match_statistics.parquet` | Football post-event statistics |
+| participants | `participants.parquet` | Canonical competition-scoped participants |
+| source_participants | `source_participants.parquet` | How each source names each participant, resolved or unresolved |
+| participant_reconciliations | `participant_reconciliations.parquet` | Every participant reconciliation decision |
+| events | `events.parquet` | Canonical events, unique by `canonical_event_id` |
+| source_events | `source_events.parquet` | Every source event candidate with provenance, including unresolved rows |
+| event_reconciliations | `event_reconciliations.parquet` | Every event reconciliation decision |
+| market_quotes | `market_quotes.parquet` | Generic canonical market quotes for resolved events |
+| post_match_statistics | `post_match_statistics.parquet` | Football post-event statistics for resolved events |
 
 The primary dataset is `events`; its row count is what `SnapshotRepository`
 stores as `row_count`. Zero-row Parquet files are allowed for optional datasets
 and still carry the full schema.
 
 There is no `teams` dataset, no `games` dataset, and no `odds_1x2` dataset. Those
-were replaced by canonical/source participants, canonical events, and the generic
-market quote contract respectively.
+were replaced by canonical/source participants, canonical events/source events,
+and the generic market quote contract respectively.
 
 ## Competitions
 
@@ -162,13 +194,27 @@ two-digit year pairs (`2023-2024` becomes `2324`).
 ## Participants and source participants
 
 `participants` holds canonical identity only: `canonical_participant_id`,
-`sport_code`, `participant_type`, `canonical_key`, `display_name`,
-`schema_version`. No field is nullable, and no field names a source.
+`sport_code`, `competition_id`, `participant_type`, `canonical_key`,
+`display_name`, `schema_version`. No field is nullable, and no field names a
+source.
 
 `source_participants` holds the source-scoped view:
 `source_participant_id`, `source_name`, `source_participant_key`,
-`canonical_participant_id`, `participant_type`, `display_name`,
-`normalized_name`, `schema_version`. No field is nullable.
+`competition_id`, nullable `canonical_participant_id`, `participant_type`,
+`display_name`, `normalized_name`, `schema_version`.
+`SourceParticipantReference.canonical_participant_id` is nullable until an exact,
+probable, or manual reconciliation succeeds; unresolved source participants do
+not claim a canonical ID.
+
+`participant_reconciliations` records every source participant decision:
+`source_name`, `source_participant_id`, `source_participant_key`,
+`canonical_participant_id`, `reconciliation_state`,
+`reconciliation_confidence`, `reconciliation_policy_version`, `match_key`,
+`reason`, `source_observed_at_utc`, `schema_version`.
+
+`canonical_participant_id` and `match_key` are null exactly for unresolved
+participant reconciliations. `reason` is null exactly when no problem was
+recorded.
 
 `participant_type` is `team` or `player`. Only `team` is produced by the current
 adapter.
@@ -180,12 +226,15 @@ normalization fail ingestion.
 
 ## Events
 
-The `events` dataset joins canonical event identity, the source reference that
-produced the row, and the reconciliation decision.
+The `events` dataset contains canonical event rows only. It is unique by
+`canonical_event_id` and contains no `source_name`, `source_event_id`,
+`source_event_key`, row-number, file-hash, or reconciliation columns.
 
 Important fields:
 
-- `canonical_event_id` and `source_event_id` (both always present);
+- `canonical_event_id`;
+- `sport_code`, `competition_id`, `season_id`;
+- `event_occurrence_key`;
 - `event_date` (Arrow `date32`);
 - `scheduled_start_utc` (UTC timestamp, nullable);
 - `start_time_precision`: `date-only`, `minute`, `second`, or `unknown`
@@ -193,14 +242,9 @@ Important fields:
 - `status`: one of `scheduled`, `live`, `finished`, `postponed`, `cancelled`,
   `abandoned`, `unknown` (`scheduled` and `finished` are produced by this
   adapter);
-- `home_canonical_participant_id` / `away_canonical_participant_id` plus
-  `home_source_participant_id` / `away_source_participant_id`;
+- `home_canonical_participant_id` / `away_canonical_participant_id`;
 - full-time scores and `result_code`;
-- `outcome_availability_stage`: `post-event` or `pre-event-unavailable`;
-- reconciliation columns: `reconciliation_state`, `reconciliation_confidence`,
-  `reconciliation_policy_version`;
-- provenance: `source_name`, `source_event_key`, `source_row_number`,
-  `source_observed_at_utc`, `source_file_sha256`.
+- `outcome_availability_stage`: `post-event` or `pre-event-unavailable`.
 
 Rules:
 
@@ -220,9 +264,26 @@ Half-time goals and the half-time result are **not** in `events`. They live in
 `post_match_statistics`, which keeps post-event information out of the otherwise
 pre-match event row.
 
-Ordering: `event_date`, `scheduled_start_utc` (nulls last),
+Ordering: `event_date`, `event_occurrence_key`,
 `home_canonical_participant_id`, `away_canonical_participant_id`,
 `canonical_event_id`.
+
+## Source events
+
+The `source_events` dataset retains every source event candidate, resolved or
+unresolved, with the exact provenance needed for audit and replay:
+`source_name`, `source_event_id`, `source_event_key`, nullable
+`canonical_event_id`, `competition_id`, `season_id`, nullable
+`event_occurrence_key`, nullable `event_date`, nullable `scheduled_start_utc`,
+`start_time_precision`, `status`, source and canonical home/away participant IDs,
+scores, `result_code`, `outcome_availability_stage`, `source_row_number`,
+`source_file_sha256`, `source_observed_at_utc`, reconciliation columns,
+nullable `reconciliation_reason`, and `schema_version`.
+
+`canonical_event_id`, `event_occurrence_key`, `event_date`, and canonical
+participant IDs are nullable so unresolved source rows can be retained without
+claiming a canonical identity. Unresolved source rows must not feed
+`market_quotes` or `post_match_statistics`.
 
 ## Event reconciliations
 
@@ -249,6 +310,20 @@ Three contracts compose one quote:
 | `MarketDefinition` | What is being bet on: sport, market family, market key, period, participant scope, line type/value, optional canonical participant |
 | `MarketSelection` | One outcome of a definition, plus optional source market/selection identifiers |
 | `OddsQuote` | One priced selection observed from one provider at one moment, with explicit temporal and status semantics |
+
+### Quote identity
+
+Quote identity is split deliberately:
+
+| Identifier | Meaning |
+| --- | --- |
+| `quote_series_id` | Stable UUIDv5 for one canonical event, market selection, and provider |
+| `quote_observation_id` | UUIDv5 for one concrete source observation of that series, distinguished by source provenance and time dimensions |
+
+The `market_quotes` schema includes both IDs plus `source_name` and
+`source_event_id`, so a resolved quote can be traced to the source event that
+produced the observation without making source identity part of the canonical
+event.
 
 ### Market dimensions
 
@@ -298,7 +373,9 @@ and `selection_status` are `unknown` rather than an invented value.
 
 - decimal odds use Arrow `decimal128(10, 4)`;
 - line values use Arrow `decimal128(8, 2)`;
-- timestamps are UTC-normalized Arrow timestamps.
+- `decimal_odds` and `line_value` are validated and quantized in frozen
+  dataclasses before serialization;
+- timestamps are normalized to UTC before serialization as Arrow timestamps.
 
 ### Implemented markets
 
@@ -320,7 +397,7 @@ values, booleans, and comma decimals are rejected.
 
 Ordering: `canonical_event_id`, `market_key`, `market_period`,
 `participant_scope`, `line_type`, `line_value`, `provider_type`, `provider_id`,
-`quote_phase`, `outcome_key`, `quote_id`.
+`quote_phase`, `outcome_key`, `quote_observation_id`.
 
 ## Temporal quote semantics
 
@@ -389,7 +466,8 @@ need to support multi-day opportunity discovery:
 - original quote time where the source publishes one;
 - quote phase;
 - validity window where the source supplies one;
-- canonical identity plus source identity on every row.
+- canonical identity plus source identity where the dataset contract permits
+  source-specific rows.
 
 That retained shape is what would later allow multi-day inventory discovery,
 manual selection and automatic bet building, multi-sport and multi-date
@@ -420,9 +498,15 @@ where the contract permits absence, and each schema docstring records why.
 | competitions | none | every field is required |
 | seasons | none | every field is required |
 | participants | none | every field is required |
-| source_participants | none | every field is required |
+| source_participants | `canonical_participant_id` | null exactly for unresolved participant references |
+| participant_reconciliations | `canonical_participant_id`, `match_key` | null exactly for unresolved reconciliations |
+| participant_reconciliations | `reason` | null exactly when no problem was recorded |
 | events | `scheduled_start_utc` | the source published only a date, so no kickoff time exists |
 | events | `home_score`, `away_score`, `result_code` | the event has not finished, so no outcome exists yet |
+| source_events | `canonical_event_id`, `event_occurrence_key`, `event_date`, `home_canonical_participant_id`, `away_canonical_participant_id` | unresolved source rows do not claim complete canonical identity |
+| source_events | `scheduled_start_utc` | the source published only a date, or the row is unresolved before scheduling metadata is usable |
+| source_events | `home_score`, `away_score`, `result_code` | the event has not finished, or the source row is unresolved |
+| source_events | `reconciliation_reason` | null exactly when no problem was recorded |
 | event_reconciliations | `canonical_event_id`, `match_key` | null exactly for unresolved reconciliations |
 | event_reconciliations | `reason` | null exactly when no problem was recorded |
 | market_quotes | `line_value` | outright markets have no handicap or total |
@@ -434,11 +518,11 @@ where the contract permits absence, and each schema docstring records why.
 | post_match_statistics | `half_time_home_goals`, `half_time_away_goals`, `half_time_result` | the source published no half-time values |
 | post_match_statistics | `referee` and every statistic count column | the source publishes statistics inconsistently across seasons |
 
-Everything not listed above is `nullable=False`. In particular every identifier,
-`sport_code`, `schema_version`, `source_name`, `source_file_sha256`,
-`source_observed_at_utc`, `event_date`, `start_time_precision`, `status`,
-`outcome_availability_stage`, the three reconciliation columns, the market
-dimension columns (`market_family`, `market_key`, `market_period`,
+Everything not listed above is `nullable=False`. In particular every required
+identifier for each dataset, `sport_code`, `schema_version`, `source_name`,
+`source_file_sha256`, `source_observed_at_utc`, required event scheduling/status
+fields, `outcome_availability_stage`, the three reconciliation columns, the
+market dimension columns (`market_family`, `market_key`, `market_period`,
 `participant_scope`, `line_type`, `outcome_key`), `decimal_odds`, `quote_phase`,
 `quote_timestamp_precision`, `market_status`, `selection_status`,
 `quality_status`, and `availability_stage` are required.
@@ -453,11 +537,13 @@ migration.
 | --- | --- |
 | competitions | `176b0c72d1e9540ac39bf3b6f784c7ceb87fb01b61b0274968eb636e1d18c43d` |
 | seasons | `405d7ae31d3ac696a1665a953d03c5d90d5c2964ecb0807626349f4147279c37` |
-| participants | `3bb3a2b833becebb56d9d348a056e86d3b69ebdf00674d4f5645ec123bb4e84f` |
-| source_participants | `57eb0cf8235d231bd22372f2aa7549c11a40670e1fdf3114da4db713b4ca2779` |
-| events | `61814f1ee0ce462a35ff6a458666a087f65f169f274b5a5a4136f9dde5748b4b` |
+| participants | `1a1c9b70f21d0fc504a7d0023711b00b4f89462e5dd27f0579d74d53178e15e9` |
+| source_participants | `45f11469fe57b11d57fb1fa86dca839816ab8c13a201610966d2d1f69d0a1103` |
+| participant_reconciliations | `8dbcd38f873aa54aa72a882832d578f7d286f73bc6a2a606752f48fe7dc16590` |
+| events | `927b0e1848798b84d39a243432a7f70bc774582c08db66b1274e00ba31addcb4` |
+| source_events | `58a1d119e0b829f86ed77da2f9a94dae52ecfeccfa3c2f39e51d611f42fe922c` |
 | event_reconciliations | `526bdd5ea0977488f28d201b15043378d2a6b4f8354fdc51b2182d71ebe40d7b` |
-| market_quotes | `c09df9c559df6e44e1b013d687d630109ee0c5fbcaa940a87d34702f80c8176f` |
+| market_quotes | `42941e0f8cdc107bbed850f42a7ac510a19b93b892844f49d66a84304120c871` |
 | post_match_statistics | `ac215e601f6ba9af7ae5b36459dfd315b86865b48337ccd4a8c29a9527a037bc` |
 
 ## Implementation status
@@ -468,8 +554,12 @@ Implemented now:
 - two football competitions (`eng-premier-league`, `prt-primeira-liga`);
 - strict CSV parsing;
 - content-addressed raw storage;
-- canonical participant and event contracts with source references;
-- conservative reconciliation (`exact` and `unresolved` only);
+- competition-scoped canonical participant IDs and occurrence-key canonical
+  event IDs;
+- source participant/event provenance datasets, including unresolved source
+  events;
+- conservative participant and event reconciliation (`exact` and `unresolved`
+  only);
 - the generic canonical market quote contract;
 - historical 1X2 mapped into that contract;
 - immutable generic Parquet snapshots;

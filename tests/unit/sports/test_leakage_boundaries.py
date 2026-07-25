@@ -114,6 +114,7 @@ def _canonical_event(
         sport_code="football",
         competition_id=COMPETITION_ID,
         season_id=SEASON_ID,
+        event_occurrence_key="season-ordered-pair-home-1",
         event_date=date(2023, 8, 12),
         scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
         start_time_precision="minute",

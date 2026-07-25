@@ -66,8 +66,8 @@ class SnapshotPublicationService:
         correlation_id: str | None = None,
     ) -> PublishedSnapshot:
         """Publish a prepared snapshot or reuse/recover/adopt an existing one."""
-        if prepared.suite is not self._suite and (
-            prepared.suite.dataset_names != self._suite.dataset_names
+        if prepared.suite is not self._suite and not _suites_equivalent(
+            prepared.suite, self._suite
         ):
             msg = "prepared snapshot dataset suite does not match the publication service"
             raise SnapshotIntegrityError(msg)
@@ -637,4 +637,20 @@ def _directory_from_manifest_path(relative_manifest_path: str) -> str:
     if path.name != MANIFEST_FILENAME or path.parent == PurePosixPath("."):
         msg = "BUILDING relative_path must point to manifest.json under a snapshot directory"
         raise SnapshotIntegrityError(msg)
-    return validate_relative_snapshot_path(path.parent.as_posix())
+    return path.parent.as_posix()
+
+
+def _suites_equivalent(left: SnapshotDatasetSuite, right: SnapshotDatasetSuite) -> bool:
+    """Return whether two suites declare the same ordered descriptors and primary."""
+    if left.primary_dataset_name != right.primary_dataset_name:
+        return False
+    if len(left.descriptors) != len(right.descriptors):
+        return False
+    for left_item, right_item in zip(left.descriptors, right.descriptors, strict=True):
+        if left_item.dataset_name != right_item.dataset_name:
+            return False
+        if left_item.relative_filename != right_item.relative_filename:
+            return False
+        if left_item.schema_fingerprint != right_item.schema_fingerprint:
+            return False
+    return True

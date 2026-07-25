@@ -30,7 +30,8 @@ EXPECTED_SOURCE_LINE = (
 )
 EXPECTED_VERIFY_ROW_COUNTS = (
     "competitions=1 seasons=1 participants=2 source_participants=2 "
-    "events=1 event_reconciliations=1 market_quotes=3 post_match_statistics=1"
+    "participant_reconciliations=2 events=1 source_events=1 "
+    "event_reconciliations=1 market_quotes=3 post_match_statistics=1"
 )
 
 
@@ -226,7 +227,7 @@ def test_scraper_verify_snapshot_reports_dataset_row_counts(tmp_path: Path) -> N
         f"verified snapshot_id={snapshot_id} "
         f"type={FOOTBALL_INGESTION_SNAPSHOT_TYPE} "
         f"schema={FOOTBALL_CANONICAL_SCHEMA_VERSION} "
-        f"files=8 rows[{EXPECTED_VERIFY_ROW_COUNTS}] manifest_sha256="
+        f"files=10 rows[{EXPECTED_VERIFY_ROW_COUNTS}] manifest_sha256="
     )
     assert lines[0].startswith(prefix)
     assert re.fullmatch(r"[0-9a-f]{64}", lines[0].removeprefix(prefix)) is not None

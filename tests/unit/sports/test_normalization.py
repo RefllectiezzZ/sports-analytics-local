@@ -9,13 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from sports_analytics.core.exceptions import NormalizationError
-from sports_analytics.markets.identifiers import build_quote_id
+from sports_analytics.core.exceptions import NormalizationError, SourceIntegrityError
+from sports_analytics.markets.identifiers import (
+    build_quote_observation_id,
+    build_quote_series_id,
+)
 from sports_analytics.markets.schemas import quote_sort_key
 from sports_analytics.sources.football_data_co_uk.catalog import get_competition
 from sports_analytics.sources.football_data_co_uk.parser import parse_football_data_csv
 from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
-from sports_analytics.sports.contracts import IngestedEvent
+from sports_analytics.sports.contracts import IngestedEvent, IngestedSourceEvent
 from sports_analytics.sports.football.identifiers import parse_canonical_season
 from sports_analytics.sports.football.markets import (
     MARKET_KEY_MATCH_RESULT_1X2,
@@ -112,6 +115,17 @@ def _statistics_for(
     )
 
 
+def _source_event_for(
+    bundle: NormalizedFootballBundle,
+    event: IngestedEvent,
+) -> IngestedSourceEvent:
+    return next(
+        item
+        for item in bundle.source_events
+        if item.source_reference.canonical_event_id == event.canonical.canonical_event_id
+    )
+
+
 def test_normalize_synthetic_fixture_builds_canonical_bundle() -> None:
     rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
 
@@ -125,15 +139,18 @@ def test_normalize_synthetic_fixture_builds_canonical_bundle() -> None:
         "Northbridge FC",
         "Southport Athletic",
     }
-    assert len(bundle.events) == 3
-    assert len(bundle.market_quotes) == 48
-    assert len(bundle.post_match_statistics) == 2
-    assert bundle.unresolved_reconciliations == ()
+    assert len(bundle.source_events) == 3
+    assert len(bundle.events) == 1
+    assert len(bundle.market_quotes) == 24
+    assert len(bundle.post_match_statistics) == 1
+    assert len(bundle.unresolved_reconciliations) == 2
+    assert bundle.unresolved_event_count == 2
     assert bundle.duplicate_rows_discarded == 0
-    assert bundle.warnings == ()
+    assert bundle.warnings == ("unresolved_events=2",)
     assert bundle.pinnacle_caution_quote_count == 0
     assert bundle.source_policy_version == "football-data-co-uk-policy-v1"
     assert bundle.reconciliation_policy_version == RECONCILIATION_POLICY_VERSION
+    assert bundle.participant_reconciliation_policy_version == "participant-reconciliation-v1"
 
 
 def test_normalize_fixture_events_have_expected_statuses_and_times() -> None:
@@ -141,20 +158,24 @@ def test_normalize_fixture_events_have_expected_statuses_and_times() -> None:
 
     bundle = _normalize(rows)
 
-    first, second, third = (event.canonical for event in bundle.events)
-    assert first.status == "finished"
-    assert first.result_code == "home"
-    assert (first.home_score, first.away_score) == (2, 1)
-    assert first.event_date == date(2023, 8, 12)
-    assert first.scheduled_start_utc == datetime(2023, 8, 12, 14, 0, tzinfo=UTC)
-    assert first.start_time_precision == "minute"
-    assert second.result_code == "draw"
-    assert second.scheduled_start_utc == datetime(2023, 8, 12, 16, 30, tzinfo=UTC)
-    assert third.status == "scheduled"
-    assert third.home_score is None
-    assert third.result_code is None
-    assert third.scheduled_start_utc is None
-    assert third.start_time_precision == "date-only"
+    assert [(event.event_date, event.status) for event in bundle.source_events] == [
+        (date(2023, 8, 12), "finished"),
+        (date(2023, 8, 12), "finished"),
+        (date(2023, 8, 13), "scheduled"),
+    ]
+    assert [event.reconciliation.state for event in bundle.source_events] == [
+        "unresolved",
+        "exact",
+        "unresolved",
+    ]
+    canonical = bundle.events[0].canonical
+    assert canonical.status == "finished"
+    assert canonical.result_code == "draw"
+    assert (canonical.home_score, canonical.away_score) == (0, 0)
+    assert canonical.event_date == date(2023, 8, 12)
+    assert canonical.scheduled_start_utc == datetime(2023, 8, 12, 16, 30, tzinfo=UTC)
+    assert canonical.start_time_precision == "minute"
+    assert canonical.event_occurrence_key == "season-ordered-pair-home-1"
 
 
 def test_normalize_fixture_records_source_row_provenance() -> None:
@@ -162,15 +183,17 @@ def test_normalize_fixture_records_source_row_provenance() -> None:
 
     bundle = _normalize(rows)
 
-    references = [event.source_reference for event in bundle.events]
+    references = [event.source_reference for event in bundle.source_events]
     # Header is row 1, so the first data row is row 2.
     assert [item.source_row_number for item in references] == [2, 3, 4]
-    for reference, event in zip(references, bundle.events, strict=True):
+    canonical_ids = {event.canonical.canonical_event_id for event in bundle.events}
+    for reference in references:
         assert reference.source_name == SOURCE_FOOTBALL_DATA_CO_UK
-        assert reference.canonical_event_id == event.canonical.canonical_event_id
         assert reference.source_event_key.startswith(f"{SOURCE_FOOTBALL_DATA_CO_UK}|")
         assert reference.source_observed_at_utc == OBSERVED_AT
         assert reference.source_file_sha256 == SOURCE_FILE_SHA256
+        if reference.canonical_event_id is not None:
+            assert reference.canonical_event_id in canonical_ids
 
 
 def test_normalize_reconciles_single_source_events_exactly() -> None:
@@ -185,8 +208,9 @@ def test_normalize_reconciles_single_source_events_exactly() -> None:
         assert event.reconciliation.canonical_event_id == event.canonical.canonical_event_id
         assert event.reconciliation.reason is None
         assert event.reconciliation.is_downstream_safe
+    assert {item.reconciliation.state for item in bundle.source_events} == {"exact", "unresolved"}
     reconciliations = bundle.reconciliations
-    assert len(reconciliations) == len(bundle.events)
+    assert len(reconciliations) == len(bundle.source_events)
     assert list(reconciliations) == sorted(
         reconciliations,
         key=lambda item: (item.source_name, item.source_event_id),
@@ -216,6 +240,7 @@ def test_normalize_fixture_market_quotes_use_canonical_1x2_market() -> None:
         assert quote.quoted_at_utc is None
         assert quote.quote_timestamp_precision == "snapshot-observation-only"
         assert quote.source_observed_at_utc == OBSERVED_AT
+    assert quote.source_name == SOURCE_FOOTBALL_DATA_CO_UK
 
 
 def test_normalize_fixture_market_quote_is_decimal_and_deterministically_identified() -> None:
@@ -232,19 +257,33 @@ def test_normalize_fixture_market_quote_is_decimal_and_deterministically_identif
         and item.selection.outcome_key == "home"
     )
 
-    assert quote.decimal_odds == Decimal("1.8000")
+    source_event = _source_event_for(bundle, first_event)
+    selection = match_result_1x2_selection("home")
+    assert quote.decimal_odds == Decimal("2.4000")
     assert quote.source_field == "B365H"
-    assert quote.source_event_id == first_event.source_reference.source_event_id
+    assert quote.source_event_id == source_event.source_reference.source_event_id
     assert quote.source_file_sha256 == SOURCE_FILE_SHA256
-    assert quote.quote_id == build_quote_id(
+    assert quote.quote_series_id == build_quote_series_id(
         canonical_event_id=first_event.canonical.canonical_event_id,
-        selection=match_result_1x2_selection("home"),
+        selection=selection,
+        provider_type="bookmaker",
+        provider_id="bet365",
+    )
+    assert quote.quote_observation_id == build_quote_observation_id(
+        quote_series_id=quote.quote_series_id,
+        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
+        source_event_id=source_event.source_reference.source_event_id,
+        selection=selection,
         provider_type="bookmaker",
         provider_id="bet365",
         quote_phase="opening",
+        source_observed_at_utc=OBSERVED_AT,
+        quoted_at_utc=None,
+        source_file_sha256=SOURCE_FILE_SHA256,
         source_field="B365H",
     )
-    uuid.UUID(quote.quote_id)
+    uuid.UUID(quote.quote_series_id)
+    uuid.UUID(quote.quote_observation_id)
 
 
 def test_market_quotes_preserve_provider_phase_and_source_column() -> None:
@@ -261,12 +300,12 @@ def test_market_quotes_preserve_provider_phase_and_source_column() -> None:
     assert set(home_quotes) == {
         (family.provider_id, family.quote_phase) for family in SUPPORTED_ODDS_FAMILIES
     }
-    assert home_quotes[("bet365", "opening")].decimal_odds == Decimal("1.8000")
-    assert home_quotes[("bet365", "closing")].decimal_odds == Decimal("1.8500")
-    assert home_quotes[("pinnacle", "opening")].decimal_odds == Decimal("1.8200")
-    assert home_quotes[("pinnacle", "closing")].decimal_odds == Decimal("1.8800")
-    assert home_quotes[("market-average", "opening")].decimal_odds == Decimal("1.8100")
-    assert home_quotes[("market-maximum", "closing")].decimal_odds == Decimal("1.9200")
+    assert home_quotes[("bet365", "opening")].decimal_odds == Decimal("2.4000")
+    assert home_quotes[("bet365", "closing")].decimal_odds == Decimal("2.5000")
+    assert home_quotes[("pinnacle", "opening")].decimal_odds == Decimal("2.4500")
+    assert home_quotes[("pinnacle", "closing")].decimal_odds == Decimal("2.5500")
+    assert home_quotes[("market-average", "opening")].decimal_odds == Decimal("2.4200")
+    assert home_quotes[("market-maximum", "closing")].decimal_odds == Decimal("2.6500")
     assert home_quotes[("bet365", "opening")].provider_type == "bookmaker"
     assert home_quotes[("market-average", "opening")].provider_type == "source-market-average"
     assert home_quotes[("market-maximum", "opening")].provider_type == "source-market-maximum"
@@ -292,7 +331,8 @@ def test_opening_and_closing_quotes_are_separate_rows() -> None:
     ]
 
     assert [quote.quote_phase for quote in bet365_home] == ["closing", "opening"]
-    assert len({quote.quote_id for quote in bet365_home}) == 2
+    assert len({quote.quote_series_id for quote in bet365_home}) == 1
+    assert len({quote.quote_observation_id for quote in bet365_home}) == 2
     assert len({quote.decimal_odds for quote in bet365_home}) == 2
 
 
@@ -303,8 +343,8 @@ def test_market_quotes_are_deterministically_ordered() -> None:
     second = _normalize(list(rows))
 
     assert list(first.market_quotes) == sorted(first.market_quotes, key=quote_sort_key)
-    assert [quote.quote_id for quote in first.market_quotes] == [
-        quote.quote_id for quote in second.market_quotes
+    assert [quote.quote_observation_id for quote in first.market_quotes] == [
+        quote.quote_observation_id for quote in second.market_quotes
     ]
 
 
@@ -330,11 +370,14 @@ def test_canonical_identity_is_independent_of_source_name() -> None:
     assert [event.canonical for event in first.events] == [
         event.canonical for event in second.events
     ]
-    assert [item.canonical for item in first.participants] == [
+    assert {item.canonical for item in first.participants} == {
         item.canonical for item in second.participants
+    }
+    assert [quote.quote_series_id for quote in first.market_quotes] == [
+        quote.quote_series_id for quote in second.market_quotes
     ]
-    assert [quote.quote_id for quote in first.market_quotes] == [
-        quote.quote_id for quote in second.market_quotes
+    assert [quote.quote_observation_id for quote in first.market_quotes] != [
+        quote.quote_observation_id for quote in second.market_quotes
     ]
 
 
@@ -344,8 +387,8 @@ def test_source_scoped_identity_depends_on_source_name() -> None:
     first = _normalize(rows)
     second = _normalize(rows, source_name=ALTERNATE_SOURCE_NAME)
 
-    first_event_ids = {event.source_reference.source_event_id for event in first.events}
-    second_event_ids = {event.source_reference.source_event_id for event in second.events}
+    first_event_ids = {event.source_reference.source_event_id for event in first.source_events}
+    second_event_ids = {event.source_reference.source_event_id for event in second.source_events}
     assert first_event_ids.isdisjoint(second_event_ids)
     first_participant_ids = {
         item.source_reference.source_participant_id for item in first.participants
@@ -359,7 +402,7 @@ def test_source_scoped_identity_depends_on_source_name() -> None:
     )
     assert all(
         event.source_reference.source_event_key.startswith(f"{ALTERNATE_SOURCE_NAME}|")
-        for event in second.events
+        for event in second.source_events
     )
 
 
@@ -367,6 +410,7 @@ def test_participant_identifiers_separate_canonical_and_source_scopes() -> None:
     bundle = _normalize([_finished_row()])
 
     for participant in bundle.participants:
+        assert participant.canonical is not None
         canonical_id = participant.canonical.canonical_participant_id
         source_id = participant.source_reference.source_participant_id
         assert canonical_id != source_id
@@ -383,20 +427,21 @@ def test_normalize_fixture_statistics_are_post_match_only() -> None:
     bundle = _normalize(rows)
 
     first_event = bundle.events[0]
+    source_event = _source_event_for(bundle, first_event)
     stats = _statistics_for(bundle, first_event)
-    assert stats.source_event_id == first_event.source_reference.source_event_id
+    assert stats.source_event_id == source_event.source_reference.source_event_id
     assert stats.availability_stage == "post-match"
-    assert stats.referee == "A Official"
-    assert stats.home_shots == 10
-    assert stats.away_shots == 8
-    assert stats.home_shots_on_target == 5
-    assert stats.away_shots_on_target == 3
-    assert stats.home_corners == 5
-    assert stats.away_corners == 4
-    assert stats.home_fouls == 12
-    assert stats.away_fouls == 14
-    assert stats.home_yellow_cards == 2
-    assert stats.away_yellow_cards == 1
+    assert stats.referee == "B Official"
+    assert stats.home_shots == 7
+    assert stats.away_shots == 9
+    assert stats.home_shots_on_target == 2
+    assert stats.away_shots_on_target == 4
+    assert stats.home_corners == 3
+    assert stats.away_corners == 6
+    assert stats.home_fouls == 11
+    assert stats.away_fouls == 10
+    assert stats.home_yellow_cards == 1
+    assert stats.away_yellow_cards == 2
     assert stats.home_red_cards == 0
     assert stats.away_red_cards == 0
 
@@ -407,8 +452,8 @@ def test_half_time_goals_live_in_post_match_statistics_only() -> None:
     bundle = _normalize(rows)
 
     stats = _statistics_for(bundle, bundle.events[0])
-    assert (stats.half_time_home_goals, stats.half_time_away_goals) == (1, 0)
-    assert stats.half_time_result == "home"
+    assert (stats.half_time_home_goals, stats.half_time_away_goals) == (0, 0)
+    assert stats.half_time_result == "draw"
     canonical = bundle.events[0].canonical
     assert not hasattr(canonical, "half_time_home_goals")
     assert not hasattr(canonical, "half_time_result")
@@ -442,7 +487,7 @@ def test_conflicting_duplicate_source_rows_are_rejected() -> None:
     duplicate inside a single file is rejected loudly instead of silently dropping
     the fixture from the snapshot.
     """
-    with pytest.raises(NormalizationError, match="conflicting duplicate source game key"):
+    with pytest.raises(SourceIntegrityError, match="conflicting duplicate source event identity"):
         _normalize([_finished_row(), _finished_row(FTHG="3", FTAG="1")])
 
 
