@@ -8,15 +8,15 @@ packages.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Final
 
 from sports_analytics.core.exceptions import FeatureError
 
 FEATURE_MANIFEST_VERSION: Final[str] = "feature-manifest-v1"
-FEATURE_SCOPE_TEAM: Final[str] = "team"
-FEATURE_SCOPE_PARTICIPANT: Final[str] = "participant"
+FEATURE_SCOPE_VERSION_PREFIX: Final[str] = "feature-scope-v1:"
 
 FEATURE_ARTIFACT_FILES: Final[frozenset[str]] = frozenset(
     {"features.parquet", "targets.parquet", "folds.parquet", "manifest.json"}
@@ -24,11 +24,9 @@ FEATURE_ARTIFACT_FILES: Final[frozenset[str]] = frozenset(
 FEATURE_CHECKSUM_SIDECAR: Final[str] = "manifest_checksum.sha256"
 PROBABILITY_SUM_TOLERANCE: Final[float] = 1e-9
 
-#: Fields that must never appear in a model feature whitelist.
-FORBIDDEN_MODEL_FEATURE_FIELDS: Final[frozenset[str]] = frozenset(
+#: Universal leakage fields that must never appear in any model feature whitelist.
+UNIVERSAL_FORBIDDEN_MODEL_FEATURE_FIELDS: Final[frozenset[str]] = frozenset(
     {
-        "home_score",
-        "away_score",
         "result_code",
         "decimal_odds",
         "implied_probability",
@@ -36,23 +34,21 @@ FORBIDDEN_MODEL_FEATURE_FIELDS: Final[frozenset[str]] = frozenset(
         "closing_odds",
         "market_implied_probability",
         "post_match",
-        "HTHG",
-        "HTAG",
-        "HTR",
-        "AvgH",
-        "AvgD",
-        "AvgA",
-        "AvgCH",
-        "AvgCD",
-        "AvgCA",
-        "B365H",
-        "B365D",
-        "B365A",
-        "B365CH",
-        "B365CD",
-        "B365CA",
     }
 )
+
+_FEATURE_SCOPE_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def validate_feature_scope_key(feature_scope: str) -> None:
+    """Validate a versioned, extensible feature-scope identifier."""
+    if not feature_scope.startswith(FEATURE_SCOPE_VERSION_PREFIX):
+        msg = f"unsupported feature scope version: {feature_scope}"
+        raise FeatureError(msg)
+    scope_key = feature_scope[len(FEATURE_SCOPE_VERSION_PREFIX) :]
+    if not scope_key or _FEATURE_SCOPE_KEY_PATTERN.fullmatch(scope_key) is None:
+        msg = f"invalid feature scope key: {feature_scope}"
+        raise FeatureError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,20 +95,20 @@ class FeatureSpecification:
     ordered_feature_names: tuple[str, ...]
     metadata_columns: tuple[str, ...]
     description: str
+    forbidden_feature_names: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
+        validate_feature_scope_key(self.feature_scope)
         if not self.ordered_feature_names:
             msg = "feature specification requires at least one feature name"
             raise FeatureError(msg)
         if len(set(self.ordered_feature_names)) != len(self.ordered_feature_names):
             msg = "feature names must be unique and ordered"
             raise FeatureError(msg)
-        forbidden = FORBIDDEN_MODEL_FEATURE_FIELDS.intersection(self.ordered_feature_names)
-        if forbidden:
-            msg = f"feature whitelist contains forbidden fields: {sorted(forbidden)}"
-            raise FeatureError(msg)
-        if self.feature_scope not in {FEATURE_SCOPE_TEAM, FEATURE_SCOPE_PARTICIPANT}:
-            msg = f"unsupported feature scope: {self.feature_scope}"
+        forbidden = UNIVERSAL_FORBIDDEN_MODEL_FEATURE_FIELDS.union(self.forbidden_feature_names)
+        overlap = forbidden.intersection(self.ordered_feature_names)
+        if overlap:
+            msg = f"feature whitelist contains forbidden fields: {sorted(overlap)}"
             raise FeatureError(msg)
 
 
@@ -146,14 +142,11 @@ class FeatureRowMetadata:
     """Non-feature metadata attached to every feature row."""
 
     canonical_event_id: str
-    competition_id: str
-    season_id: str
     event_date: date
     scheduled_start_utc: datetime | None
     feature_cutoff_date: date
     feature_specification_version: str
-    home_canonical_participant_id: str
-    away_canonical_participant_id: str
+    scope_metadata: dict[str, str]
 
 
 def validate_feature_vector(

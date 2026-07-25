@@ -38,7 +38,10 @@ from sports_analytics.models.artifacts import (
     write_model_artifact,
 )
 from sports_analytics.models.calibration import softmax
-from sports_analytics.models.football_1x2 import football_1x2_logistic_specification
+from sports_analytics.models.football_1x2 import (
+    FOOTBALL_1X2_MODEL_LIMITATIONS,
+    football_1x2_logistic_specification,
+)
 from sports_analytics.models.logistic import (
     LogisticConfiguration,
     fit_multinomial_logistic,
@@ -516,7 +519,7 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
         specification=specification,
         parameters=parameters,
         temperature=1.0,
-        competition_id="eng-premier-league",
+        scope_metadata={"competition_id": "eng-premier-league", "model_scope": "competition"},
         trained_through_date=date(2023, 8, 1),
         calibrated_through_date=date(2023, 8, 31),
         feature_lineage=lineage,
@@ -524,17 +527,22 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
         validation_metrics={},
         evaluation_summary=evaluation_summary,
         random_seed=3,
+        limitations=list(FOOTBALL_1X2_MODEL_LIMITATIONS),
     )
     models_root = tmp_path / "models"
     models_root.mkdir()
 
     def _write_and_assert_identity_rejected(payload: dict) -> None:
-        digest = hashlib.sha256(dumps_canonical_json(payload).encode()).hexdigest()
+        text = dumps_canonical_json(payload) + "\n"
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         relative = f"football/model/{digest[:12]}"
-        write_model_artifact(
-            models_root=models_root,
-            relative_directory=relative,
-            document=payload,
+        model_dir = models_root / relative
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "model.json").write_text(text, encoding="utf-8", newline="\n")
+        (model_dir / "model_checksum.sha256").write_text(
+            f"{digest}\n",
+            encoding="utf-8",
+            newline="\n",
         )
         with pytest.raises(ModelError, match="artifact_id"):
             load_model_artifact(
@@ -544,7 +552,12 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
             )
 
     relative = f"football/model/{base_id}"
-    write_model_artifact(models_root=models_root, relative_directory=relative, document=document)
+    write_model_artifact(
+        models_root=models_root,
+        relative_directory=relative,
+        document=document,
+        specification=specification,
+    )
     loaded = load_model_artifact(
         models_root=models_root,
         relative_path=f"{relative}/model.json",

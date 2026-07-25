@@ -21,7 +21,7 @@ from datetime import date, datetime
 from typing import Final
 
 from sports_analytics.core.exceptions import FeatureError
-from sports_analytics.features.contracts import FeatureRowMetadata
+from sports_analytics.features.football.metadata import FootballFeatureRowMetadata
 from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
     FOOTBALL_1X2_PREMATCH_FEATURES_V1,
@@ -62,7 +62,7 @@ class FinishedTrainingEvent:
 class FeatureVector:
     """One leakage-safe feature row plus its target label and metadata."""
 
-    metadata: FeatureRowMetadata
+    metadata: FootballFeatureRowMetadata
     features: dict[str, float]
     result_code: str
 
@@ -206,7 +206,7 @@ def generate_prematch_features(
                 event_date=event.event_date,
                 config=config,
             )
-            metadata = FeatureRowMetadata(
+            metadata = FootballFeatureRowMetadata.create(
                 canonical_event_id=event.canonical_event_id,
                 competition_id=event.competition_id,
                 season_id=event.season_id,

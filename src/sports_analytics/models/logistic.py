@@ -12,6 +12,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from sports_analytics.core.exceptions import ModelError
+from sports_analytics.core.settings import MAX_DETERMINISTIC_SEED
 from sports_analytics.features.contracts import OutcomeSpace
 
 SUPPORTED_SOLVER_PENALTIES: frozenset[tuple[str, str]] = frozenset(
@@ -25,7 +26,6 @@ SUPPORTED_SOLVER_PENALTIES: frozenset[tuple[str, str]] = frozenset(
         ("saga", "l1"),
         ("saga", "l2"),
         ("saga", "none"),
-        ("saga", "elasticnet"),
         ("liblinear", "l1"),
         ("liblinear", "l2"),
     }
@@ -46,7 +46,7 @@ class LogisticConfiguration:
     random_seed: int = 42
     feature_scaler_policy: str = "standard-zero-scale-to-one"
 
-    def validate(self) -> None:
+    def validate(self, *, outcome_count: int | None = None) -> None:
         """Reject unsupported or malformed logistic configuration values."""
         if self.configuration_version != "logistic-configuration-v1":
             msg = f"unsupported logistic configuration version: {self.configuration_version}"
@@ -57,17 +57,32 @@ class LogisticConfiguration:
                 f"solver={self.solver!r} penalty={self.penalty!r}"
             )
             raise ModelError(msg)
+        if outcome_count is not None and self.solver == "liblinear" and outcome_count != 2:
+            msg = "liblinear solver is only supported for binary outcome spaces"
+            raise ModelError(msg)
         if not np.isfinite(self.regularization_strength) or self.regularization_strength <= 0.0:
             msg = "regularization_strength must be a positive finite scalar"
             raise ModelError(msg)
         if not np.isfinite(self.tolerance) or self.tolerance <= 0.0:
             msg = "tolerance must be a positive finite scalar"
             raise ModelError(msg)
-        if not isinstance(self.maximum_iterations, int) or self.maximum_iterations < 1:
+        if type(self.maximum_iterations) is not int or isinstance(self.maximum_iterations, bool):
             msg = "maximum_iterations must be a positive integer"
             raise ModelError(msg)
-        if not isinstance(self.random_seed, int):
+        if self.maximum_iterations < 1:
+            msg = "maximum_iterations must be a positive integer"
+            raise ModelError(msg)
+        if type(self.fit_intercept) is not bool:
+            msg = "fit_intercept must be a boolean"
+            raise ModelError(msg)
+        if type(self.random_seed) is not int or isinstance(self.random_seed, bool):
             msg = "random_seed must be an integer"
+            raise ModelError(msg)
+        if self.random_seed < 0 or self.random_seed > MAX_DETERMINISTIC_SEED:
+            msg = (
+                "random_seed must be within the supported deterministic range "
+                f"[0, {MAX_DETERMINISTIC_SEED}]"
+            )
             raise ModelError(msg)
         if self.feature_scaler_policy != "standard-zero-scale-to-one":
             msg = f"unsupported feature scaler policy: {self.feature_scaler_policy}"
@@ -100,8 +115,8 @@ def fit_multinomial_logistic(
 ) -> FittedLogisticParameters:
     """Fit a multinomial logistic model and return explicit parameters."""
     config = configuration or LogisticConfiguration(random_seed=42)
-    config.validate()
     ordered_labels = outcome_space.ordered_labels
+    config.validate(outcome_count=len(ordered_labels))
     if feature_matrix.ndim != 2:
         msg = "feature matrix must be 2-dimensional"
         raise ModelError(msg)

@@ -10,7 +10,7 @@ from tests.helpers_training import synthetic_finished_events
 
 from sports_analytics.core.exceptions import EvaluationError, ModelError
 from sports_analytics.evaluation.metrics import (
-    closing_odds_to_normalized_probabilities,
+    decimal_odds_to_normalized_probabilities,
     evaluate_probabilities,
     multiclass_brier_score,
     multiclass_log_loss,
@@ -18,6 +18,7 @@ from sports_analytics.evaluation.metrics import (
 )
 from sports_analytics.evaluation.temporal import TemporalSplitConfig, build_rolling_origin_folds
 from sports_analytics.features.contracts import OutcomeSpace
+from sports_analytics.features.football.odds import closing_1x2_odds_to_normalized_probabilities
 from sports_analytics.features.football.prematch import generate_prematch_features
 from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
@@ -34,6 +35,7 @@ from sports_analytics.models.artifacts import (
 )
 from sports_analytics.models.calibration import fit_temperature, softmax
 from sports_analytics.models.football_1x2 import (
+    FOOTBALL_1X2_MODEL_LIMITATIONS,
     OUTCOME_LABELS_1X2,
     evaluate_fold,
     football_1x2_logistic_specification,
@@ -190,11 +192,31 @@ def test_temperature_selection_deterministic() -> None:
 
 
 def test_closing_market_overround_removal_and_coverage() -> None:
-    home, draw, away = closing_odds_to_normalized_probabilities(2.0, 3.5, 3.5)
+    home, draw, away = closing_1x2_odds_to_normalized_probabilities(2.0, 3.5, 3.5)
     assert abs(home + draw + away - 1.0) < 1e-12
     assert home > draw
     with pytest.raises(EvaluationError):
-        closing_odds_to_normalized_probabilities(1.0, 3.0, 3.0)
+        closing_1x2_odds_to_normalized_probabilities(1.0, 3.0, 3.0)
+
+
+def test_generic_two_outcome_odds_normalization() -> None:
+    space = OutcomeSpace(ordered_labels=("no", "yes"))
+    probs = decimal_odds_to_normalized_probabilities(
+        outcome_space=space,
+        decimal_odds=(2.0, 4.0),
+    )
+    assert len(probs) == 2
+    assert abs(sum(probs) - 1.0) < 1e-12
+
+
+def test_generic_four_outcome_odds_normalization() -> None:
+    space = OutcomeSpace(ordered_labels=("a", "b", "c", "d"))
+    probs = decimal_odds_to_normalized_probabilities(
+        outcome_space=space,
+        decimal_odds=(2.0, 3.0, 4.0, 5.0),
+    )
+    assert len(probs) == 4
+    assert abs(sum(probs) - 1.0) < 1e-12
 
 
 def test_inference_matches_training_and_rejects_corrupt_checksum(tmp_path: Path) -> None:
@@ -317,7 +339,7 @@ def test_windows_safe_relative_model_paths(tmp_path: Path) -> None:
         specification=specification,
         parameters=parameters,
         temperature=1.0,
-        competition_id="eng-premier-league",
+        scope_metadata={"competition_id": "eng-premier-league", "model_scope": "competition"},
         trained_through_date=train[-1].metadata.event_date,
         calibrated_through_date=train[-1].metadata.event_date,
         feature_lineage=_lineage(),
@@ -325,6 +347,7 @@ def test_windows_safe_relative_model_paths(tmp_path: Path) -> None:
         validation_metrics={},
         evaluation_summary=evaluation_summary,
         random_seed=1,
+        limitations=list(FOOTBALL_1X2_MODEL_LIMITATIONS),
     )
     models_root = tmp_path / "models"
     models_root.mkdir()
@@ -333,6 +356,7 @@ def test_windows_safe_relative_model_paths(tmp_path: Path) -> None:
         models_root=models_root,
         relative_directory=relative,
         document=document,
+        specification=specification,
     )
     assert path.as_posix().endswith("model.json")
     loaded = load_model_artifact(

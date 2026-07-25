@@ -393,13 +393,15 @@ def test_model_rejects_non_finite_coefficients(tmp_path: Path) -> None:
     model_dir.mkdir()
     document = {
         "manifest_version": "model-manifest-v1",
+        "identity_version": "model-identity-v1",
         "artifact_id": "bad",
         "artifact_type": "football-logistic-model",
         "model_specification_version": specification.model_specification_version,
         "feature_specification_version": specification.feature_specification_version,
         "sport_code": "football",
         "market_key": specification.market_key,
-        "competition_id": "eng-premier-league",
+        "scope_metadata": {"competition_id": "eng-premier-league"},
+        "limitations": [],
         "outcome_labels": ["home", "draw", "away"],
         "ordered_feature_names": list(FOOTBALL_1X2_FEATURE_NAMES_V1),
         "scaler_mean": [0.0] * len(FOOTBALL_1X2_FEATURE_NAMES_V1),
@@ -440,7 +442,7 @@ def test_model_rejects_non_finite_coefficients(tmp_path: Path) -> None:
     checksum = hashlib.sha256(raw).hexdigest()
     sidecar_path = model_dir / "model_checksum.sha256"
     sidecar_path.write_text(f"{checksum}\n", encoding="utf-8", newline="\n")
-    with pytest.raises(ModelError, match="non-finite"):
+    with pytest.raises(ModelError, match="coefficients"):
         load_model_artifact(
             models_root=models_root,
             relative_path="bad-model/model.json",
@@ -455,13 +457,15 @@ def test_model_rejects_malformed_dates(tmp_path: Path) -> None:
     model_dir.mkdir(parents=True)
     document = {
         "manifest_version": "model-manifest-v1",
+        "identity_version": "model-identity-v1",
         "artifact_id": "bad",
         "artifact_type": "football-logistic-model",
         "model_specification_version": specification.model_specification_version,
         "feature_specification_version": specification.feature_specification_version,
         "sport_code": "football",
         "market_key": specification.market_key,
-        "competition_id": "eng-premier-league",
+        "scope_metadata": {"competition_id": "eng-premier-league"},
+        "limitations": [],
         "outcome_labels": ["home", "draw", "away"],
         "ordered_feature_names": list(FOOTBALL_1X2_FEATURE_NAMES_V1),
         "scaler_mean": [0.0] * len(FOOTBALL_1X2_FEATURE_NAMES_V1),

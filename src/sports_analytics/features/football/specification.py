@@ -10,8 +10,10 @@ from sports_analytics.features.contracts import (
     TargetSpecification,
     validate_feature_vector,
 )
+from sports_analytics.features.football.metadata import FOOTBALL_FORBIDDEN_MODEL_FEATURE_FIELDS
 
 FOOTBALL_1X2_PREMATCH_FEATURES_V1: Final[str] = "football-1x2-prematch-features-v1"
+FOOTBALL_1X2_FEATURE_SCOPE_TEAM_V1: Final[str] = "feature-scope-v1:team"
 
 #: Ordered model-feature whitelist. Never discover features by scanning numeric columns.
 FOOTBALL_1X2_FEATURE_NAMES_V1: Final[tuple[str, ...]] = (
@@ -74,9 +76,10 @@ def football_1x2_prematch_specification() -> FeatureSpecification:
         specification_version=FOOTBALL_1X2_PREMATCH_FEATURES_V1,
         sport_code="football",
         market_key="football.match-result.1x2.full-match",
-        feature_scope="team",
+        feature_scope=FOOTBALL_1X2_FEATURE_SCOPE_TEAM_V1,
         ordered_feature_names=FOOTBALL_1X2_FEATURE_NAMES_V1,
         metadata_columns=FOOTBALL_1X2_METADATA_COLUMNS,
+        forbidden_feature_names=FOOTBALL_FORBIDDEN_MODEL_FEATURE_FIELDS,
         description=(
             "Team-level pre-match features for football full-match 1X2. "
             "Participant-scoped features (players, lineups, injuries) are reserved "

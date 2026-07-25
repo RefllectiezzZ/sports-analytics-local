@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -281,27 +282,43 @@ def evaluate_probabilities(
     )
 
 
-def closing_odds_to_normalized_probabilities(
-    home_odds: float,
-    draw_odds: float,
-    away_odds: float,
-) -> tuple[float, float, float]:
-    """Convert a complete decimal-odds triple to overround-removed probabilities."""
-    for name, odds in (
-        ("home", home_odds),
-        ("draw", draw_odds),
-        ("away", away_odds),
-    ):
-        if not np.isfinite(odds) or odds <= 1.0:
-            msg = f"invalid decimal odds for {name}: {odds}"
+def decimal_odds_to_normalized_probabilities(
+    *,
+    outcome_space: OutcomeSpace,
+    decimal_odds: Mapping[str, float] | Sequence[float],
+) -> tuple[float, ...]:
+    """Convert ordered decimal odds into normalized implied probabilities."""
+    labels = outcome_space.ordered_labels
+    if isinstance(decimal_odds, Mapping):
+        try:
+            odds_values = tuple(float(decimal_odds[label]) for label in labels)
+        except KeyError as exc:
+            msg = f"missing decimal odds for outcome: {exc}"
+            raise EvaluationError(msg) from exc
+    else:
+        odds_values = tuple(float(value) for value in decimal_odds)
+        if len(odds_values) != len(labels):
+            msg = (
+                "decimal odds count must match outcome space: "
+                f"expected {len(labels)}, got {len(odds_values)}"
+            )
             raise EvaluationError(msg)
-    implied = np.asarray([1.0 / home_odds, 1.0 / draw_odds, 1.0 / away_odds], dtype=np.float64)
+    for label, odds in zip(labels, odds_values, strict=True):
+        if not np.isfinite(odds) or odds <= 1.0:
+            msg = f"invalid decimal odds for {label}: {odds}"
+            raise EvaluationError(msg)
+    implied = np.asarray([1.0 / odds for odds in odds_values], dtype=np.float64)
     total = float(np.sum(implied))
     if total <= 0 or not np.isfinite(total):
         msg = "failed to normalize implied probabilities"
         raise EvaluationError(msg)
     normalized = implied / total
-    return float(normalized[0]), float(normalized[1]), float(normalized[2])
+    validate_probability_matrix(
+        normalized.reshape(1, -1),
+        outcome_space=outcome_space,
+        row_count=1,
+    )
+    return tuple(float(value) for value in normalized)
 
 
 def metrics_to_json(metrics: ProbabilityMetrics) -> dict[str, object]:

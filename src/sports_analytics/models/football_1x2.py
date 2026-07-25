@@ -12,12 +12,12 @@ from sports_analytics.core.exceptions import ModelError, TrainingError
 from sports_analytics.data.codec import ensure_json_value
 from sports_analytics.data.types import JsonValue
 from sports_analytics.evaluation.metrics import (
-    closing_odds_to_normalized_probabilities,
     evaluate_probabilities,
     metrics_to_json,
 )
 from sports_analytics.evaluation.temporal import TemporalFold, TemporalSplitConfig
 from sports_analytics.features.football.datasets import ClosingMarketQuoteTriple
+from sports_analytics.features.football.odds import closing_1x2_odds_to_normalized_probabilities
 from sports_analytics.features.football.prematch import FeatureVector
 from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
@@ -44,6 +44,14 @@ from sports_analytics.models.logistic import (
 
 FOOTBALL_1X2_LOGISTIC_MODEL_V1: str = "football-1x2-logistic-v1"
 OUTCOME_LABELS_1X2: tuple[str, ...] = FOOTBALL_1X2_OUTCOME_SPACE.ordered_labels
+FOOTBALL_1X2_MODEL_LIMITATIONS: tuple[str, ...] = (
+    "Team-level historical football 1X2 baseline only.",
+    "Not a betting recommendation engine.",
+    "Does not use players, injuries, or lineups.",
+    "Does not use bookmaker odds as model features.",
+    "Does not produce expected value or accumulators.",
+    "Past validation performance is not a guarantee of future performance.",
+)
 
 
 def football_1x2_logistic_specification(
@@ -337,7 +345,10 @@ def train_final_artifact(
         specification=specification,
         parameters=parameters,
         temperature=temperature_result.temperature,
-        competition_id=competition_id,
+        scope_metadata={
+            "competition_id": competition_id,
+            "model_scope": "competition",
+        },
         trained_through_date=trained_through_date,
         calibrated_through_date=calibrated_through,
         feature_lineage=feature_lineage,
@@ -349,11 +360,13 @@ def train_final_artifact(
         validation_metrics=validation_metrics,
         evaluation_summary=evaluation_summary,
         random_seed=random_seed,
+        limitations=list(FOOTBALL_1X2_MODEL_LIMITATIONS),
     )
     _path, checksum = write_model_artifact(
         models_root=models_root,
         relative_directory=relative_directory,
         document=document,
+        specification=specification,
     )
     artifact = load_model_artifact(
         models_root=models_root,
@@ -419,7 +432,7 @@ def _market_benchmark(
         quote = quotes.get(item.metadata.canonical_event_id)
         if quote is None:
             continue
-        home, draw, away = closing_odds_to_normalized_probabilities(
+        home, draw, away = closing_1x2_odds_to_normalized_probabilities(
             quote.home_odds,
             quote.draw_odds,
             quote.away_odds,

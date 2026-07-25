@@ -31,10 +31,10 @@ from sports_analytics.evaluation.temporal import (
 from sports_analytics.features.contracts import (
     FEATURE_CHECKSUM_SIDECAR,
     FEATURE_MANIFEST_VERSION,
-    FeatureRowMetadata,
     OutcomeSpace,
     SnapshotIdentity,
 )
+from sports_analytics.features.football.metadata import FootballFeatureRowMetadata
 from sports_analytics.features.football.prematch import (
     ELO_CONFIG_VERSION,
     ELO_HOME_ADVANTAGE,
@@ -459,11 +459,7 @@ def load_feature_artifact(
         msg = "feature artifact manifest must not be a symlink"
         raise FeatureError(msg)
     sidecar_path = directory / FEATURE_CHECKSUM_SIDECAR
-    if not sidecar_path.is_file():
-        msg = "feature artifact checksum sidecar is missing"
-        raise FeatureError(msg)
-    sidecar_digest = sidecar_path.read_text(encoding="utf-8").strip()
-    validate_sha256_checksum(sidecar_digest)
+    sidecar_digest = _read_checksum_sidecar(sidecar_path)
     raw = manifest_path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     if digest != sidecar_digest:
@@ -524,7 +520,7 @@ def load_feature_artifact(
         features = {name: float(row[name]) for name in FOOTBALL_1X2_FEATURE_NAMES_V1}
         vectors.append(
             FeatureVector(
-                metadata=FeatureRowMetadata(
+                metadata=FootballFeatureRowMetadata.create(
                     canonical_event_id=event_id,
                     competition_id=str(row["competition_id"]),
                     season_id=str(row["season_id"]),
@@ -669,6 +665,39 @@ def _verify_feature_directory(
     if manifest_checksum != hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest():
         msg = "feature artifact manifest checksum verification failed"
         raise FeatureError(msg)
+    fold_summaries_payload = manifest.get("fold_summaries")
+    if not isinstance(fold_summaries_payload, list) or not fold_summaries_payload:
+        msg = "feature artifact fold_summaries are required"
+        raise FeatureError(msg)
+    features_table = _read_parquet(directory / "features.parquet")
+    targets_table = _read_parquet(directory / "targets.parquet")
+    folds_table = _read_parquet(directory / "folds.parquet")
+    _assert_table_schema(features_table.schema, _features_schema(), "features.parquet")
+    _assert_table_schema(targets_table.schema, _targets_schema(), "targets.parquet")
+    _assert_table_schema(folds_table.schema, _folds_schema(), "folds.parquet")
+
+
+def _read_checksum_sidecar(path: Path) -> str:
+    if path.is_symlink():
+        msg = "checksum sidecar must not be a symlink"
+        raise FeatureError(msg)
+    if not path.is_file():
+        msg = "checksum sidecar is missing"
+        raise FeatureError(msg)
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) != 1:
+        msg = "checksum sidecar must contain exactly one digest"
+        raise FeatureError(msg)
+    digest = lines[0].strip()
+    validate_sha256_checksum(digest)
+    return digest
+
+
+def _assert_table_schema(actual: pa.Schema, expected: pa.Schema, filename: str) -> None:
+    if actual.equals(expected, check_metadata=False):
+        return
+    msg = f"feature artifact schema mismatch for {filename}"
+    raise FeatureError(msg)
 
 
 def reconstruct_folds_from_table(
@@ -812,13 +841,12 @@ def reconstruct_folds_from_table(
         raise FeatureError(msg)
 
     reconstructed_summaries = fold_summaries(tuple(folds))
-    if declared_summaries is not None:
-        if not isinstance(declared_summaries, list):
-            msg = "feature artifact fold_summaries are malformed"
-            raise FeatureError(msg)
-        if ensure_json_value(declared_summaries) != ensure_json_value(reconstructed_summaries):
-            msg = "persisted fold summaries do not match reconstructed folds"
-            raise FeatureError(msg)
+    if not isinstance(declared_summaries, list) or not declared_summaries:
+        msg = "feature artifact fold_summaries are required"
+        raise FeatureError(msg)
+    if ensure_json_value(declared_summaries) != ensure_json_value(reconstructed_summaries):
+        msg = "persisted fold summaries do not match reconstructed folds"
+        raise FeatureError(msg)
     return tuple(folds)
 
 

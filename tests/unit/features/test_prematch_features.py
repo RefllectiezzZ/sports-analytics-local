@@ -8,7 +8,8 @@ import pytest
 from tests.helpers_training import make_club_id, synthetic_finished_events
 
 from sports_analytics.core.exceptions import FeatureError
-from sports_analytics.features.contracts import FORBIDDEN_MODEL_FEATURE_FIELDS
+from sports_analytics.features.contracts import UNIVERSAL_FORBIDDEN_MODEL_FEATURE_FIELDS
+from sports_analytics.features.football.metadata import FOOTBALL_FORBIDDEN_MODEL_FEATURE_FIELDS
 from sports_analytics.features.football.prematch import (
     ELO_INITIAL_RATING,
     FinishedTrainingEvent,
@@ -141,7 +142,10 @@ def test_feature_whitelist_excludes_odds_and_targets() -> None:
     specification = football_1x2_prematch_specification()
     names = set(specification.ordered_feature_names)
     assert "result_code" not in names
-    assert names.isdisjoint(FORBIDDEN_MODEL_FEATURE_FIELDS)
+    forbidden = UNIVERSAL_FORBIDDEN_MODEL_FEATURE_FIELDS.union(
+        FOOTBALL_FORBIDDEN_MODEL_FEATURE_FIELDS
+    )
+    assert names.isdisjoint(forbidden)
     assert specification.ordered_feature_names == FOOTBALL_1X2_FEATURE_NAMES_V1
 
 

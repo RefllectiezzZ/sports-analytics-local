@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -11,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from sports_analytics.core.exceptions import ModelError
+from sports_analytics.core.exceptions import ModelError, RepositoryError
 from sports_analytics.data.codec import dumps_canonical_json, ensure_json_value
 from sports_analytics.data.types import JsonValue, validate_sha256_checksum
 from sports_analytics.features.contracts import validate_feature_vector
@@ -32,6 +34,15 @@ from sports_analytics.snapshots.paths import is_absolute_path_text, resolve_unde
 ARTIFACT_FILENAME: str = "model.json"
 MODEL_IDENTITY_VERSION: str = "model-identity-v1"
 MODEL_IDENTITY_TYPE: str = "model-artifact"
+EXPECTED_FOLD_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "min_train_rows",
+        "min_calibration_rows",
+        "min_test_rows",
+        "step_rows",
+        "maximum_folds",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +85,10 @@ def derive_model_artifact_id(
     random_seed: int,
 ) -> str:
     """Derive content-addressed model identity from fitted parameters and lineage."""
+    validate_feature_artifact_lineage(
+        feature_lineage,
+        expected_feature_specification_version=specification.feature_specification_version,
+    )
     if parameters.feature_names != specification.ordered_feature_names:
         msg = "model parameters feature names must match the model specification"
         raise ModelError(msg)
@@ -126,7 +141,7 @@ def build_model_document(
     specification: ModelSpecification,
     parameters: FittedLogisticParameters,
     temperature: float,
-    competition_id: str,
+    scope_metadata: dict[str, JsonValue],
     trained_through_date: date,
     calibrated_through_date: date,
     feature_lineage: FeatureArtifactLineage,
@@ -134,6 +149,7 @@ def build_model_document(
     validation_metrics: dict[str, JsonValue],
     evaluation_summary: dict[str, JsonValue],
     random_seed: int,
+    limitations: list[str],
 ) -> dict[str, JsonValue]:
     """Assemble the canonical JSON document for one deployable model artifact."""
     ordered_labels = specification.outcome_space.ordered_labels
@@ -149,16 +165,21 @@ def build_model_document(
     if trained_through_date > calibrated_through_date:
         msg = "trained_through_date must be on or before calibrated_through_date"
         raise ModelError(msg)
+    validate_feature_artifact_lineage(
+        feature_lineage,
+        expected_feature_specification_version=specification.feature_specification_version,
+    )
     logistic_config = parameters.configuration
     return {
         "manifest_version": MODEL_MANIFEST_VERSION,
+        "identity_version": MODEL_IDENTITY_VERSION,
         "artifact_id": artifact_id,
         "artifact_type": f"{specification.sport_code}-{specification.market_key}-logistic-model",
         "model_specification_version": specification.model_specification_version,
         "feature_specification_version": specification.feature_specification_version,
         "sport_code": specification.sport_code,
         "market_key": specification.market_key,
-        "competition_id": competition_id,
+        "scope_metadata": ensure_json_value(scope_metadata),
         "outcome_labels": list(ordered_labels),
         "ordered_feature_names": list(parameters.feature_names),
         "scaler_mean": list(parameters.scaler_mean),
@@ -198,14 +219,7 @@ def build_model_document(
             "joblib": False,
             "executes_python": False,
         },
-        "limitations": [
-            "Team-level historical football 1X2 baseline only.",
-            "Not a betting recommendation engine.",
-            "Does not use players, injuries, or lineups.",
-            "Does not use bookmaker odds as model features.",
-            "Does not produce expected value or accumulators.",
-            "Past validation performance is not a guarantee of future performance.",
-        ],
+        "limitations": ensure_json_value(limitations),
     }
 
 
@@ -214,33 +228,53 @@ def write_model_artifact(
     models_root: Path,
     relative_directory: str,
     document: dict[str, JsonValue],
+    specification: ModelSpecification,
 ) -> tuple[Path, str]:
-    """Persist ``model.json`` and its checksum sidecar under the models root."""
+    """Atomically persist ``model.json`` and its checksum sidecar under the models root."""
     if is_absolute_path_text(relative_directory):
         msg = "model artifact path must be relative under the models root"
         raise ModelError(msg)
     normalized = relative_directory.replace("\\", "/")
-    directory = resolve_under_root(
+    final_directory = resolve_under_root(
         models_root,
         normalized,
         expect_file=False,
         error_type=ModelError,
     )
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / ARTIFACT_FILENAME
-    if path.exists():
-        msg = f"model artifact already exists: {normalized}/{ARTIFACT_FILENAME}"
+    if final_directory.exists() and any(final_directory.iterdir()):
+        msg = f"model artifact directory is not empty: {normalized}"
         raise ModelError(msg)
-    for banned in ("model.pkl", "model.joblib", "model.pickle", "pipeline.joblib"):
-        if (directory / banned).exists():
-            msg = f"unsafe serialized artifact present: {banned}"
-            raise ModelError(msg)
-    text = dumps_canonical_json(document) + "\n"
-    path.write_text(text, encoding="utf-8", newline="\n")
-    checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    sidecar = directory / MODEL_CHECKSUM_SIDECAR
-    sidecar.write_text(f"{checksum}\n", encoding="utf-8", newline="\n")
-    return path, checksum
+    models_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".model-{str(document.get('artifact_id', 'draft'))[:8]}-",
+            dir=str(models_root.resolve()),
+        )
+    )
+    try:
+        for banned in ("model.pkl", "model.joblib", "model.pickle", "pipeline.joblib"):
+            if (temp_dir / banned).exists():
+                msg = f"unsafe serialized artifact present: {banned}"
+                raise ModelError(msg)
+        path = temp_dir / ARTIFACT_FILENAME
+        text = dumps_canonical_json(document) + "\n"
+        path.write_text(text, encoding="utf-8", newline="\n")
+        checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        sidecar = temp_dir / MODEL_CHECKSUM_SIDECAR
+        sidecar.write_text(f"{checksum}\n", encoding="utf-8", newline="\n")
+        temp_relative = f"{temp_dir.name}/{ARTIFACT_FILENAME}"
+        load_model_artifact(
+            models_root=models_root,
+            relative_path=temp_relative,
+            specification=specification,
+            expected_checksum=checksum,
+        )
+        final_directory.parent.mkdir(parents=True, exist_ok=True)
+        temp_dir.rename(final_directory)
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    return final_directory / ARTIFACT_FILENAME, checksum
 
 
 def load_model_artifact(
@@ -269,12 +303,7 @@ def load_model_artifact(
         msg = "model artifact path must not be a symlink"
         raise ModelError(msg)
     parent = path.parent
-    sidecar_path = parent / MODEL_CHECKSUM_SIDECAR
-    if not sidecar_path.is_file():
-        msg = "model artifact checksum sidecar is missing"
-        raise ModelError(msg)
-    sidecar_digest = sidecar_path.read_text(encoding="utf-8").strip()
-    validate_sha256_checksum(sidecar_digest)
+    sidecar_digest = _read_checksum_sidecar(parent / MODEL_CHECKSUM_SIDECAR)
     raw = path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     if digest != sidecar_digest:
@@ -295,6 +324,9 @@ def load_model_artifact(
         raise ModelError(msg)
     if document.get("manifest_version") != MODEL_MANIFEST_VERSION:
         msg = "unsupported model manifest version"
+        raise ModelError(msg)
+    if document.get("identity_version") != MODEL_IDENTITY_VERSION:
+        msg = "unsupported model identity version"
         raise ModelError(msg)
     if document.get("model_specification_version") != specification.model_specification_version:
         msg = "model specification version mismatch"
@@ -326,10 +358,13 @@ def load_model_artifact(
     if trained_through > calibrated_through:
         msg = "trained_through_date must be on or before calibrated_through_date"
         raise ModelError(msg)
-    feature_lineage = _feature_lineage_from_document(document)
+    feature_lineage = _feature_lineage_from_document(
+        document,
+        expected_feature_specification_version=specification.feature_specification_version,
+    )
     try:
         evaluation_summary_raw = document["evaluation_summary"]
-        random_seed = int(document["random_seed"])
+        random_seed = _parse_strict_int(document["random_seed"], "random_seed")
         if not isinstance(evaluation_summary_raw, dict):
             raise TypeError
         evaluation_summary = ensure_json_value(evaluation_summary_raw)
@@ -395,6 +430,60 @@ def infer_calibrated_probabilities(
     }
 
 
+def validate_feature_artifact_lineage(
+    lineage: FeatureArtifactLineage,
+    *,
+    expected_feature_specification_version: str,
+) -> None:
+    """Validate immutable feature-artifact lineage attached to a model artifact."""
+    if not lineage.feature_artifact_id.strip():
+        msg = "feature artifact id must be non-empty"
+        raise ModelError(msg)
+    manifest_path = lineage.feature_manifest_path.replace("\\", "/")
+    if is_absolute_path_text(manifest_path):
+        msg = "feature manifest path must be relative"
+        raise ModelError(msg)
+    if ".." in Path(manifest_path).parts or manifest_path in {".", ".."}:
+        msg = "feature manifest path must not traverse directories"
+        raise ModelError(msg)
+    try:
+        validate_sha256_checksum(lineage.feature_manifest_checksum_sha256)
+        validate_sha256_checksum(lineage.folds_file_checksum_sha256)
+    except RepositoryError as exc:
+        msg = "model artifact lineage checksum is malformed"
+        raise ModelError(msg) from exc
+    if lineage.feature_specification_version != expected_feature_specification_version:
+        msg = "feature specification version mismatch in model lineage"
+        raise ModelError(msg)
+    if set(lineage.fold_configuration.keys()) != EXPECTED_FOLD_CONFIG_KEYS:
+        msg = "fold configuration in model lineage is malformed"
+        raise ModelError(msg)
+    for key in EXPECTED_FOLD_CONFIG_KEYS:
+        value = lineage.fold_configuration[key]
+        if type(value) is not int or isinstance(value, bool) or value < 1:
+            msg = f"fold configuration field {key} must be a positive integer"
+            raise ModelError(msg)
+    if not isinstance(lineage.input_snapshots, list):
+        msg = "input_snapshots must be a list"
+        raise ModelError(msg)
+    for snapshot in lineage.input_snapshots:
+        if not isinstance(snapshot, dict):
+            msg = "input snapshot lineage entries must be mappings"
+            raise ModelError(msg)
+        for checksum_key in (
+            "manifest_checksum_sha256",
+            "feature_manifest_checksum_sha256",
+            "folds_file_checksum_sha256",
+        ):
+            checksum_value = snapshot.get(checksum_key)
+            if checksum_value is not None:
+                try:
+                    validate_sha256_checksum(str(checksum_value))
+                except RepositoryError as exc:
+                    msg = "input snapshot lineage checksum is malformed"
+                    raise ModelError(msg) from exc
+
+
 def _parameters_from_document(
     document: dict[str, Any],
     *,
@@ -403,34 +492,51 @@ def _parameters_from_document(
     try:
         feature_names = tuple(str(item) for item in document["ordered_feature_names"])
         outcome_labels = tuple(str(item) for item in document["outcome_labels"])
-        scaler_mean = tuple(float(item) for item in document["scaler_mean"])
-        scaler_scale = tuple(float(item) for item in document["scaler_scale"])
-        coefficients = tuple(
-            tuple(float(value) for value in row) for row in document["coefficients"]
+        scaler_mean = _parse_finite_float_sequence(document["scaler_mean"], "scaler_mean")
+        scaler_scale = _parse_positive_finite_float_sequence(
+            document["scaler_scale"],
+            "scaler_scale",
         )
-        intercepts = tuple(float(item) for item in document["intercepts"])
+        coefficients = tuple(
+            _parse_finite_float_sequence(row, "coefficients") for row in document["coefficients"]
+        )
+        intercepts = _parse_finite_float_sequence(document["intercepts"], "intercepts")
         logistic_payload = document["logistic_configuration"]
+        if not isinstance(logistic_payload, dict):
+            raise TypeError
         configuration = LogisticConfiguration(
             configuration_version=str(logistic_payload["configuration_version"]),
             solver=str(logistic_payload["solver"]),
             penalty=str(logistic_payload["penalty"]),
-            regularization_strength=float(logistic_payload["regularization_strength"]),
-            tolerance=float(logistic_payload["tolerance"]),
-            maximum_iterations=int(logistic_payload["maximum_iterations"]),
-            fit_intercept=bool(logistic_payload["fit_intercept"]),
-            random_seed=int(logistic_payload["random_seed"]),
+            regularization_strength=_parse_positive_finite_float_value(
+                logistic_payload["regularization_strength"],
+                "regularization_strength",
+            ),
+            tolerance=_parse_positive_finite_float_value(
+                logistic_payload["tolerance"],
+                "tolerance",
+            ),
+            maximum_iterations=_parse_strict_int(
+                logistic_payload["maximum_iterations"],
+                "maximum_iterations",
+            ),
+            fit_intercept=_parse_strict_bool(logistic_payload["fit_intercept"], "fit_intercept"),
+            random_seed=_parse_strict_int(logistic_payload["random_seed"], "random_seed"),
             feature_scaler_policy=str(logistic_payload["feature_scaler_policy"]),
         )
         sklearn_version = str(logistic_payload["sklearn_version"])
         numpy_version = str(logistic_payload["numpy_version"])
-        convergence_iterations = tuple(
-            int(item) for item in logistic_payload["convergence_iterations"]
+        convergence_iterations = _parse_positive_int_sequence(
+            logistic_payload["convergence_iterations"],
+            "convergence_iterations",
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, ModelError) as exc:
+        if isinstance(exc, ModelError):
+            raise
         msg = "model artifact parameters are malformed"
         raise ModelError(msg) from exc
     try:
-        configuration.validate()
+        configuration.validate(outcome_count=len(specification.outcome_space.ordered_labels))
     except ModelError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -454,15 +560,6 @@ def _parameters_from_document(
     if len(intercepts) != n_outcomes:
         msg = "intercept vector has invalid length"
         raise ModelError(msg)
-    if any(scale <= 0 for scale in scaler_scale):
-        msg = "scaler scales must be positive"
-        raise ModelError(msg)
-    if (
-        not np.isfinite(np.asarray(coefficients)).all()
-        or not np.isfinite(np.asarray(intercepts)).all()
-    ):
-        msg = "model artifact contains non-finite parameters"
-        raise ModelError(msg)
     return FittedLogisticParameters(
         feature_names=feature_names,
         outcome_labels=outcome_labels,
@@ -477,12 +574,16 @@ def _parameters_from_document(
     )
 
 
-def _feature_lineage_from_document(document: dict[str, Any]) -> FeatureArtifactLineage:
+def _feature_lineage_from_document(
+    document: dict[str, Any],
+    *,
+    expected_feature_specification_version: str,
+) -> FeatureArtifactLineage:
     try:
         snapshots = document["input_snapshots"]
         if not isinstance(snapshots, list):
             raise TypeError
-        return FeatureArtifactLineage(
+        lineage = FeatureArtifactLineage(
             feature_artifact_id=str(document["feature_artifact_id"]),
             feature_manifest_path=str(document["feature_manifest_path"]),
             feature_manifest_checksum_sha256=str(document["feature_manifest_checksum_sha256"]),
@@ -494,6 +595,27 @@ def _feature_lineage_from_document(document: dict[str, Any]) -> FeatureArtifactL
     except (KeyError, TypeError, ValueError) as exc:
         msg = "model artifact feature lineage is malformed"
         raise ModelError(msg) from exc
+    validate_feature_artifact_lineage(
+        lineage,
+        expected_feature_specification_version=expected_feature_specification_version,
+    )
+    return lineage
+
+
+def _read_checksum_sidecar(path: Path) -> str:
+    if path.is_symlink():
+        msg = "checksum sidecar must not be a symlink"
+        raise ModelError(msg)
+    if not path.is_file():
+        msg = "checksum sidecar is missing"
+        raise ModelError(msg)
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) != 1:
+        msg = "checksum sidecar must contain exactly one digest"
+        raise ModelError(msg)
+    digest = lines[0].strip()
+    validate_sha256_checksum(digest)
+    return digest
 
 
 def _parse_date(document: dict[str, Any], key: str) -> date:
@@ -506,11 +628,71 @@ def _parse_date(document: dict[str, Any], key: str) -> date:
 
 def _parse_positive_finite_float(document: dict[str, Any], key: str) -> float:
     try:
-        value = float(document[key])
-    except (KeyError, TypeError, ValueError) as exc:
+        value = _parse_positive_finite_float_value(document[key], key)
+    except KeyError as exc:
         msg = f"model artifact field {key} is malformed"
         raise ModelError(msg) from exc
-    if value <= 0 or not np.isfinite(value):
-        msg = f"model artifact field {key} must be positive and finite"
+    return value
+
+
+def _parse_strict_bool(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        msg = f"model artifact field {field} must be a JSON boolean"
         raise ModelError(msg)
     return value
+
+
+def _parse_strict_int(value: object, field: str) -> int:
+    if type(value) is not int or isinstance(value, bool):
+        msg = f"model artifact field {field} must be a JSON integer"
+        raise ModelError(msg)
+    return value
+
+
+def _parse_positive_finite_float_value(value: object, field: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        msg = f"model artifact field {field} must be a JSON number"
+        raise ModelError(msg)
+    parsed = float(value)
+    if parsed <= 0 or not np.isfinite(parsed):
+        msg = f"model artifact field {field} must be positive and finite"
+        raise ModelError(msg)
+    return parsed
+
+
+def _parse_finite_float_sequence(value: object, field: str) -> tuple[float, ...]:
+    if not isinstance(value, list):
+        msg = f"model artifact field {field} must be a JSON array"
+        raise ModelError(msg)
+    parsed: list[float] = []
+    for item in value:
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            msg = f"model artifact field {field} must contain JSON numbers"
+            raise ModelError(msg)
+        number = float(item)
+        if not np.isfinite(number):
+            msg = f"model artifact field {field} must contain finite numbers"
+            raise ModelError(msg)
+        parsed.append(number)
+    return tuple(parsed)
+
+
+def _parse_positive_finite_float_sequence(value: object, field: str) -> tuple[float, ...]:
+    sequence = _parse_finite_float_sequence(value, field)
+    if any(scale <= 0 for scale in sequence):
+        msg = f"model artifact field {field} must contain positive numbers"
+        raise ModelError(msg)
+    return sequence
+
+
+def _parse_positive_int_sequence(value: object, field: str) -> tuple[int, ...]:
+    if not isinstance(value, list) or not value:
+        msg = f"model artifact field {field} must be a non-empty JSON array"
+        raise ModelError(msg)
+    parsed: list[int] = []
+    for item in value:
+        if type(item) is not int or isinstance(item, bool) or item < 1:
+            msg = f"model artifact field {field} must contain positive integers"
+            raise ModelError(msg)
+        parsed.append(item)
+    return tuple(parsed)
