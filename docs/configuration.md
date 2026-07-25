@@ -230,10 +230,11 @@ needed, applies pending migrations, and exits without starting workers or
 business workflows.
 
 Normal non-worker execution bootstraps the runtime (directories, seeding,
-logging, automatic idempotent SQLite migration) and then prints that the
-component business functionality is not implemented. `worker.py` starts the
-durable local worker, and `run_local.py` currently supervises only that worker
-child.
+logging, automatic idempotent SQLite migration). `app.py` and `engine.py` then
+report that their business functionality is not implemented. `scraper.py`
+implements source listing, football ingestion enqueue, snapshot listing, and
+read-only snapshot verification after bootstrap. `worker.py` starts the durable
+local worker, and `run_local.py` currently supervises only that worker child.
 
 Default SQLite path: `storage/operational.sqlite3` (`storage.sqlite_path`).
 
