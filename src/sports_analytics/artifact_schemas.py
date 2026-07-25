@@ -17,11 +17,16 @@ from sports_analytics.artifact_strict import (
     require_dict,
     require_finite_number,
     require_list,
+    require_positive_int,
     require_probability,
     require_sha256_checksum,
     require_str,
 )
-from sports_analytics.combinations.contracts import derive_combination_id
+from sports_analytics.combinations.contracts import (
+    DependencyClass,
+    classify_dependency_from_opportunity_rows,
+    derive_combination_id,
+)
 from sports_analytics.core.exceptions import ArtifactError
 from sports_analytics.data.types import JsonValue
 from sports_analytics.models.identity import content_addressed_id
@@ -378,6 +383,10 @@ def _validate_cross_dataset_integrity(
     datasets: dict[str, tuple[dict[str, JsonValue], ...]],
 ) -> None:
     predictions = {row["prediction_id"] for row in datasets.get("predictions", ())}
+    predictions_by_id: dict[str, dict[str, JsonValue]] = {
+        require_str(row.get("prediction_id"), field="prediction_id"): row
+        for row in datasets.get("predictions", ())
+    }
     opportunities = {row["opportunity_id"] for row in datasets.get("opportunities", ())}
     opportunities_by_id: dict[str, dict[str, JsonValue]] = {
         require_str(row["opportunity_id"], field="opportunity_id"): row
@@ -423,6 +432,11 @@ def _validate_cross_dataset_integrity(
         )
         if evaluation_key not in evaluation_by_key:
             raise ArtifactError("opportunity has no matching market evaluation")
+        _validate_opportunity_semantic_linkage(
+            opportunity_row=opportunity_row,
+            prediction_row=predictions_by_id[prediction_id],
+            evaluation_row=evaluation_by_key[evaluation_key],
+        )
     for row in datasets.get("opportunity_decisions", ()):
         if row["opportunity_id"] not in opportunities:
             raise ArtifactError("orphan opportunity decision references missing opportunity")
@@ -436,6 +450,8 @@ def _validate_cross_dataset_integrity(
             raise ArtifactError("eligible decision requires accepted_rank")
         if eligible is False and row.get("accepted_rank") is not None:
             raise ArtifactError("rejected decision cannot include accepted_rank")
+        if row.get("accepted_rank") is not None:
+            require_positive_int(row.get("accepted_rank"), field="accepted_rank")
     _validate_decision_ranks(datasets.get("opportunity_decisions", ()))
     combinations_by_id = {row["combination_id"]: row for row in datasets.get("combinations", ())}
     for row in datasets.get("combinations", ()):
@@ -805,6 +821,8 @@ def _validate_opportunity_decision_row(row: dict[str, JsonValue]) -> None:
         raise ArtifactError("eligible decision requires accepted_rank")
     if eligible is False and row.get("accepted_rank") is not None:
         raise ArtifactError("rejected decision cannot include accepted_rank")
+    if row.get("accepted_rank") is not None:
+        require_positive_int(row.get("accepted_rank"), field="accepted_rank")
 
 
 def _validate_combination_row(row: dict[str, JsonValue]) -> None:
@@ -834,10 +852,6 @@ def _validate_combination_row(row: dict[str, JsonValue]) -> None:
                 dependency.get("right_opportunity_id"),
                 field="right_opportunity_id",
             )
-            if dependency.get("classification") != "structurally_separate":
-                raise ArtifactError(
-                    "combination dependency classification must be structurally_separate"
-                )
             pair = cast(tuple[str, str], tuple(sorted((left, right))))
             if pair in pairs_seen:
                 raise ArtifactError("combination dependency pair is duplicated")
@@ -996,9 +1010,8 @@ def _validate_decision_ranks(rows: tuple[dict[str, JsonValue], ...]) -> None:
             raise ArtifactError("duplicate opportunity decision under one filter configuration")
         ranks = []
         for row in filter_rows:
-            rank = row.get("accepted_rank")
-            if row.get("eligible") is True and isinstance(rank, int):
-                ranks.append(rank)
+            if row.get("eligible") is True:
+                ranks.append(require_positive_int(row.get("accepted_rank"), field="accepted_rank"))
         if not ranks:
             continue
         ranks_sorted = sorted(ranks)
@@ -1088,6 +1101,282 @@ def _validate_combination_against_opportunities(
     )
     if row["combination_id"] != expected_id:
         raise ArtifactError("combination_id does not match recomputed leg values")
+    _validate_combination_dependencies(
+        row,
+        opportunity_ids=opportunity_ids,
+        opportunities_by_id=opportunities_by_id,
+    )
+
+
+def _validate_combination_dependencies(
+    row: dict[str, JsonValue],
+    *,
+    opportunity_ids: list[str],
+    opportunities_by_id: dict[str, dict[str, JsonValue]],
+) -> None:
+    dependencies = require_list(row.get("dependencies"), field="dependencies")
+    pairs_seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(dependencies):
+        dependency = require_dict(item, field=f"dependencies[{index}]")
+        left_id = require_str(dependency.get("left_opportunity_id"), field="left_opportunity_id")
+        right_id = require_str(dependency.get("right_opportunity_id"), field="right_opportunity_id")
+        pair = cast(tuple[str, str], tuple(sorted((left_id, right_id))))
+        if pair in pairs_seen:
+            raise ArtifactError("combination dependency pair is duplicated")
+        pairs_seen.add(pair)
+        recomputed = classify_dependency_from_opportunity_rows(
+            opportunities_by_id[left_id],
+            opportunities_by_id[right_id],
+        )
+        if recomputed.classification is not DependencyClass.STRUCTURALLY_SEPARATE:
+            raise ArtifactError("combination dependency pair is not structurally separate")
+        if dependency.get("classification") != recomputed.classification.value:
+            raise ArtifactError("combination dependency classification does not match policy")
+        if dependency.get("reason") != recomputed.reason:
+            raise ArtifactError("combination dependency reason does not match policy")
+        if (
+            dependency.get("left_opportunity_id") != recomputed.left_opportunity_id
+            or dependency.get("right_opportunity_id") != recomputed.right_opportunity_id
+        ):
+            raise ArtifactError("combination dependency opportunity ids are misordered")
+    expected_pairs = len(opportunity_ids) * (len(opportunity_ids) - 1) // 2
+    if len(pairs_seen) != expected_pairs:
+        raise ArtifactError("combination must contain every dependency pair exactly once")
+
+
+def _validate_opportunity_semantic_linkage(
+    *,
+    opportunity_row: dict[str, JsonValue],
+    prediction_row: dict[str, JsonValue],
+    evaluation_row: dict[str, JsonValue],
+) -> None:
+    selection = require_canonical_selection_identity(
+        opportunity_row.get("selection"),
+        field="selection",
+    )
+    evaluation_selection = require_canonical_selection_identity(
+        evaluation_row.get("selection"),
+        field="evaluation.selection",
+    )
+    if selection.selection_id != require_str(
+        evaluation_row.get("selection_id"),
+        field="selection_id",
+    ):
+        raise ArtifactError("opportunity selection_id does not match market evaluation")
+    if selection.identity_payload() != evaluation_selection.identity_payload():
+        raise ArtifactError("opportunity selection does not match market evaluation")
+    prediction_probability = _prediction_probability_for_selection(
+        prediction_row,
+        selection.selection_id,
+    )
+    opportunity_probability = require_probability(
+        opportunity_row.get("model_probability"),
+        field="model_probability",
+    )
+    if abs(prediction_probability - opportunity_probability) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("opportunity model probability does not match prediction")
+    _require_matching_field(
+        opportunity_row,
+        prediction_row,
+        field="canonical_event_id",
+        label="canonical_event_id",
+    )
+    _require_matching_timestamp(
+        opportunity_row,
+        prediction_row,
+        field="event_start_utc",
+        label="event_start_utc",
+    )
+    _require_matching_timestamp(
+        opportunity_row,
+        prediction_row,
+        field="predicted_at_utc",
+        label="predicted_at_utc",
+    )
+    lineage = require_dict(prediction_row.get("lineage"), field="lineage")
+    for field in (
+        "model_artifact_id",
+        "model_checksum_sha256",
+        "model_specification_version",
+        "feature_artifact_id",
+        "feature_manifest_checksum_sha256",
+        "feature_specification_version",
+        "feature_row_id",
+    ):
+        _require_matching_field(
+            opportunity_row,
+            lineage,
+            field=field,
+            label=field,
+        )
+    if opportunity_row.get("model_trained_through_date") is not None:
+        _require_matching_field(
+            opportunity_row,
+            lineage,
+            field="trained_through_date",
+            label="model_trained_through_date",
+            left_field="model_trained_through_date",
+        )
+    if opportunity_row.get("model_calibrated_through_date") is not None:
+        _require_matching_field(
+            opportunity_row,
+            lineage,
+            field="calibrated_through_date",
+            label="model_calibrated_through_date",
+            left_field="model_calibrated_through_date",
+        )
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="prediction_id",
+        label="prediction_id",
+    )
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="quote_observation_id",
+        label="quote_observation_id",
+    )
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="quote_series_id",
+        label="quote_series_id",
+    )
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="source_name",
+        label="source_name",
+    )
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="provider_type",
+        label="provider_type",
+    )
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="provider_id",
+        label="provider_id",
+    )
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="evaluation_mode",
+        label="evaluation_mode",
+    )
+    _require_matching_decimal(
+        opportunity_row,
+        evaluation_row,
+        field="decimal_odds",
+        label="decimal_odds",
+    )
+    for field in (
+        "model_probability",
+        "raw_implied_probability",
+        "normalized_implied_probability",
+        "overround",
+        "edge",
+        "expected_value",
+    ):
+        _require_matching_number(
+            opportunity_row,
+            evaluation_row,
+            field=field,
+            label=field,
+        )
+    evaluation_overround = require_finite_number(
+        evaluation_row.get("overround"),
+        field="overround",
+    )
+    complete_total = require_finite_number(
+        evaluation_row.get("complete_market_raw_total"),
+        field="complete_market_raw_total",
+    )
+    if abs(complete_total - (1.0 + evaluation_overround)) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("market evaluation complete_market_raw_total is inconsistent")
+
+
+def _prediction_probability_for_selection(
+    prediction_row: dict[str, JsonValue],
+    selection_id: str,
+) -> float:
+    probabilities = require_list(prediction_row.get("probabilities"), field="probabilities")
+    for index, item in enumerate(probabilities):
+        probability_item = require_dict(item, field=f"probabilities[{index}]")
+        if (
+            require_str(
+                probability_item.get("selection_id"),
+                field=f"probabilities[{index}].selection_id",
+            )
+            == selection_id
+        ):
+            return require_probability(
+                probability_item.get("probability"),
+                field=f"probabilities[{index}].probability",
+            )
+    raise ArtifactError("prediction does not contain opportunity selection probability")
+
+
+def _require_matching_field(
+    left: dict[str, JsonValue],
+    right: dict[str, JsonValue],
+    *,
+    field: str,
+    label: str,
+    left_field: str | None = None,
+) -> None:
+    left_value = left.get(left_field or field)
+    right_value = right.get(field)
+    if left_value != right_value:
+        raise ArtifactError(f"opportunity {label} does not match authoritative source")
+
+
+def _require_matching_number(
+    left: dict[str, JsonValue],
+    right: dict[str, JsonValue],
+    *,
+    field: str,
+    label: str,
+) -> None:
+    left_value = require_finite_number(left.get(field), field=f"opportunity.{field}")
+    right_value = require_finite_number(right.get(field), field=f"authoritative.{field}")
+    if abs(left_value - right_value) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError(f"opportunity {label} does not match authoritative source")
+
+
+def _require_matching_decimal(
+    left: dict[str, JsonValue],
+    right: dict[str, JsonValue],
+    *,
+    field: str,
+    label: str,
+) -> None:
+    left_value = require_decimal_string(left.get(field), field=f"opportunity.{field}")
+    right_value = require_decimal_string(right.get(field), field=f"authoritative.{field}")
+    if format(left_value, "f") != format(right_value, "f"):
+        raise ArtifactError(f"opportunity {label} does not match authoritative source")
+
+
+def _require_matching_timestamp(
+    left: dict[str, JsonValue],
+    right: dict[str, JsonValue],
+    *,
+    field: str,
+    label: str,
+) -> None:
+    from sports_analytics.data.codec import format_utc_timestamp
+
+    left_value = format_utc_timestamp(
+        require_canonical_utc_timestamp_string(left.get(field), field=f"opportunity.{field}")
+    )
+    right_value = format_utc_timestamp(
+        require_canonical_utc_timestamp_string(right.get(field), field=f"authoritative.{field}")
+    )
+    if left_value != right_value:
+        raise ArtifactError(f"opportunity {label} does not match authoritative source")
 
 
 def _recompute_prediction_id(row: dict[str, JsonValue]) -> str:

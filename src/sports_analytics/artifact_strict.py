@@ -38,6 +38,13 @@ def require_int(value: object, *, field: str) -> int:
     return value
 
 
+def require_positive_int(value: object, *, field: str) -> int:
+    number = require_int(value, field=field)
+    if number < 1:
+        raise ArtifactError(f"{field} must be a positive integer")
+    return number
+
+
 def require_finite_number(value: object, *, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ArtifactError(f"{field} must be a finite JSON number")

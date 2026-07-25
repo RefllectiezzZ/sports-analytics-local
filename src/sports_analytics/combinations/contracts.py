@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -14,6 +15,7 @@ from sports_analytics.data.codec import format_utc_timestamp
 from sports_analytics.data.types import JsonValue
 from sports_analytics.models.identity import content_addressed_id
 from sports_analytics.opportunities.contracts import Opportunity
+from sports_analytics.predictions.contracts import CanonicalSelectionIdentity
 from sports_analytics.value.contracts import QuoteEvaluationMode
 
 
@@ -204,29 +206,124 @@ def derive_combination_id(
 
 def classify_dependency(left: Opportunity, right: Opportunity) -> LegDependency:
     """Classify a pair conservatively without estimating correlation."""
-    ordered = sorted((left.opportunity_id, right.opportunity_id))
-    if left.opportunity_id == right.opportunity_id or (
-        left.canonical_event_id == right.canonical_event_id and left.selection == right.selection
+    return _classify_dependency_pair(
+        left_opportunity_id=left.opportunity_id,
+        right_opportunity_id=right.opportunity_id,
+        left_canonical_event_id=left.canonical_event_id,
+        right_canonical_event_id=right.canonical_event_id,
+        left_selection=left.selection,
+        right_selection=right.selection,
+        left_dependency_keys=left.dependency_keys,
+        right_dependency_keys=right.dependency_keys,
+        left_participant_ids=left.participant_ids,
+        right_participant_ids=right.participant_ids,
+        left_dependency_metadata_complete=left.dependency_metadata_complete,
+        right_dependency_metadata_complete=right.dependency_metadata_complete,
+    )
+
+
+def classify_dependency_from_opportunity_rows(
+    left_row: Mapping[str, object],
+    right_row: Mapping[str, object],
+) -> LegDependency:
+    """Classify one opportunity pair from persisted artifact rows without trusting labels."""
+    from sports_analytics.artifact_strict import (
+        require_bool,
+        require_canonical_selection_identity,
+        require_str,
+    )
+
+    left_keys = _dependency_keys_from_row(left_row, field_prefix="left")
+    right_keys = _dependency_keys_from_row(right_row, field_prefix="right")
+    return _classify_dependency_pair(
+        left_opportunity_id=require_str(left_row.get("opportunity_id"), field="opportunity_id"),
+        right_opportunity_id=require_str(right_row.get("opportunity_id"), field="opportunity_id"),
+        left_canonical_event_id=require_str(
+            left_row.get("canonical_event_id"),
+            field="canonical_event_id",
+        ),
+        right_canonical_event_id=require_str(
+            right_row.get("canonical_event_id"),
+            field="canonical_event_id",
+        ),
+        left_selection=require_canonical_selection_identity(
+            left_row.get("selection"),
+            field="selection",
+        ),
+        right_selection=require_canonical_selection_identity(
+            right_row.get("selection"),
+            field="selection",
+        ),
+        left_dependency_keys=left_keys,
+        right_dependency_keys=right_keys,
+        left_participant_ids=_participant_ids_from_row(left_row, field_prefix="left"),
+        right_participant_ids=_participant_ids_from_row(right_row, field_prefix="right"),
+        left_dependency_metadata_complete=require_bool(
+            left_row.get("dependency_metadata_complete"),
+            field="dependency_metadata_complete",
+        ),
+        right_dependency_metadata_complete=require_bool(
+            right_row.get("dependency_metadata_complete"),
+            field="dependency_metadata_complete",
+        ),
+    )
+
+
+def _dependency_keys_from_row(row: Mapping[str, object], *, field_prefix: str) -> frozenset[str]:
+    from sports_analytics.artifact_strict import require_list, require_str
+
+    keys = require_list(row.get("dependency_keys"), field=f"{field_prefix}.dependency_keys")
+    return frozenset(require_str(item, field=f"{field_prefix}.dependency_keys[]") for item in keys)
+
+
+def _participant_ids_from_row(row: Mapping[str, object], *, field_prefix: str) -> frozenset[str]:
+    from sports_analytics.artifact_strict import require_list, require_str
+
+    participants = require_list(row.get("participant_ids"), field=f"{field_prefix}.participant_ids")
+    return frozenset(
+        require_str(item, field=f"{field_prefix}.participant_ids[]") for item in participants
+    )
+
+
+def _classify_dependency_pair(
+    *,
+    left_opportunity_id: str,
+    right_opportunity_id: str,
+    left_canonical_event_id: str,
+    right_canonical_event_id: str,
+    left_selection: CanonicalSelectionIdentity,
+    right_selection: CanonicalSelectionIdentity,
+    left_dependency_keys: frozenset[str],
+    right_dependency_keys: frozenset[str],
+    left_participant_ids: frozenset[str],
+    right_participant_ids: frozenset[str],
+    left_dependency_metadata_complete: bool,
+    right_dependency_metadata_complete: bool,
+) -> LegDependency:
+    """Shared deterministic dependency classification for typed and row-based inputs."""
+    ordered = sorted((left_opportunity_id, right_opportunity_id))
+    if left_opportunity_id == right_opportunity_id or (
+        left_canonical_event_id == right_canonical_event_id and left_selection == right_selection
     ):
         classification = DependencyClass.CONFLICT
         reason = "duplicate canonical selection"
-    elif left.canonical_event_id == right.canonical_event_id:
-        if left.selection.market_identity == right.selection.market_identity:
+    elif left_canonical_event_id == right_canonical_event_id:
+        if left_selection.market_identity == right_selection.market_identity:
             classification = DependencyClass.CONFLICT
             reason = "different outcomes of the same canonical event market"
         else:
             classification = DependencyClass.UNKNOWN
             reason = "same event across different markets has unmodelled dependency"
-    elif not left.dependency_metadata_complete or not right.dependency_metadata_complete:
+    elif not left_dependency_metadata_complete or not right_dependency_metadata_complete:
         classification = DependencyClass.UNKNOWN
         reason = "dependency or participant metadata is incomplete"
-    elif _contradictory_dependency_keys(left.dependency_keys, right.dependency_keys):
+    elif _contradictory_dependency_keys(left_dependency_keys, right_dependency_keys):
         classification = DependencyClass.CONFLICT
         reason = "dependency keys contain contradictory exclusive claims"
-    elif left.dependency_keys & right.dependency_keys:
+    elif left_dependency_keys & right_dependency_keys:
         classification = DependencyClass.UNKNOWN
         reason = "distinct events share dependency keys"
-    elif left.participant_ids & right.participant_ids:
+    elif left_participant_ids & right_participant_ids:
         classification = DependencyClass.UNKNOWN
         reason = "distinct events share canonical participants"
     else:

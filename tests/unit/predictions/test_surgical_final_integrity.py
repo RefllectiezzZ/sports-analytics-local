@@ -528,13 +528,15 @@ def test_forged_total_odds_or_joint_probability_rejected() -> None:
 def test_combination_using_rejected_opportunity_rejected(tmp_path: Path) -> None:
     datasets = {name: list(rows) for name, rows in _two_market_analysis_datasets(tmp_path).items()}
     datasets["settlements"] = []
+    rejected_opportunity_id = datasets["combinations"][0]["opportunity_ids"][0]
     decisions = [dict(row) for row in datasets["opportunity_decisions"]]
-    decisions[0]["eligible"] = False
-    decisions[0]["rejection_codes"] = ["edge"]
-    decisions[0]["accepted_rank"] = None
     eligible_rank = 1
-    for decision in decisions[1:]:
-        if decision["eligible"] is True:
+    for decision in decisions:
+        if decision["opportunity_id"] == rejected_opportunity_id:
+            decision["eligible"] = False
+            decision["rejection_codes"] = ["edge"]
+            decision["accepted_rank"] = None
+        elif decision["eligible"] is True:
             decision["accepted_rank"] = eligible_rank
             eligible_rank += 1
     datasets["opportunity_decisions"] = tuple(decisions)

@@ -679,6 +679,8 @@ def _quote_from_opportunity(opportunity: Opportunity) -> CompleteMarketQuote:
         sport_code=selection.sport_code,
         market_key=selection.market_key,
     )
+    opponent_raw_implied = 1.0 + opportunity.overround - opportunity.raw_implied_probability
+    opponent_odds = Decimal("1") / Decimal(str(opponent_raw_implied))
     return CompleteMarketQuote(
         canonical_event_id=opportunity.canonical_event_id,
         source_name=opportunity.source_name,
@@ -699,7 +701,7 @@ def _quote_from_opportunity(opportunity: Opportunity) -> CompleteMarketQuote:
             ),
             PricedSelection(
                 selection=opponent,
-                decimal_odds=Decimal("2.0"),
+                decimal_odds=opponent_odds,
                 quote_series_id=f"{opportunity.quote_series_id}-b",
                 quote_observation_id=f"{opportunity.quote_observation_id}-b",
             ),
