@@ -176,6 +176,5 @@ class FootballIngestionService:
             if primary is not None:
                 return
             raise RuntimeError(
-                "Prepared snapshot cleanup failed after a non-publication outcome: "
-                f"{cleanup_error}"
+                f"Prepared snapshot cleanup failed after a non-publication outcome: {cleanup_error}"
             ) from cleanup_error

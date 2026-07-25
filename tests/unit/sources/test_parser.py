@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import pytest
 
 from sports_analytics.core.exceptions import ParserError
+from sports_analytics.sources.football_data_co_uk.columns import MAX_FIELD_LENGTH
 from sports_analytics.sources.football_data_co_uk.parser import parse_football_data_csv
 
 
@@ -140,7 +142,10 @@ def test_parse_rejects_unexpected_division_code() -> None:
 
 
 def test_parse_rejects_unterminated_quoted_field() -> None:
-    content = b'Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nE0,01/05/2024,"Northbridge FC,Southport Athletic,,,\n'
+    content = (
+        b"Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
+        b'E0,01/05/2024,"Northbridge FC,Southport Athletic,,,\n'
+    )
     with pytest.raises(ParserError, match="malformed CSV"):
         parse_football_data_csv(content, expected_division_code="E0")
 
@@ -163,7 +168,7 @@ def test_parse_rejects_malformed_quote_during_header_retrieval() -> None:
 
 def test_parse_rejects_malformed_multiline_quote() -> None:
     content = (
-        b'Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n'
+        b"Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
         b'E0,01/05/2024,"Northbridge\nFC,Southport Athletic,,,\n'
     )
     with pytest.raises(ParserError, match="malformed CSV"):
@@ -171,9 +176,6 @@ def test_parse_rejects_malformed_multiline_quote() -> None:
 
 
 def test_parse_rejects_oversized_quoted_field() -> None:
-    import csv
-    from sports_analytics.sources.football_data_co_uk.columns import MAX_FIELD_LENGTH
-
     huge = "X" * (MAX_FIELD_LENGTH + 1)
     content = (
         f'Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nE0,01/05/2024,"{huge}",Southport Athletic,,,\n'
@@ -187,8 +189,6 @@ def test_parse_rejects_oversized_quoted_field() -> None:
 
 
 def test_parse_restores_field_size_limit_after_success() -> None:
-    import csv
-
     previous = csv.field_size_limit()
     content = b"Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nE0,01/05/2024,A,B,,,\n"
     parse_football_data_csv(content, expected_division_code="E0")
@@ -196,8 +196,6 @@ def test_parse_restores_field_size_limit_after_success() -> None:
 
 
 def test_parse_restores_field_size_limit_after_failure() -> None:
-    import csv
-
     previous = csv.field_size_limit()
     content = b'Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nE0,01/05/2024,"unterminated\n'
     with pytest.raises(ParserError):
@@ -206,7 +204,10 @@ def test_parse_restores_field_size_limit_after_failure() -> None:
 
 
 def test_parse_error_does_not_include_raw_row() -> None:
-    content = b'Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\nE0,01/05/2024,"SECRET_TOKEN,Southport Athletic,,,\n'
+    content = (
+        b"Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
+        b'E0,01/05/2024,"SECRET_TOKEN,Southport Athletic,,,\n'
+    )
     with pytest.raises(ParserError) as exc_info:
         parse_football_data_csv(content, expected_division_code="E0")
     assert "SECRET_TOKEN" not in str(exc_info.value)

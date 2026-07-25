@@ -120,9 +120,7 @@ def parse_football_data_csv(
             if name in REQUIRED_COLUMNS or name in SUPPORTED_OPTIONAL_AND_ODDS
         )
         unknown = tuple(sorted(name for name in headers if name not in set(recognized)))
-        missing_optional = tuple(
-            sorted(name for name in OPTIONAL_COLUMNS if name not in headers)
-        )
+        missing_optional = tuple(sorted(name for name in OPTIONAL_COLUMNS if name not in headers))
 
         rows: list[dict[str, str]] = []
         signatures: dict[tuple[tuple[str, str], ...], int] = {}

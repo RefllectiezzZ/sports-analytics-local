@@ -105,10 +105,7 @@ class SnapshotPublicationService:
                         source_version=prepared.source_version,
                         schema_version=prepared.schema_version,
                     )
-                    if (
-                        existing_after is not None
-                        and existing_after.status is SnapshotStatus.READY
-                    ):
+                    if existing_after is not None and existing_after.status is SnapshotStatus.READY:
                         verified = verify_snapshot_directory(
                             snapshots_directory=self._snapshots_directory,
                             relative_manifest_path=existing_after.relative_path,
@@ -145,9 +142,7 @@ class SnapshotPublicationService:
                 raise SnapshotIntegrityError(msg)
 
             try:
-                published = self._publish_new(
-                    prepared, actor=actor, correlation_id=correlation_id
-                )
+                published = self._publish_new(prepared, actor=actor, correlation_id=correlation_id)
             except SnapshotBusyError:
                 # Another writer may have finished READY between lookup and insert.
                 existing_after = self._lookup_active(
@@ -173,10 +168,7 @@ class SnapshotPublicationService:
                     return self._from_record(
                         ready, prepared=prepared, reused=True, verified=verified
                     )
-                if (
-                    existing_after is not None
-                    and existing_after.status is SnapshotStatus.BUILDING
-                ):
+                if existing_after is not None and existing_after.status is SnapshotStatus.BUILDING:
                     raise
                 raise
             ownership_transferred = True
@@ -330,8 +322,7 @@ class SnapshotPublicationService:
                     details=self._audit_details(
                         prepared, reused=False, snapshot_id=ready.id, verified=verified
                     ),
-                    occurred_at=verified.source_observed_at_utc
-                    or prepared.source_observed_at_utc,
+                    occurred_at=verified.source_observed_at_utc or prepared.source_observed_at_utc,
                 )
         discard_prepared_snapshot(prepared)
         return self._from_record(ready, prepared=prepared, reused=False, verified=verified)
@@ -574,9 +565,7 @@ class SnapshotPublicationService:
                 if verified is not None and verified.season_id is not None
                 else prepared.season_id
             ),
-            "games_count": (
-                verified.games_count if verified is not None else prepared.games_count
-            ),
+            "games_count": (verified.games_count if verified is not None else prepared.games_count),
             "odds_count": (
                 verified.odds_quotes_count
                 if verified is not None and verified.odds_quotes_count is not None

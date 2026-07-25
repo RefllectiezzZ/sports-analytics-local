@@ -16,7 +16,6 @@ from sports_analytics.data.migrations import ensure_database_ready
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
 from sports_analytics.data.types import SnapshotStatus
 from sports_analytics.snapshots import reader as snapshot_reader
-from sports_analytics.snapshots.reader import verify_snapshot_directory
 from sports_analytics.snapshots.service import SnapshotPublicationService
 from sports_analytics.snapshots.writer import (
     PreparedSnapshot,
@@ -406,9 +405,7 @@ def test_malformed_orphan_candidate_is_ignored(tmp_path: Path) -> None:
         snapshots_directory=snapshots_directory,
         snapshot_id=UUID_A,
     )
-    parent = resolve_snapshot_directory(
-        snapshots_directory, prepared_a.relative_directory
-    ).parent
+    parent = resolve_snapshot_directory(snapshots_directory, prepared_a.relative_directory).parent
     parent.mkdir(parents=True, exist_ok=True)
     bad = parent / UUID_C
     bad.mkdir()

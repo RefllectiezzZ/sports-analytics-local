@@ -254,8 +254,7 @@ def _list_competitions(args: argparse.Namespace) -> int:
     validate_configuration(config_path=args.config, env_file=args.env_file)
     for entry in list_competitions():
         print(
-            f"{entry.competition_id}\t{entry.display_name}\t"
-            f"{entry.division_code}\t{entry.timezone}"
+            f"{entry.competition_id}\t{entry.display_name}\t{entry.division_code}\t{entry.timezone}"
         )
     return SUCCESS_EXIT
 
