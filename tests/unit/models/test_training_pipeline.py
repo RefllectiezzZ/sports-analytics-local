@@ -324,10 +324,12 @@ def test_windows_safe_relative_model_paths(tmp_path: Path) -> None:
     )
     specification = football_1x2_logistic_specification(FOOTBALL_1X2_PREMATCH_FEATURES_V1)
     evaluation_summary: dict = {}
+    scope_metadata = {"competition_id": "eng-premier-league", "model_scope": "competition"}
     artifact_id = derive_model_artifact_id(
         specification=specification,
         parameters=parameters,
         temperature=1.0,
+        scope_metadata=scope_metadata,
         trained_through_date=train[-1].metadata.event_date,
         calibrated_through_date=train[-1].metadata.event_date,
         feature_lineage=_lineage(),
@@ -339,7 +341,7 @@ def test_windows_safe_relative_model_paths(tmp_path: Path) -> None:
         specification=specification,
         parameters=parameters,
         temperature=1.0,
-        scope_metadata={"competition_id": "eng-premier-league", "model_scope": "competition"},
+        scope_metadata=scope_metadata,
         trained_through_date=train[-1].metadata.event_date,
         calibrated_through_date=train[-1].metadata.event_date,
         feature_lineage=_lineage(),

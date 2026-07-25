@@ -14,7 +14,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from sports_analytics.core.exceptions import FeatureError, ModelError
+from sports_analytics.core.exceptions import FeatureError, ModelError, RepositoryError
 from sports_analytics.data.codec import (
     dumps_canonical_json,
     ensure_json_value,
@@ -466,7 +466,11 @@ def load_feature_artifact(
         msg = "feature artifact manifest checksum sidecar mismatch"
         raise FeatureError(msg)
     if expected_manifest_checksum is not None:
-        expected = validate_sha256_checksum(expected_manifest_checksum)
+        try:
+            expected = validate_sha256_checksum(expected_manifest_checksum)
+        except RepositoryError as exc:
+            msg = "feature artifact manifest checksum is malformed"
+            raise FeatureError(msg) from exc
         if digest != expected:
             msg = "feature artifact manifest checksum mismatch"
             raise FeatureError(msg)
@@ -689,7 +693,11 @@ def _read_checksum_sidecar(path: Path) -> str:
         msg = "checksum sidecar must contain exactly one digest"
         raise FeatureError(msg)
     digest = lines[0].strip()
-    validate_sha256_checksum(digest)
+    try:
+        validate_sha256_checksum(digest)
+    except RepositoryError as exc:
+        msg = "checksum sidecar digest is malformed"
+        raise FeatureError(msg) from exc
     return digest
 
 

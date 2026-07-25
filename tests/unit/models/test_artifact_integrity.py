@@ -506,7 +506,7 @@ def test_model_rejects_malformed_dates(tmp_path: Path) -> None:
     checksum = hashlib.sha256(raw).hexdigest()
     sidecar_path = model_dir / "model_checksum.sha256"
     sidecar_path.write_text(f"{checksum}\n", encoding="utf-8", newline="\n")
-    with pytest.raises(ModelError, match="malformed"):
+    with pytest.raises(ModelError, match="trained_through_date"):
         load_model_artifact(
             models_root=models_root,
             relative_path="bad-dates/model.json",

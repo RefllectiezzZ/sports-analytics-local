@@ -282,6 +282,17 @@ def evaluate_probabilities(
     )
 
 
+def _parse_decimal_odds_value(value: object, *, outcome_label: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        msg = f"invalid decimal odds for {outcome_label}: {value}"
+        raise EvaluationError(msg)
+    odds = float(value)
+    if not np.isfinite(odds) or odds <= 1.0:
+        msg = f"invalid decimal odds for {outcome_label}: {odds}"
+        raise EvaluationError(msg)
+    return odds
+
+
 def decimal_odds_to_normalized_probabilities(
     *,
     outcome_space: OutcomeSpace,
@@ -290,23 +301,36 @@ def decimal_odds_to_normalized_probabilities(
     """Convert ordered decimal odds into normalized implied probabilities."""
     labels = outcome_space.ordered_labels
     if isinstance(decimal_odds, Mapping):
-        try:
-            odds_values = tuple(float(decimal_odds[label]) for label in labels)
-        except KeyError as exc:
-            msg = f"missing decimal odds for outcome: {exc}"
-            raise EvaluationError(msg) from exc
+        expected_keys = set(labels)
+        provided_keys = set(decimal_odds.keys())
+        if provided_keys != expected_keys:
+            missing = expected_keys - provided_keys
+            extra = provided_keys - expected_keys
+            if missing:
+                missing_label = sorted(missing)[0]
+                msg = f"missing decimal odds for outcome: {missing_label}"
+                raise EvaluationError(msg)
+            extra_label = sorted(extra)[0]
+            msg = f"unexpected decimal odds outcome: {extra_label}"
+            raise EvaluationError(msg)
+        for key in decimal_odds:
+            if type(key) is not str:
+                msg = "decimal odds mapping keys must be strings"
+                raise EvaluationError(msg)
+        odds_values = tuple(
+            _parse_decimal_odds_value(decimal_odds[label], outcome_label=label) for label in labels
+        )
     else:
-        odds_values = tuple(float(value) for value in decimal_odds)
-        if len(odds_values) != len(labels):
+        if len(decimal_odds) != len(labels):
             msg = (
                 "decimal odds count must match outcome space: "
-                f"expected {len(labels)}, got {len(odds_values)}"
+                f"expected {len(labels)}, got {len(decimal_odds)}"
             )
             raise EvaluationError(msg)
-    for label, odds in zip(labels, odds_values, strict=True):
-        if not np.isfinite(odds) or odds <= 1.0:
-            msg = f"invalid decimal odds for {label}: {odds}"
-            raise EvaluationError(msg)
+        odds_values = tuple(
+            _parse_decimal_odds_value(value, outcome_label=label)
+            for value, label in zip(decimal_odds, labels, strict=True)
+        )
     implied = np.asarray([1.0 / odds for odds in odds_values], dtype=np.float64)
     total = float(np.sum(implied))
     if total <= 0 or not np.isfinite(total):

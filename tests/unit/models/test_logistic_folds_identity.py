@@ -442,10 +442,12 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
         input_snapshots=[],
     )
     evaluation_summary = {"fold_count": 1}
+    scope_metadata = {"competition_id": "eng-premier-league", "model_scope": "competition"}
     base_id = derive_model_artifact_id(
         specification=specification,
         parameters=parameters,
         temperature=1.0,
+        scope_metadata=scope_metadata,
         trained_through_date=date(2023, 8, 1),
         calibrated_through_date=date(2023, 8, 31),
         feature_lineage=lineage,
@@ -465,6 +467,7 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
             specification=specification,
             parameters=changed_params,
             temperature=1.0,
+            scope_metadata=scope_metadata,
             trained_through_date=date(2023, 8, 1),
             calibrated_through_date=date(2023, 8, 31),
             feature_lineage=lineage,
@@ -478,6 +481,7 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
             specification=specification,
             parameters=parameters,
             temperature=1.25,
+            scope_metadata=scope_metadata,
             trained_through_date=date(2023, 8, 1),
             calibrated_through_date=date(2023, 8, 31),
             feature_lineage=lineage,
@@ -491,6 +495,7 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
             specification=specification,
             parameters=parameters,
             temperature=1.0,
+            scope_metadata=scope_metadata,
             trained_through_date=date(2023, 8, 2),
             calibrated_through_date=date(2023, 8, 31),
             feature_lineage=lineage,
@@ -505,6 +510,7 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
             specification=specification,
             parameters=version_changed,
             temperature=1.0,
+            scope_metadata=scope_metadata,
             trained_through_date=date(2023, 8, 1),
             calibrated_through_date=date(2023, 8, 31),
             feature_lineage=lineage,
@@ -519,7 +525,7 @@ def test_model_identity_changes_with_parameters_and_metadata(tmp_path: Path) -> 
         specification=specification,
         parameters=parameters,
         temperature=1.0,
-        scope_metadata={"competition_id": "eng-premier-league", "model_scope": "competition"},
+        scope_metadata=scope_metadata,
         trained_through_date=date(2023, 8, 1),
         calibrated_through_date=date(2023, 8, 31),
         feature_lineage=lineage,

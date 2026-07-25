@@ -78,6 +78,7 @@ def derive_model_artifact_id(
     specification: ModelSpecification,
     parameters: FittedLogisticParameters,
     temperature: float,
+    scope_metadata: dict[str, JsonValue],
     trained_through_date: date,
     calibrated_through_date: date,
     feature_lineage: FeatureArtifactLineage,
@@ -85,6 +86,7 @@ def derive_model_artifact_id(
     random_seed: int,
 ) -> str:
     """Derive content-addressed model identity from fitted parameters and lineage."""
+    canonical_scope_metadata = _canonical_scope_metadata(scope_metadata)
     validate_feature_artifact_lineage(
         feature_lineage,
         expected_feature_specification_version=specification.feature_specification_version,
@@ -131,6 +133,7 @@ def derive_model_artifact_id(
         "numpy_version": parameters.numpy_version,
         "convergence_iterations": list(parameters.convergence_iterations),
         "evaluation_summary_checksum_sha256": evaluation_summary_checksum,
+        "scope_metadata": canonical_scope_metadata,
     }
     return content_addressed_id(identity_type=MODEL_IDENTITY_TYPE, payload=payload)
 
@@ -165,6 +168,7 @@ def build_model_document(
     if trained_through_date > calibrated_through_date:
         msg = "trained_through_date must be on or before calibrated_through_date"
         raise ModelError(msg)
+    canonical_scope_metadata = _canonical_scope_metadata(scope_metadata)
     validate_feature_artifact_lineage(
         feature_lineage,
         expected_feature_specification_version=specification.feature_specification_version,
@@ -179,7 +183,7 @@ def build_model_document(
         "feature_specification_version": specification.feature_specification_version,
         "sport_code": specification.sport_code,
         "market_key": specification.market_key,
-        "scope_metadata": ensure_json_value(scope_metadata),
+        "scope_metadata": canonical_scope_metadata,
         "outcome_labels": list(ordered_labels),
         "ordered_feature_names": list(parameters.feature_names),
         "scaler_mean": list(parameters.scaler_mean),
@@ -310,7 +314,11 @@ def load_model_artifact(
         msg = "model artifact checksum sidecar mismatch"
         raise ModelError(msg)
     if expected_checksum is not None:
-        expected = validate_sha256_checksum(expected_checksum)
+        try:
+            expected = validate_sha256_checksum(expected_checksum)
+        except RepositoryError as exc:
+            msg = "model artifact checksum is malformed"
+            raise ModelError(msg) from exc
         if digest != expected:
             msg = "model artifact checksum mismatch"
             raise ModelError(msg)
@@ -362,6 +370,7 @@ def load_model_artifact(
         document,
         expected_feature_specification_version=specification.feature_specification_version,
     )
+    scope_metadata = _canonical_scope_metadata(document["scope_metadata"])
     try:
         evaluation_summary_raw = document["evaluation_summary"]
         random_seed = _parse_strict_int(document["random_seed"], "random_seed")
@@ -377,6 +386,7 @@ def load_model_artifact(
         specification=specification,
         parameters=parameters,
         temperature=temperature,
+        scope_metadata=scope_metadata,
         trained_through_date=trained_through,
         calibrated_through_date=calibrated_through,
         feature_lineage=feature_lineage,
@@ -446,6 +456,9 @@ def validate_feature_artifact_lineage(
     if ".." in Path(manifest_path).parts or manifest_path in {".", ".."}:
         msg = "feature manifest path must not traverse directories"
         raise ModelError(msg)
+    if not manifest_path.endswith("manifest.json"):
+        msg = "feature manifest path must end with manifest.json"
+        raise ModelError(msg)
     try:
         validate_sha256_checksum(lineage.feature_manifest_checksum_sha256)
         validate_sha256_checksum(lineage.folds_file_checksum_sha256)
@@ -478,7 +491,7 @@ def validate_feature_artifact_lineage(
             checksum_value = snapshot.get(checksum_key)
             if checksum_value is not None:
                 try:
-                    validate_sha256_checksum(str(checksum_value))
+                    validate_sha256_checksum(_parse_strict_str(checksum_value, checksum_key))
                 except RepositoryError as exc:
                     msg = "input snapshot lineage checksum is malformed"
                     raise ModelError(msg) from exc
@@ -490,8 +503,13 @@ def _parameters_from_document(
     specification: ModelSpecification,
 ) -> FittedLogisticParameters:
     try:
-        feature_names = tuple(str(item) for item in document["ordered_feature_names"])
-        outcome_labels = tuple(str(item) for item in document["outcome_labels"])
+        feature_names = tuple(
+            _parse_strict_str(item, "ordered_feature_names")
+            for item in document["ordered_feature_names"]
+        )
+        outcome_labels = tuple(
+            _parse_strict_str(item, "outcome_labels") for item in document["outcome_labels"]
+        )
         scaler_mean = _parse_finite_float_sequence(document["scaler_mean"], "scaler_mean")
         scaler_scale = _parse_positive_finite_float_sequence(
             document["scaler_scale"],
@@ -505,9 +523,12 @@ def _parameters_from_document(
         if not isinstance(logistic_payload, dict):
             raise TypeError
         configuration = LogisticConfiguration(
-            configuration_version=str(logistic_payload["configuration_version"]),
-            solver=str(logistic_payload["solver"]),
-            penalty=str(logistic_payload["penalty"]),
+            configuration_version=_parse_strict_str(
+                logistic_payload["configuration_version"],
+                "configuration_version",
+            ),
+            solver=_parse_strict_str(logistic_payload["solver"], "solver"),
+            penalty=_parse_strict_str(logistic_payload["penalty"], "penalty"),
             regularization_strength=_parse_positive_finite_float_value(
                 logistic_payload["regularization_strength"],
                 "regularization_strength",
@@ -522,10 +543,13 @@ def _parameters_from_document(
             ),
             fit_intercept=_parse_strict_bool(logistic_payload["fit_intercept"], "fit_intercept"),
             random_seed=_parse_strict_int(logistic_payload["random_seed"], "random_seed"),
-            feature_scaler_policy=str(logistic_payload["feature_scaler_policy"]),
+            feature_scaler_policy=_parse_strict_str(
+                logistic_payload["feature_scaler_policy"],
+                "feature_scaler_policy",
+            ),
         )
-        sklearn_version = str(logistic_payload["sklearn_version"])
-        numpy_version = str(logistic_payload["numpy_version"])
+        sklearn_version = _parse_strict_str(logistic_payload["sklearn_version"], "sklearn_version")
+        numpy_version = _parse_strict_str(logistic_payload["numpy_version"], "numpy_version")
         convergence_iterations = _parse_positive_int_sequence(
             logistic_payload["convergence_iterations"],
             "convergence_iterations",
@@ -583,13 +607,33 @@ def _feature_lineage_from_document(
         snapshots = document["input_snapshots"]
         if not isinstance(snapshots, list):
             raise TypeError
+        feature_artifact_id = _parse_strict_str(
+            document["feature_artifact_id"], "feature_artifact_id"
+        )
+        if not feature_artifact_id.strip():
+            raise ValueError
+        feature_manifest_path = _parse_strict_str(
+            document["feature_manifest_path"],
+            "feature_manifest_path",
+        )
+        if not feature_manifest_path.strip():
+            raise ValueError
         lineage = FeatureArtifactLineage(
-            feature_artifact_id=str(document["feature_artifact_id"]),
-            feature_manifest_path=str(document["feature_manifest_path"]),
-            feature_manifest_checksum_sha256=str(document["feature_manifest_checksum_sha256"]),
-            feature_specification_version=str(document["feature_specification_version"]),
+            feature_artifact_id=feature_artifact_id,
+            feature_manifest_path=feature_manifest_path,
+            feature_manifest_checksum_sha256=_parse_strict_str(
+                document["feature_manifest_checksum_sha256"],
+                "feature_manifest_checksum_sha256",
+            ),
+            feature_specification_version=_parse_strict_str(
+                document["feature_specification_version"],
+                "feature_specification_version",
+            ),
             fold_configuration=dict(document["fold_configuration"]),
-            folds_file_checksum_sha256=str(document["folds_file_checksum_sha256"]),
+            folds_file_checksum_sha256=_parse_strict_str(
+                document["folds_file_checksum_sha256"],
+                "folds_file_checksum_sha256",
+            ),
             input_snapshots=[dict(item) for item in snapshots],
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -614,16 +658,64 @@ def _read_checksum_sidecar(path: Path) -> str:
         msg = "checksum sidecar must contain exactly one digest"
         raise ModelError(msg)
     digest = lines[0].strip()
-    validate_sha256_checksum(digest)
+    try:
+        validate_sha256_checksum(digest)
+    except RepositoryError as exc:
+        msg = "checksum sidecar digest is malformed"
+        raise ModelError(msg) from exc
     return digest
+
+
+def _canonical_scope_metadata(scope_metadata: object) -> dict[str, JsonValue]:
+    if not isinstance(scope_metadata, dict):
+        msg = "scope_metadata must be a JSON object"
+        raise ModelError(msg)
+    if not scope_metadata:
+        msg = "scope_metadata must be non-empty"
+        raise ModelError(msg)
+    validated: dict[str, JsonValue] = {}
+    for key, value in scope_metadata.items():
+        if type(key) is not str or not key:
+            msg = "scope_metadata keys must be non-empty strings"
+            raise ModelError(msg)
+        try:
+            json_value = ensure_json_value(value)
+        except RepositoryError as exc:
+            msg = "scope_metadata values must be JSON-compatible"
+            raise ModelError(msg) from exc
+        validated[key] = json_value
+    return json.loads(dumps_canonical_json(validated))  # type: ignore[no-any-return]
+
+
+def _parse_strict_str(value: object, field: str) -> str:
+    if type(value) is not str:
+        msg = f"model artifact field {field} must be a JSON string"
+        raise ModelError(msg)
+    return value
 
 
 def _parse_date(document: dict[str, Any], key: str) -> date:
     try:
-        return date.fromisoformat(str(document[key]))
-    except (KeyError, TypeError, ValueError) as exc:
+        return _parse_strict_iso_date(document[key], key)
+    except KeyError as exc:
         msg = f"model artifact field {key} is malformed"
         raise ModelError(msg) from exc
+
+
+def _parse_strict_iso_date(value: object, field: str) -> date:
+    text = _parse_strict_str(value, field)
+    if len(text) != 10 or text[4] != "-" or text[7] != "-":
+        msg = f"model artifact field {field} must use ISO YYYY-MM-DD format"
+        raise ModelError(msg)
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        msg = f"model artifact field {field} is malformed"
+        raise ModelError(msg) from exc
+    if parsed.isoformat() != text:
+        msg = f"model artifact field {field} must use ISO YYYY-MM-DD format"
+        raise ModelError(msg)
+    return parsed
 
 
 def _parse_positive_finite_float(document: dict[str, Any], key: str) -> float:

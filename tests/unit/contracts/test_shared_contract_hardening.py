@@ -16,10 +16,11 @@ from tests.helpers_snapshots import database_path, prepare, publication_service
 from tests.helpers_training import synthetic_season_csv
 from tests.unit.models.test_import_boundary import _module_paths
 
-from sports_analytics.core.exceptions import FeatureError, ModelError
+from sports_analytics.core.exceptions import EvaluationError, FeatureError, ModelError
 from sports_analytics.core.paths import resolve_paths
 from sports_analytics.core.settings import load_settings
 from sports_analytics.data.codec import dumps_canonical_json
+from sports_analytics.evaluation.metrics import decimal_odds_to_normalized_probabilities
 from sports_analytics.evaluation.temporal import TemporalSplitConfig
 from sports_analytics.features.contracts import (
     FEATURE_SCOPE_VERSION_PREFIX,
@@ -29,6 +30,7 @@ from sports_analytics.features.contracts import (
     validate_feature_scope_key,
 )
 from sports_analytics.features.football.metadata import FootballFeatureRowMetadata
+from sports_analytics.features.football.odds import closing_1x2_odds_to_normalized_probabilities
 from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
     FOOTBALL_1X2_OUTCOME_SPACE,
@@ -50,6 +52,8 @@ from sports_analytics.models.football_1x2 import (
 )
 from sports_analytics.models.logistic import LogisticConfiguration, fit_multinomial_logistic
 from sports_analytics.services.training import FeatureBuildRequest, build_football_1x2_features
+
+_DEFAULT_SCOPE_METADATA = {"competition_id": "eng-premier-league", "model_scope": "competition"}
 
 
 def _lineage() -> FeatureArtifactLineage:
@@ -80,6 +84,7 @@ def _valid_model_document(tmp_path: Path | None = None) -> tuple[dict, object]:
         specification=specification,
         parameters=parameters,
         temperature=1.0,
+        scope_metadata=_DEFAULT_SCOPE_METADATA,
         trained_through_date=date(2023, 8, 1),
         calibrated_through_date=date(2023, 8, 31),
         feature_lineage=_lineage(),
@@ -91,7 +96,7 @@ def _valid_model_document(tmp_path: Path | None = None) -> tuple[dict, object]:
         specification=specification,
         parameters=parameters,
         temperature=1.0,
-        scope_metadata={"competition_id": "eng-premier-league", "model_scope": "competition"},
+        scope_metadata=_DEFAULT_SCOPE_METADATA,
         trained_through_date=date(2023, 8, 1),
         calibrated_through_date=date(2023, 8, 31),
         feature_lineage=_lineage(),
@@ -401,6 +406,263 @@ def test_no_partial_final_model_directory_after_failure(tmp_path: Path) -> None:
     assert not final_directory.exists()
     temp_dirs = [path for path in models_root.iterdir() if path.name.startswith(".model-")]
     assert temp_dirs == []
+
+
+def _identity_parameters() -> tuple[object, object, FeatureArtifactLineage, dict]:
+    specification = football_1x2_logistic_specification(FOOTBALL_1X2_PREMATCH_FEATURES_V1)
+    labels = ("home", "draw", "away", "home", "draw", "away", "home", "draw", "away")
+    matrix = np.random.default_rng(9).normal(size=(len(labels), len(FOOTBALL_1X2_FEATURE_NAMES_V1)))
+    parameters = fit_multinomial_logistic(
+        feature_matrix=matrix,
+        labels=labels,
+        feature_names=FOOTBALL_1X2_FEATURE_NAMES_V1,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        configuration=LogisticConfiguration(random_seed=3),
+    )
+    return specification, parameters, _lineage(), {"fold_count": 1}
+
+
+def test_scope_metadata_included_in_model_identity() -> None:
+    specification, parameters, lineage, evaluation_summary = _identity_parameters()
+    kwargs = {
+        "specification": specification,
+        "parameters": parameters,
+        "temperature": 1.0,
+        "trained_through_date": date(2023, 8, 1),
+        "calibrated_through_date": date(2023, 8, 31),
+        "feature_lineage": lineage,
+        "evaluation_summary": evaluation_summary,
+        "random_seed": 3,
+    }
+    first = derive_model_artifact_id(scope_metadata=_DEFAULT_SCOPE_METADATA, **kwargs)
+    second = derive_model_artifact_id(scope_metadata=_DEFAULT_SCOPE_METADATA, **kwargs)
+    changed_scope = derive_model_artifact_id(
+        scope_metadata={"competition_id": "eng-premier-league", "model_scope": "global"},
+        **kwargs,
+    )
+    assert first == second
+    assert first != changed_scope
+
+
+def test_changing_competition_scope_invalidates_model_id() -> None:
+    specification, parameters, lineage, evaluation_summary = _identity_parameters()
+    base = derive_model_artifact_id(
+        specification=specification,
+        parameters=parameters,
+        temperature=1.0,
+        scope_metadata=_DEFAULT_SCOPE_METADATA,
+        trained_through_date=date(2023, 8, 1),
+        calibrated_through_date=date(2023, 8, 31),
+        feature_lineage=lineage,
+        evaluation_summary=evaluation_summary,
+        random_seed=3,
+    )
+    changed = derive_model_artifact_id(
+        specification=specification,
+        parameters=parameters,
+        temperature=1.0,
+        scope_metadata={"competition_id": "esp-la-liga", "model_scope": "competition"},
+        trained_through_date=date(2023, 8, 1),
+        calibrated_through_date=date(2023, 8, 31),
+        feature_lineage=lineage,
+        evaluation_summary=evaluation_summary,
+        random_seed=3,
+    )
+    assert base != changed
+
+
+def test_scope_metadata_insertion_order_does_not_change_model_id() -> None:
+    specification, parameters, lineage, evaluation_summary = _identity_parameters()
+    first = derive_model_artifact_id(
+        specification=specification,
+        parameters=parameters,
+        temperature=1.0,
+        scope_metadata={"competition_id": "eng-premier-league", "model_scope": "competition"},
+        trained_through_date=date(2023, 8, 1),
+        calibrated_through_date=date(2023, 8, 31),
+        feature_lineage=lineage,
+        evaluation_summary=evaluation_summary,
+        random_seed=3,
+    )
+    second = derive_model_artifact_id(
+        specification=specification,
+        parameters=parameters,
+        temperature=1.0,
+        scope_metadata={"model_scope": "competition", "competition_id": "eng-premier-league"},
+        trained_through_date=date(2023, 8, 1),
+        calibrated_through_date=date(2023, 8, 31),
+        feature_lineage=lineage,
+        evaluation_summary=evaluation_summary,
+        random_seed=3,
+    )
+    assert first == second
+
+
+@pytest.mark.parametrize(
+    "scope_metadata",
+    [
+        [],
+        "competition",
+        {"": "eng-premier-league"},
+        {"competition_id": {1, 2, 3}},
+    ],
+)
+def test_malformed_scope_metadata_rejected(scope_metadata: object) -> None:
+    specification, parameters, lineage, evaluation_summary = _identity_parameters()
+    with pytest.raises(ModelError, match="scope_metadata"):
+        derive_model_artifact_id(
+            specification=specification,
+            parameters=parameters,
+            temperature=1.0,
+            scope_metadata=scope_metadata,  # type: ignore[arg-type]
+            trained_through_date=date(2023, 8, 1),
+            calibrated_through_date=date(2023, 8, 31),
+            feature_lineage=lineage,
+            evaluation_summary=evaluation_summary,
+            random_seed=3,
+        )
+
+
+def test_mapping_extra_outcome_rejected() -> None:
+    space = OutcomeSpace(ordered_labels=("home", "draw", "away"))
+    with pytest.raises(EvaluationError, match="unexpected decimal odds outcome"):
+        decimal_odds_to_normalized_probabilities(
+            outcome_space=space,
+            decimal_odds={"home": 2.0, "draw": 3.0, "away": 4.0, "extra": 5.0},
+        )
+
+
+def test_mapping_missing_outcome_rejected() -> None:
+    space = OutcomeSpace(ordered_labels=("home", "draw", "away"))
+    with pytest.raises(EvaluationError, match="missing decimal odds for outcome"):
+        decimal_odds_to_normalized_probabilities(
+            outcome_space=space,
+            decimal_odds={"home": 2.0, "draw": 3.0},
+        )
+
+
+def test_mapping_insertion_order_does_not_alter_canonical_output() -> None:
+    space = OutcomeSpace(ordered_labels=("home", "draw", "away"))
+    canonical = decimal_odds_to_normalized_probabilities(
+        outcome_space=space,
+        decimal_odds={"home": 2.0, "draw": 3.0, "away": 4.0},
+    )
+    reversed_insertion = decimal_odds_to_normalized_probabilities(
+        outcome_space=space,
+        decimal_odds={"away": 4.0, "draw": 3.0, "home": 2.0},
+    )
+    assert canonical == reversed_insertion
+
+
+def test_boolean_odds_rejected() -> None:
+    space = OutcomeSpace(ordered_labels=("home", "draw", "away"))
+    with pytest.raises(EvaluationError, match="invalid decimal odds"):
+        decimal_odds_to_normalized_probabilities(
+            outcome_space=space,
+            decimal_odds={"home": True, "draw": 3.0, "away": 4.0},  # type: ignore[dict-item]
+        )
+    with pytest.raises(EvaluationError, match="invalid decimal odds"):
+        decimal_odds_to_normalized_probabilities(
+            outcome_space=space,
+            decimal_odds=(2.0, True, 4.0),  # type: ignore[list-item]
+        )
+
+
+def test_numeric_string_odds_rejected() -> None:
+    space = OutcomeSpace(ordered_labels=("home", "draw", "away"))
+    with pytest.raises(EvaluationError, match="invalid decimal odds"):
+        decimal_odds_to_normalized_probabilities(
+            outcome_space=space,
+            decimal_odds={"home": "2.0", "draw": 3.0, "away": 4.0},  # type: ignore[dict-item]
+        )
+    with pytest.raises(EvaluationError, match="invalid decimal odds"):
+        decimal_odds_to_normalized_probabilities(
+            outcome_space=space,
+            decimal_odds=("2.0", 3.0, 4.0),  # type: ignore[list-item]
+        )
+
+
+def test_football_1x2_benchmark_unchanged() -> None:
+    home, draw, away = closing_1x2_odds_to_normalized_probabilities(2.0, 3.5, 3.5)
+    assert abs(home + draw + away - 1.0) < 1e-12
+    assert home > draw
+
+
+def test_integer_trained_through_date_rejected(tmp_path: Path) -> None:
+    document, specification = _valid_model_document()
+    document["trained_through_date"] = 20230801
+    _write_raw_model(tmp_path, document=document)
+    with pytest.raises(ModelError, match="trained_through_date"):
+        load_model_artifact(
+            models_root=tmp_path / "models",
+            relative_path="bad/model.json",
+            specification=specification,
+        )
+
+
+def test_compact_trained_through_date_rejected(tmp_path: Path) -> None:
+    document, specification = _valid_model_document()
+    document["trained_through_date"] = "20230801"
+    _write_raw_model(tmp_path, document=document)
+    with pytest.raises(ModelError, match="trained_through_date"):
+        load_model_artifact(
+            models_root=tmp_path / "models",
+            relative_path="bad/model.json",
+            specification=specification,
+        )
+
+
+def test_non_string_feature_artifact_id_rejected(tmp_path: Path) -> None:
+    document, specification = _valid_model_document()
+    document["feature_artifact_id"] = 12345
+    _write_raw_model(tmp_path, document=document)
+    with pytest.raises(ModelError, match="feature_artifact_id"):
+        load_model_artifact(
+            models_root=tmp_path / "models",
+            relative_path="bad/model.json",
+            specification=specification,
+        )
+
+
+def test_feature_manifest_path_must_end_with_manifest_json(tmp_path: Path) -> None:
+    document, specification = _valid_model_document()
+    document["feature_manifest_path"] = "football/features/manifest.txt"
+    _write_raw_model(tmp_path, document=document)
+    with pytest.raises(ModelError, match="manifest.json"):
+        load_model_artifact(
+            models_root=tmp_path / "models",
+            relative_path="bad/model.json",
+            specification=specification,
+        )
+
+
+def test_model_checksum_sidecar_malformed_digest_rejected(tmp_path: Path) -> None:
+    document, specification = _valid_model_document()
+    models_root = tmp_path / "models"
+    model_dir = models_root / "bad"
+    model_dir.mkdir(parents=True)
+    text = dumps_canonical_json(document) + "\n"
+    (model_dir / "model.json").write_text(text, encoding="utf-8", newline="\n")
+    (model_dir / MODEL_CHECKSUM_SIDECAR).write_text("not-a-checksum\n", encoding="utf-8")
+    with pytest.raises(ModelError, match="checksum sidecar digest"):
+        load_model_artifact(
+            models_root=models_root,
+            relative_path="bad/model.json",
+            specification=specification,
+        )
+
+
+def test_feature_checksum_sidecar_malformed_digest_rejected(tmp_path: Path) -> None:
+    paths, artifact = _loadable_artifact(tmp_path)
+    sidecar = artifact.directory / "manifest_checksum.sha256"
+    sidecar.write_text("not-a-checksum\n", encoding="utf-8")
+    from sports_analytics.features.football.datasets import load_feature_artifact
+
+    with pytest.raises(FeatureError, match="checksum sidecar digest"):
+        load_feature_artifact(
+            features_root=paths.features_directory,
+            relative_directory=artifact.relative_directory,
+        )
 
 
 @pytest.mark.parametrize("module_path", _module_paths(), ids=lambda path: path.name)

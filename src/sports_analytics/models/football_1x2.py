@@ -322,10 +322,15 @@ def train_final_artifact(
         ),
     }
     trained_through_date = max(item.metadata.event_date for item in history)
+    scope_metadata: dict[str, JsonValue] = {
+        "competition_id": competition_id,
+        "model_scope": "competition",
+    }
     derived_id = derive_model_artifact_id(
         specification=specification,
         parameters=parameters,
         temperature=temperature_result.temperature,
+        scope_metadata=scope_metadata,
         trained_through_date=trained_through_date,
         calibrated_through_date=calibrated_through,
         feature_lineage=feature_lineage,
@@ -345,10 +350,7 @@ def train_final_artifact(
         specification=specification,
         parameters=parameters,
         temperature=temperature_result.temperature,
-        scope_metadata={
-            "competition_id": competition_id,
-            "model_scope": "competition",
-        },
+        scope_metadata=scope_metadata,
         trained_through_date=trained_through_date,
         calibrated_through_date=calibrated_through,
         feature_lineage=feature_lineage,
