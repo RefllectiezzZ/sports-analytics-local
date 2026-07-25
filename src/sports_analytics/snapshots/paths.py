@@ -23,6 +23,30 @@ def _reject_symlink_component(path: Path, *, error_type: type[Exception]) -> Non
         raise error_type(msg)
 
 
+def _resolved_path_is_under_root(final: Path, root_real: Path) -> bool:
+    """Return whether ``final`` is the same as or under ``root_real``."""
+    try:
+        final.relative_to(root_real)
+        return True
+    except ValueError:
+        if os.name != "nt":
+            return False
+
+    def _normalize_windows_path(path: Path) -> str:
+        text = os.path.normcase(os.path.normpath(str(path)))
+        if text.startswith("\\\\?\\"):
+            return text[4:]
+        return text
+
+    try:
+        common = os.path.commonpath(
+            [_normalize_windows_path(final), _normalize_windows_path(root_real)]
+        )
+    except ValueError:
+        return False
+    return common == _normalize_windows_path(root_real)
+
+
 def resolve_under_root(
     root: Path,
     relative_path: str,
@@ -82,11 +106,9 @@ def resolve_under_root(
     except OSError as exc:
         msg = "unable to canonicalize path under storage root"
         raise error_type(msg) from exc
-    try:
-        final.relative_to(root_real)
-    except ValueError as exc:
+    if not _resolved_path_is_under_root(final, root_real):
         msg = "path escapes configured storage root"
-        raise error_type(msg) from exc
+        raise error_type(msg)
     # Final component must not be a symlink even if it appeared after resolution.
     if current.exists():
         _reject_symlink_component(current, error_type=error_type)
