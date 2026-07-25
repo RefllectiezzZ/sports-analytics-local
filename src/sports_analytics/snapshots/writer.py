@@ -1,4 +1,4 @@
-"""Prepare immutable football snapshot directories on the filesystem."""
+"""Prepare immutable snapshot directories on the filesystem (sport-agnostic)."""
 
 from __future__ import annotations
 
@@ -7,22 +7,23 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+
+import pyarrow as pa
 
 from sports_analytics.core.exceptions import SnapshotIntegrityError, SnapshotVerificationError
-from sports_analytics.data.types import JsonValue, normalize_uuid, validate_relative_snapshot_path
+from sports_analytics.data.types import JsonValue, normalize_uuid
 from sports_analytics.snapshots.manifest import build_manifest_document, write_manifest
-from sports_analytics.snapshots.parquet import write_bundle_parquet_files
+from sports_analytics.snapshots.parquet import write_suite_parquet_files
 from sports_analytics.snapshots.paths import resolve_snapshot_dir
-from sports_analytics.sources.raw_store import RawSourceArtifact
-from sports_analytics.sports.football.contracts import (
-    FOOTBALL_CANONICAL_SCHEMA_VERSION,
-    FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+from sports_analytics.snapshots.spec import (
     MANIFEST_FILENAME,
     MANIFEST_VERSION,
+    SnapshotDatasetSuite,
+    SnapshotIdentity,
+    SnapshotMetrics,
+    SnapshotSpec,
 )
-from sports_analytics.sports.football.identifiers import build_season_id, build_source_version
-from sports_analytics.sports.football.normalization import NormalizedFootballBundle
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,81 +34,58 @@ class PreparedSnapshot:
     temporary_directory: Path
     relative_directory: str
     relative_manifest_path: str
-    source_version: str
-    source_name: str
-    schema_version: str
-    snapshot_type: str
     manifest_version: str
-    competition_id: str
-    season_id: str
-    source_competition_code: str
-    source_season_code: str
+    identity: SnapshotIdentity
+    suite: SnapshotDatasetSuite
     manifest_checksum_sha256: str
-    games_count: int
-    teams_count: int
-    odds_quotes_count: int
-    statistics_rows_count: int
-    duplicate_rows_discarded: int
-    warnings_count: int
-    source_file_sha256: str
+    metrics: SnapshotMetrics
+    raw_artifact_sha256: str
     source_observed_at_utc: datetime
-    metadata: dict[str, JsonValue]
+    domain_metadata: dict[str, JsonValue]
 
+    @property
+    def snapshot_type(self) -> str:
+        """Return the snapshot type from the validated identity."""
+        return self.identity.snapshot_type
 
-def build_relative_snapshot_directory(
-    *,
-    competition_id: str,
-    season_label: str,
-    snapshot_id: str,
-) -> str:
-    """Return the relative snapshot directory under the snapshots root."""
-    relative = PurePosixPath(
-        FOOTBALL_INGESTION_SNAPSHOT_TYPE,
-        FOOTBALL_CANONICAL_SCHEMA_VERSION,
-        competition_id,
-        season_label,
-        snapshot_id,
-    ).as_posix()
-    return validate_relative_snapshot_path(relative)
+    @property
+    def schema_version(self) -> str:
+        """Return the schema version from the validated identity."""
+        return self.identity.schema_version
+
+    @property
+    def source_name(self) -> str:
+        """Return the source name from the validated identity."""
+        return self.identity.source_name
+
+    @property
+    def source_version(self) -> str:
+        """Return the source version from the validated identity."""
+        return self.identity.source_version
+
+    @property
+    def partition_keys(self) -> tuple[tuple[str, str], ...]:
+        """Return ordered partition keys from the validated identity."""
+        return self.identity.partition_keys
+
+    @property
+    def primary_row_count(self) -> int:
+        """Return the row count stored as the SQLite snapshot ``row_count``."""
+        return self.metrics.row_count(self.suite.primary_dataset_name)
 
 
 def prepare_snapshot_directory(
     *,
     snapshots_directory: Path,
-    bundle: NormalizedFootballBundle,
-    artifact: RawSourceArtifact,
-    competition_id: str,
-    season_label: str,
-    source_competition_code: str,
-    source_season_code: str,
-    source_url: str,
-    source_observed_at_utc: datetime,
-    unknown_source_columns: tuple[str, ...],
-    missing_optional_source_columns: tuple[str, ...],
-    http_status: int | None = None,
-    http_content_type: str | None = None,
-    http_content_length: int | None = None,
-    http_etag: str | None = None,
-    http_last_modified: str | None = None,
-    http_final_url: str | None = None,
+    spec: SnapshotSpec,
+    tables: dict[str, pa.Table],
     snapshot_id: str | uuid.UUID | None = None,
 ) -> PreparedSnapshot:
-    """Write Parquet files and manifest into a temporary directory under snapshots."""
+    """Write Parquet files and a manifest into a temporary directory under snapshots."""
     normalized_id = normalize_uuid(snapshot_id)
-    season_id = build_season_id(competition_id=competition_id, label=season_label)
-    source_version = build_source_version(
-        source_competition_code=source_competition_code,
-        source_season_code=source_season_code,
-        raw_sha256=artifact.checksum_sha256,
-    )
-    relative_directory = build_relative_snapshot_directory(
-        competition_id=competition_id,
-        season_label=season_label,
-        snapshot_id=normalized_id,
-    )
-    relative_manifest = validate_relative_snapshot_path(
-        PurePosixPath(relative_directory, MANIFEST_FILENAME).as_posix()
-    )
+    relative_directory = spec.identity.relative_directory(normalized_id)
+    relative_manifest = spec.identity.relative_manifest_path(normalized_id)
+
     snapshots_root = Path(snapshots_directory).resolve()
     snapshots_root.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(
@@ -117,72 +95,48 @@ def prepare_snapshot_directory(
         )
     )
     try:
-        file_meta = write_bundle_parquet_files(temp_dir, bundle)
+        file_meta = write_suite_parquet_files(temp_dir, suite=spec.suite, tables=tables)
         document = build_manifest_document(
             snapshot_id=normalized_id,
-            source_name=artifact.source_name,
-            source_version=source_version,
-            source_competition_code=source_competition_code,
-            source_season_code=source_season_code,
-            competition_id=competition_id,
-            season_id=season_id,
-            source_url=source_url,
-            source_observed_at_utc=source_observed_at_utc,
-            raw_relative_path=artifact.relative_path,
-            raw_checksum_sha256=artifact.checksum_sha256,
-            raw_bytes=artifact.byte_count,
-            raw_encoding=artifact.encoding,
-            http_status=http_status,
-            http_content_type=http_content_type,
-            http_content_length=http_content_length,
-            http_etag=http_etag,
-            http_last_modified=http_last_modified,
-            http_final_url=http_final_url,
-            bundle=bundle,
+            spec=spec,
             file_meta=file_meta,
             snapshot_relative_directory=relative_directory,
-            unknown_source_columns=unknown_source_columns,
-            missing_optional_source_columns=missing_optional_source_columns,
         )
         _, manifest_checksum = write_manifest(temp_dir / MANIFEST_FILENAME, document)
     except BaseException:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
-    metadata: dict[str, JsonValue] = {
-        "competition_id": competition_id,
-        "season_id": season_id,
-        "source_competition_code": source_competition_code,
-        "source_season_code": source_season_code,
-        "games_count": len(bundle.games),
-        "teams_count": len(bundle.teams),
-        "odds_quotes_count": len(bundle.odds_1x2),
-        "statistics_rows_count": len(bundle.post_match_statistics),
-    }
+    row_counts = tuple(
+        (name, int(file_meta[name]["row_count"]))  # type: ignore[call-overload]
+        for name in spec.suite.dataset_names
+    )
+    byte_count = sum(
+        int(file_meta[name]["byte_count"])  # type: ignore[call-overload]
+        for name in spec.suite.dataset_names
+    )
+    metrics = SnapshotMetrics(
+        row_counts=row_counts,
+        file_count=len(spec.suite.descriptors),
+        byte_count=byte_count,
+        quality_summary=tuple(
+            (key, spec.quality_summary[key]) for key in sorted(spec.quality_summary)
+        ),
+        warnings_count=len(spec.warnings),
+    )
     return PreparedSnapshot(
         snapshot_id=normalized_id,
         temporary_directory=temp_dir,
         relative_directory=relative_directory,
         relative_manifest_path=relative_manifest,
-        source_version=source_version,
-        source_name=artifact.source_name,
-        schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
-        snapshot_type=FOOTBALL_INGESTION_SNAPSHOT_TYPE,
         manifest_version=MANIFEST_VERSION,
-        competition_id=competition_id,
-        season_id=season_id,
-        source_competition_code=source_competition_code,
-        source_season_code=source_season_code,
+        identity=spec.identity,
+        suite=spec.suite,
         manifest_checksum_sha256=manifest_checksum,
-        games_count=len(bundle.games),
-        teams_count=len(bundle.teams),
-        odds_quotes_count=len(bundle.odds_1x2),
-        statistics_rows_count=len(bundle.post_match_statistics),
-        duplicate_rows_discarded=bundle.duplicate_rows_discarded,
-        warnings_count=len(bundle.warnings),
-        source_file_sha256=artifact.checksum_sha256,
-        source_observed_at_utc=source_observed_at_utc,
-        metadata=metadata,
+        metrics=metrics,
+        raw_artifact_sha256=spec.raw_artifact.checksum_sha256,
+        source_observed_at_utc=spec.source_observed_at_utc,
+        domain_metadata=dict(spec.domain_metadata),
     )
 
 

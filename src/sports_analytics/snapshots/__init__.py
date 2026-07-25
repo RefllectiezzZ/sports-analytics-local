@@ -1,11 +1,29 @@
-"""Immutable Parquet snapshot preparation, publication, and verification."""
+"""Sport-agnostic immutable Parquet snapshot preparation, publication, and verification.
 
-from sports_analytics.sports.football.contracts import (
-    FOOTBALL_CANONICAL_SCHEMA_VERSION,
-    FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+This package must never import a sport-specific package: every domain fact
+arrives through :class:`sports_analytics.snapshots.spec.SnapshotSpec`.
+"""
+
+from sports_analytics.snapshots.spec import (
+    MANIFEST_FILENAME,
+    MANIFEST_VERSION,
+    DatasetDescriptor,
+    SnapshotDatasetSuite,
+    SnapshotHttpMetadata,
+    SnapshotIdentity,
+    SnapshotMetrics,
+    SnapshotSpec,
 )
+from sports_analytics.snapshots.types import PublishedSnapshot
 
 __all__ = [
-    "FOOTBALL_CANONICAL_SCHEMA_VERSION",
-    "FOOTBALL_INGESTION_SNAPSHOT_TYPE",
+    "MANIFEST_FILENAME",
+    "MANIFEST_VERSION",
+    "DatasetDescriptor",
+    "PublishedSnapshot",
+    "SnapshotDatasetSuite",
+    "SnapshotHttpMetadata",
+    "SnapshotIdentity",
+    "SnapshotMetrics",
+    "SnapshotSpec",
 ]

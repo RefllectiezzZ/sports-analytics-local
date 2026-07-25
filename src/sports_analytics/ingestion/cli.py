@@ -32,9 +32,10 @@ from sports_analytics.data.types import (
     validate_sha256_checksum,
 )
 from sports_analytics.ingestion.football import enqueue_football_data_ingestion
+from sports_analytics.ingestion.snapshot_specs import resolve_snapshot_suite
 from sports_analytics.ingestion.types import DEFAULT_INGESTION_MAXIMUM_ATTEMPTS
 from sports_analytics.snapshots.reader import verify_snapshot_directory
-from sports_analytics.sources.catalog import list_source_names
+from sports_analytics.sources.catalog import list_source_descriptors
 from sports_analytics.sources.football_data_co_uk.catalog import (
     get_competition,
     list_competitions,
@@ -245,8 +246,12 @@ def _enqueue(args: argparse.Namespace) -> int:
 
 def _list_sources(args: argparse.Namespace) -> int:
     validate_configuration(config_path=args.config, env_file=args.env_file)
-    for name in list_source_names():
-        print(name)
+    for descriptor in list_source_descriptors():
+        print(
+            f"{descriptor.source_id}\t{descriptor.display_name}\t{descriptor.role.value}\t"
+            f"{descriptor.adapter_version}\t{','.join(descriptor.capability_values)}\t"
+            f"{','.join(descriptor.supported_sports)}"
+        )
     return SUCCESS_EXIT
 
 
@@ -301,14 +306,21 @@ def _verify_snapshot(config: str | None, env_file: str | None, snapshot_id: str)
         raise SnapshotVerificationError(
             f"snapshot {normalized_id} is not READY (status={record.status.value})"
         )
+    suite = resolve_snapshot_suite(
+        snapshot_type=record.snapshot_type,
+        schema_version=record.schema_version,
+    )
     result = verify_snapshot_directory(
         snapshots_directory=paths.snapshots_directory,
         relative_manifest_path=record.relative_path,
+        suite=suite,
         expected_snapshot=record,
     )
+    counts = " ".join(f"{name}={count}" for name, count in result.row_counts)
     print(
         f"verified snapshot_id={result.snapshot_id} "
-        f"games={result.games_count} files={result.file_count} "
+        f"type={result.snapshot_type} schema={result.schema_version} "
+        f"files={result.file_count} rows[{counts}] "
         f"manifest_sha256={result.manifest_checksum_sha256}"
     )
     return SUCCESS_EXIT

@@ -1,71 +1,30 @@
-"""Deterministic football UUID and season identifier helpers."""
+"""Football season parsing and football source-version identifiers.
+
+Canonical and source-scoped entity identifiers live in
+:mod:`sports_analytics.sports.identifiers` because they are sport-agnostic.
+"""
 
 from __future__ import annotations
 
 import re
-import uuid
 from typing import Final
 
 from sports_analytics.core.exceptions import NormalizationError, RepositoryError
 from sports_analytics.data.types import validate_identifier
-
-# Project-owned UUIDv5 namespace for football entity identity.
-FOOTBALL_ENTITY_NAMESPACE: Final[uuid.UUID] = uuid.UUID("6f8a2c91-4d3e-5b7a-9c1d-2e4f6a8b0c1d")
+from sports_analytics.sports.identifiers import build_season_id as build_season_id
 
 _CANONICAL_SEASON_PATTERN: Final[re.Pattern[str]] = re.compile(r"^([0-9]{4})-([0-9]{4})$")
 # Conservative supported start years for two-digit source season codes.
 MIN_SUPPORTED_START_YEAR: Final[int] = 1993
 MAX_SUPPORTED_START_YEAR: Final[int] = 2092
 
-
-def build_team_id(*, source_name: str, normalized_source_team_key: str) -> str:
-    """Return a deterministic UUIDv5 for a source-scoped team identity."""
-    key = f"team|{source_name}|{normalized_source_team_key}"
-    return str(uuid.uuid5(FOOTBALL_ENTITY_NAMESPACE, key))
-
-
-def build_game_id(*, source_game_key: str) -> str:
-    """Return a deterministic UUIDv5 for a canonical source game key."""
-    key = f"game|{source_game_key}"
-    return str(uuid.uuid5(FOOTBALL_ENTITY_NAMESPACE, key))
-
-
-def build_quote_id(
-    *,
-    game_id: str,
-    market_type: str,
-    selection: str,
-    provider_type: str,
-    provider_id: str,
-    quote_phase: str,
-    source_column_family: str,
-) -> str:
-    """Return a deterministic UUIDv5 for a 1X2 odds quote identity."""
-    key = (
-        f"quote|{game_id}|{market_type}|{selection}|{provider_type}|"
-        f"{provider_id}|{quote_phase}|{source_column_family}"
-    )
-    return str(uuid.uuid5(FOOTBALL_ENTITY_NAMESPACE, key))
-
-
-def build_source_game_key(
-    *,
-    source_name: str,
-    competition_id: str,
-    season_id: str,
-    event_date: str,
-    home_team_key: str,
-    away_team_key: str,
-) -> str:
-    """Construct the canonical source game key used for game identity."""
-    return (
-        f"{source_name}|{competition_id}|{season_id}|{event_date}|{home_team_key}|{away_team_key}"
-    )
-
-
-def build_season_id(*, competition_id: str, label: str) -> str:
-    """Return a stable season identifier from competition and canonical label."""
-    return validate_identifier(f"{competition_id}:{label}", field_name="season_id")
+__all__ = [
+    "MAX_SUPPORTED_START_YEAR",
+    "MIN_SUPPORTED_START_YEAR",
+    "build_season_id",
+    "build_source_version",
+    "parse_canonical_season",
+]
 
 
 def parse_canonical_season(value: str) -> tuple[str, int, int, str]:

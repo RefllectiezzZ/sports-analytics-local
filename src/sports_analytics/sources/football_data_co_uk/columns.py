@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from sports_analytics.sports.football.normalization import SUPPORTED_ODDS_COLUMNS
+from sports_analytics.sports.football.markets import SUPPORTED_ODDS_COLUMNS
 
 REQUIRED_COLUMNS: Final[tuple[str, ...]] = (
     "Div",

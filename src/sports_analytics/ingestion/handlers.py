@@ -85,12 +85,14 @@ def ingest_football_data_csv_handler(
         )
         context.logger.info(
             "ingestion complete job_id=%s snapshot_id=%s competition_id=%s "
-            "season_id=%s games=%s reused=%s",
+            "season_id=%s events=%s quotes=%s unresolved=%s reused=%s",
             context.job_id,
             result.snapshot_id,
             result.competition_id,
             result.season_id,
-            result.games_count,
+            result.events_count,
+            result.market_quotes_count,
+            result.unresolved_event_count,
             result.snapshot_reused,
         )
         return result.to_json()

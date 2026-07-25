@@ -1,23 +1,46 @@
-"""Normalize Football-Data.co.uk rows into football-canonical-v1 records."""
+"""Normalize Football-Data.co.uk rows into canonical football-canonical-v2 records."""
 
 from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
 from typing import Final
 from zoneinfo import ZoneInfo
 
 from sports_analytics.core.exceptions import NormalizationError
 from sports_analytics.data.codec import format_utc_timestamp
+from sports_analytics.markets.contracts import (
+    MarketStatus,
+    OddsQuote,
+    QuoteQualityStatus,
+    QuoteTimestampPrecision,
+    SelectionStatus,
+)
+from sports_analytics.markets.identifiers import build_quote_id
+from sports_analytics.markets.schemas import quote_sort_key
+from sports_analytics.sports.contracts import (
+    CanonicalEvent,
+    CanonicalParticipant,
+    CompetitionRecord,
+    EventReconciliation,
+    EventStatus,
+    IngestedEvent,
+    IngestedParticipant,
+    OutcomeAvailability,
+    ParticipantType,
+    ReconciliationState,
+    SeasonRecord,
+    SourceEventReference,
+    SourceParticipantReference,
+    StartTimePrecision,
+)
 from sports_analytics.sports.football.contracts import FOOTBALL_CANONICAL_SCHEMA_VERSION
-from sports_analytics.sports.football.identifiers import (
-    build_game_id,
-    build_quote_id,
-    build_season_id,
-    build_source_game_key,
-    build_team_id,
+from sports_analytics.sports.football.markets import (
+    MATCH_RESULT_1X2_OUTCOMES,
+    SUPPORTED_ODDS_FAMILIES,
+    OddsColumnFamily,
+    match_result_1x2_selection,
 )
 from sports_analytics.sports.football.validation import (
     MAX_CARDS,
@@ -33,100 +56,38 @@ from sports_analytics.sports.football.validation import (
     parse_optional_int,
     parse_required_pair,
 )
-from sports_analytics.sports.identifiers import SPORT_FOOTBALL
+from sports_analytics.sports.identifiers import (
+    SPORT_FOOTBALL,
+    build_canonical_event_id,
+    build_canonical_participant_id,
+    build_season_id,
+    build_source_event_id,
+    build_source_event_key,
+    build_source_participant_id,
+    build_source_participant_key,
+)
+from sports_analytics.sports.reconciliation import (
+    RECONCILIATION_POLICY_VERSION,
+    ReconciliationCandidate,
+    reconcile_candidates,
+)
 from sports_analytics.sports.types import CompetitionType
 
 PINNACLE_CAUTION_CUTOFF: Final[date] = date(2025, 7, 23)
 SOURCE_QUALITY_POLICY_VERSION: Final[str] = "football-data-co-uk-policy-v1"
-MARKET_TYPE_1X2: Final[str] = "match-result-1x2"
-QUOTE_TIMESTAMP_PRECISION: Final[str] = "snapshot-observation-only"
 AVAILABILITY_POST_MATCH: Final[str] = "post-match"
 
 
 @dataclass(frozen=True, slots=True)
-class CompetitionRecord:
-    competition_id: str
-    sport_code: str
-    display_name: str
-    country_code: str
-    competition_type: str
-    source_name: str
-    source_competition_code: str
-    timezone: str
-    schema_version: str
+class PostMatchStatisticsRecord:
+    """Football statistics that only exist after an event has been played."""
 
-
-@dataclass(frozen=True, slots=True)
-class SeasonRecord:
-    season_id: str
-    competition_id: str
-    label: str
-    start_year: int
-    end_year: int
-    source_season_code: str
-    schema_version: str
-
-
-@dataclass(frozen=True, slots=True)
-class TeamRecord:
-    team_id: str
-    sport_code: str
-    source_name: str
-    source_team_key: str
-    display_name: str
-    normalized_name: str
-    schema_version: str
-
-
-@dataclass(frozen=True, slots=True)
-class GameRecord:
-    game_id: str
-    sport_code: str
-    competition_id: str
-    season_id: str
-    source_name: str
-    source_game_key: str
-    source_row_number: int
-    event_date: date
-    scheduled_start_utc: datetime | None
-    start_time_precision: str
-    status: str
-    home_team_id: str
-    away_team_id: str
-    full_time_home_goals: int | None
-    full_time_away_goals: int | None
-    full_time_result: str | None
+    canonical_event_id: str
+    source_event_id: str
+    availability_stage: str
     half_time_home_goals: int | None
     half_time_away_goals: int | None
     half_time_result: str | None
-    source_observed_at_utc: datetime
-    source_file_sha256: str
-    schema_version: str
-
-
-@dataclass(frozen=True, slots=True)
-class OddsQuoteRecord:
-    quote_id: str
-    game_id: str
-    market_type: str
-    selection: str
-    provider_type: str
-    provider_id: str
-    quote_phase: str
-    decimal_odds: Decimal
-    source_column: str
-    quoted_at_utc: datetime | None
-    source_observed_at_utc: datetime
-    quote_timestamp_precision: str
-    source_file_sha256: str
-    quality_status: str
-    quality_reason: str | None
-    schema_version: str
-
-
-@dataclass(frozen=True, slots=True)
-class PostMatchStatisticsRecord:
-    game_id: str
     referee: str | None
     home_shots: int | None
     away_shots: int | None
@@ -140,90 +101,34 @@ class PostMatchStatisticsRecord:
     away_yellow_cards: int | None
     home_red_cards: int | None
     away_red_cards: int | None
-    availability_stage: str
     source_observed_at_utc: datetime
     source_file_sha256: str
     schema_version: str
 
 
 @dataclass(frozen=True, slots=True)
-class OddsColumnFamily:
-    provider_type: str
-    provider_id: str
-    quote_phase: str
-    home_column: str
-    draw_column: str
-    away_column: str
-    family_id: str
-
-
-# Explicit supported odds column families only.
-SUPPORTED_ODDS_FAMILIES: Final[tuple[OddsColumnFamily, ...]] = (
-    OddsColumnFamily("bookmaker", "bet365", "opening", "B365H", "B365D", "B365A", "b365-opening"),
-    OddsColumnFamily(
-        "bookmaker", "bet365", "closing", "B365CH", "B365CD", "B365CA", "b365-closing"
-    ),
-    OddsColumnFamily("bookmaker", "pinnacle", "opening", "PSH", "PSD", "PSA", "pinnacle-opening"),
-    OddsColumnFamily(
-        "bookmaker", "pinnacle", "closing", "PSCH", "PSCD", "PSCA", "pinnacle-closing"
-    ),
-    OddsColumnFamily(
-        "source-market-average",
-        "market-average",
-        "opening",
-        "AvgH",
-        "AvgD",
-        "AvgA",
-        "avg-opening",
-    ),
-    OddsColumnFamily(
-        "source-market-average",
-        "market-average",
-        "closing",
-        "AvgCH",
-        "AvgCD",
-        "AvgCA",
-        "avg-closing",
-    ),
-    OddsColumnFamily(
-        "source-market-maximum",
-        "market-maximum",
-        "opening",
-        "MaxH",
-        "MaxD",
-        "MaxA",
-        "max-opening",
-    ),
-    OddsColumnFamily(
-        "source-market-maximum",
-        "market-maximum",
-        "closing",
-        "MaxCH",
-        "MaxCD",
-        "MaxCA",
-        "max-closing",
-    ),
-)
-
-SUPPORTED_ODDS_COLUMNS: Final[frozenset[str]] = frozenset(
-    column
-    for family in SUPPORTED_ODDS_FAMILIES
-    for column in (family.home_column, family.draw_column, family.away_column)
-)
-
-
-@dataclass(frozen=True, slots=True)
 class NormalizedFootballBundle:
+    """Canonical football datasets produced by one ingestion."""
+
     competitions: tuple[CompetitionRecord, ...]
     seasons: tuple[SeasonRecord, ...]
-    teams: tuple[TeamRecord, ...]
-    games: tuple[GameRecord, ...]
-    odds_1x2: tuple[OddsQuoteRecord, ...]
+    participants: tuple[IngestedParticipant, ...]
+    events: tuple[IngestedEvent, ...]
+    unresolved_reconciliations: tuple[EventReconciliation, ...]
+    market_quotes: tuple[OddsQuote, ...]
     post_match_statistics: tuple[PostMatchStatisticsRecord, ...]
     duplicate_rows_discarded: int
     warnings: tuple[str, ...]
     pinnacle_caution_quote_count: int
     source_policy_version: str
+    reconciliation_policy_version: str
+
+    @property
+    def reconciliations(self) -> tuple[EventReconciliation, ...]:
+        """Return every reconciliation decision, resolved and unresolved."""
+        combined = [event.reconciliation for event in self.events]
+        combined.extend(self.unresolved_reconciliations)
+        return tuple(sorted(combined, key=lambda item: (item.source_name, item.source_event_id)))
 
 
 def normalize_team_name(value: str) -> tuple[str, str]:
@@ -333,15 +238,30 @@ def _normalize_referee(value: str) -> str | None:
 def _pinnacle_quality(event_date: date) -> tuple[str, str | None]:
     if event_date >= PINNACLE_CAUTION_CUTOFF:
         return (
-            "caution",
+            QuoteQualityStatus.CAUTION.value,
             "upstream source reports reliability concerns for Pinnacle fields "
             f"on or after {PINNACLE_CAUTION_CUTOFF.isoformat()}",
         )
-    return "source-provided", None
+    return QuoteQualityStatus.SOURCE_PROVIDED.value, None
 
 
-def _aggregate_quality() -> tuple[str, str | None]:
-    return "source-provided-aggregate", None
+def _family_quality(family: OddsColumnFamily, event_date: date) -> tuple[str, str | None]:
+    if family.provider_id == "pinnacle":
+        return _pinnacle_quality(event_date)
+    if family.provider_type.startswith("source-market"):
+        return QuoteQualityStatus.SOURCE_PROVIDED_AGGREGATE.value, None
+    return QuoteQualityStatus.SOURCE_PROVIDED.value, None
+
+
+@dataclass(frozen=True, slots=True)
+class _RowIdentity:
+    source_event_key: str
+    source_event_id: str
+    canonical_event_id: str
+    home_canonical_participant_id: str
+    away_canonical_participant_id: str
+    event_date: date
+    scheduled_start_utc: datetime | None
 
 
 def normalize_football_rows(
@@ -388,24 +308,20 @@ def normalize_football_rows(
         schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
     )
 
-    teams_by_key: dict[str, TeamRecord] = {}
+    participants_by_key: dict[str, IngestedParticipant] = {}
     display_by_key: dict[str, str] = {}
-    games_by_key: dict[str, GameRecord] = {}
-    exact_row_signatures: dict[tuple[tuple[str, str], ...], str] = {}
+    canonical_events: dict[str, CanonicalEvent] = {}
+    source_references: dict[str, SourceEventReference] = {}
+    candidates: list[ReconciliationCandidate] = []
+    exact_row_signatures: set[tuple[tuple[str, str], ...]] = set()
     duplicate_rows_discarded = 0
     warnings: list[str] = []
-    odds_quotes: list[OddsQuoteRecord] = []
+    quotes: list[OddsQuote] = []
     statistics_rows: list[PostMatchStatisticsRecord] = []
     pinnacle_caution_quote_count = 0
 
     for index, row in enumerate(rows, start=2):  # header is row 1; data starts at 2
         signature = tuple(sorted(row.items()))
-        source_game_preview = _preview_game_key(
-            row=row,
-            source_name=source_name,
-            competition_id=competition_id,
-            season_id=season_id,
-        )
         if signature in exact_row_signatures:
             duplicate_rows_discarded += 1
             continue
@@ -425,30 +341,25 @@ def normalize_football_rows(
                 )
                 raise NormalizationError(msg)
             display_by_key[key] = display
-            if key not in teams_by_key:
-                team_id = build_team_id(source_name=source_name, normalized_source_team_key=key)
-                teams_by_key[key] = TeamRecord(
-                    team_id=team_id,
-                    sport_code=SPORT_FOOTBALL,
+            if key not in participants_by_key:
+                participants_by_key[key] = _build_participant(
                     source_name=source_name,
-                    source_team_key=key,
+                    normalized_key=key,
                     display_name=display,
-                    normalized_name=key,
-                    schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
                 )
 
         event_date = parse_source_date(row.get("Date", ""))
         kickoff = parse_source_time(row.get("Time", ""))
         if kickoff is None:
             scheduled_start_utc = None
-            start_time_precision = "date-only"
+            start_time_precision = StartTimePrecision.DATE_ONLY.value
         else:
             scheduled_start_utc = combine_local_kickoff(
                 event_date,
                 kickoff,
                 timezone_name=timezone_name,
             )
-            start_time_precision = "minute"
+            start_time_precision = StartTimePrecision.MINUTE.value
 
         fthg = parse_optional_int(row.get("FTHG", ""), field_name="FTHG", maximum=MAX_GOALS)
         ftag = parse_optional_int(row.get("FTAG", ""), field_name="FTAG", maximum=MAX_GOALS)
@@ -457,13 +368,15 @@ def normalize_football_rows(
             msg = f"row {index}: FTHG/FTAG must both be present or both empty"
             raise NormalizationError(msg)
         if fthg is None:
-            status = "scheduled"
+            status = EventStatus.SCHEDULED.value
             full_time_result = None
+            outcome_stage = OutcomeAvailability.PRE_EVENT_UNAVAILABLE.value
             if ftr_raw:
                 msg = f"row {index}: FTR must be empty for scheduled games"
                 raise NormalizationError(msg)
         else:
-            status = "finished"
+            status = EventStatus.FINISHED.value
+            outcome_stage = OutcomeAvailability.POST_EVENT.value
             if not ftr_raw:
                 msg = f"row {index}: FTR is required for finished games"
                 raise NormalizationError(msg)
@@ -496,248 +409,399 @@ def normalize_football_rows(
                 msg = f"row {index}: HTR inconsistent with HTHG/HTAG"
                 raise NormalizationError(msg)
 
-        source_game_key = build_source_game_key(
+        home_participant = participants_by_key[home_key]
+        away_participant = participants_by_key[away_key]
+        identity = _build_row_identity(
             source_name=source_name,
             competition_id=competition_id,
             season_id=season_id,
-            event_date=event_date.isoformat(),
-            home_team_key=home_key,
-            away_team_key=away_key,
+            event_date=event_date,
+            scheduled_start_utc=scheduled_start_utc,
+            home=home_participant,
+            away=away_participant,
         )
-        if source_game_key in games_by_key:
+        if identity.source_event_key in source_references:
             msg = f"row {index}: conflicting duplicate source game key"
             raise NormalizationError(msg)
-        del source_game_preview
 
-        game_id = build_game_id(source_game_key=source_game_key)
-        game = GameRecord(
-            game_id=game_id,
+        canonical_events[identity.source_event_id] = CanonicalEvent(
+            canonical_event_id=identity.canonical_event_id,
             sport_code=SPORT_FOOTBALL,
             competition_id=competition_id,
             season_id=season_id,
-            source_name=source_name,
-            source_game_key=source_game_key,
-            source_row_number=index,
             event_date=event_date,
             scheduled_start_utc=scheduled_start_utc,
             start_time_precision=start_time_precision,
             status=status,
-            home_team_id=teams_by_key[home_key].team_id,
-            away_team_id=teams_by_key[away_key].team_id,
-            full_time_home_goals=fthg,
-            full_time_away_goals=ftag,
-            full_time_result=full_time_result,
-            half_time_home_goals=hthg,
-            half_time_away_goals=htag,
-            half_time_result=half_time_result,
+            home_canonical_participant_id=identity.home_canonical_participant_id,
+            away_canonical_participant_id=identity.away_canonical_participant_id,
+            home_score=fthg,
+            away_score=ftag,
+            result_code=full_time_result,
+            outcome_availability_stage=outcome_stage,
+            schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+        )
+        source_references[identity.source_event_id] = SourceEventReference(
+            source_event_id=identity.source_event_id,
+            source_name=source_name,
+            source_event_key=identity.source_event_key,
+            canonical_event_id=identity.canonical_event_id,
+            source_row_number=index,
             source_observed_at_utc=observed,
             source_file_sha256=source_file_sha256,
             schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
         )
-        games_by_key[source_game_key] = game
-        exact_row_signatures[signature] = source_game_key
+        candidates.append(
+            ReconciliationCandidate(
+                source_name=source_name,
+                source_event_id=identity.source_event_id,
+                source_event_key=identity.source_event_key,
+                sport_code=SPORT_FOOTBALL,
+                competition_id=competition_id,
+                season_id=season_id,
+                event_date=event_date,
+                scheduled_start_utc=scheduled_start_utc,
+                home_canonical_participant_id=identity.home_canonical_participant_id,
+                away_canonical_participant_id=identity.away_canonical_participant_id,
+                source_observed_at_utc=observed,
+                schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+            )
+        )
+        exact_row_signatures.add(signature)
 
-        # Odds triples
         for family in SUPPORTED_ODDS_FAMILIES:
-            home_odds = parse_decimal_odds(
-                row.get(family.home_column, ""),
-                field_name=family.home_column,
+            family_quotes, caution_count = _family_quotes(
+                row=row,
+                family=family,
+                row_index=index,
+                canonical_event_id=identity.canonical_event_id,
+                source_event_id=identity.source_event_id,
+                event_date=event_date,
+                observed=observed,
+                source_file_sha256=source_file_sha256,
             )
-            draw_odds = parse_decimal_odds(
-                row.get(family.draw_column, ""),
-                field_name=family.draw_column,
-            )
-            away_odds = parse_decimal_odds(
-                row.get(family.away_column, ""),
-                field_name=family.away_column,
-            )
-            present = [value is not None for value in (home_odds, draw_odds, away_odds)]
-            if not any(present):
-                continue
-            if not all(present):
-                msg = (
-                    f"row {index}: odds family {family.family_id} requires a complete H/D/A triple"
-                )
-                raise NormalizationError(msg)
-            assert home_odds is not None and draw_odds is not None and away_odds is not None
-            if family.provider_id == "pinnacle":
-                quality_status, quality_reason = _pinnacle_quality(event_date)
-                if quality_status == "caution":
-                    pinnacle_caution_quote_count += 3
-            elif family.provider_type.startswith("source-market"):
-                quality_status, quality_reason = _aggregate_quality()
-            else:
-                quality_status, quality_reason = "source-provided", None
-            for selection, odds_value, column in (
-                ("home", home_odds, family.home_column),
-                ("draw", draw_odds, family.draw_column),
-                ("away", away_odds, family.away_column),
-            ):
-                quote_id = build_quote_id(
-                    game_id=game_id,
-                    market_type=MARKET_TYPE_1X2,
-                    selection=selection,
-                    provider_type=family.provider_type,
-                    provider_id=family.provider_id,
-                    quote_phase=family.quote_phase,
-                    source_column_family=family.family_id,
-                )
-                odds_quotes.append(
-                    OddsQuoteRecord(
-                        quote_id=quote_id,
-                        game_id=game_id,
-                        market_type=MARKET_TYPE_1X2,
-                        selection=selection,
-                        provider_type=family.provider_type,
-                        provider_id=family.provider_id,
-                        quote_phase=family.quote_phase,
-                        decimal_odds=odds_value,
-                        source_column=column,
-                        quoted_at_utc=None,
-                        source_observed_at_utc=observed,
-                        quote_timestamp_precision=QUOTE_TIMESTAMP_PRECISION,
-                        source_file_sha256=source_file_sha256,
-                        quality_status=quality_status,
-                        quality_reason=quality_reason,
-                        schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
-                    )
-                )
+            quotes.extend(family_quotes)
+            pinnacle_caution_quote_count += caution_count
 
-        if status == "finished":
-            referee = _normalize_referee(row.get("Referee", ""))
-            hs, as_ = parse_required_pair(
-                row.get("HS", ""),
-                row.get("AS", ""),
-                home_field="HS",
-                away_field="AS",
-                maximum=MAX_SHOTS,
+        if status == EventStatus.FINISHED.value:
+            statistics = _build_statistics(
+                row=row,
+                canonical_event_id=identity.canonical_event_id,
+                source_event_id=identity.source_event_id,
+                half_time_home_goals=hthg,
+                half_time_away_goals=htag,
+                half_time_result=half_time_result,
+                observed=observed,
+                source_file_sha256=source_file_sha256,
             )
-            hst, ast = parse_required_pair(
-                row.get("HST", ""),
-                row.get("AST", ""),
-                home_field="HST",
-                away_field="AST",
-                maximum=MAX_SHOTS,
-            )
-            hc, ac = parse_required_pair(
-                row.get("HC", ""),
-                row.get("AC", ""),
-                home_field="HC",
-                away_field="AC",
-                maximum=MAX_CORNERS,
-            )
-            hf, af = parse_required_pair(
-                row.get("HF", ""),
-                row.get("AF", ""),
-                home_field="HF",
-                away_field="AF",
-                maximum=MAX_FOULS,
-            )
-            hy, ay = parse_required_pair(
-                row.get("HY", ""),
-                row.get("AY", ""),
-                home_field="HY",
-                away_field="AY",
-                maximum=MAX_CARDS,
-            )
-            hr, ar = parse_required_pair(
-                row.get("HR", ""),
-                row.get("AR", ""),
-                home_field="HR",
-                away_field="AR",
-                maximum=MAX_CARDS,
-            )
-            if any(
-                value is not None
-                for value in (referee, hs, as_, hst, ast, hc, ac, hf, af, hy, ay, hr, ar)
-            ):
-                statistics_rows.append(
-                    PostMatchStatisticsRecord(
-                        game_id=game_id,
-                        referee=referee,
-                        home_shots=hs,
-                        away_shots=as_,
-                        home_shots_on_target=hst,
-                        away_shots_on_target=ast,
-                        home_corners=hc,
-                        away_corners=ac,
-                        home_fouls=hf,
-                        away_fouls=af,
-                        home_yellow_cards=hy,
-                        away_yellow_cards=ay,
-                        home_red_cards=hr,
-                        away_red_cards=ar,
-                        availability_stage=AVAILABILITY_POST_MATCH,
-                        source_observed_at_utc=observed,
-                        source_file_sha256=source_file_sha256,
-                        schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
-                    )
-                )
+            if statistics is not None:
+                statistics_rows.append(statistics)
 
     if duplicate_rows_discarded:
         warnings.append(f"discarded_exact_duplicate_rows={duplicate_rows_discarded}")
 
-    games = sorted(
-        games_by_key.values(),
+    reconciliations = reconcile_candidates(tuple(candidates))
+    events: list[IngestedEvent] = []
+    unresolved: list[EventReconciliation] = []
+    for reconciliation in reconciliations:
+        if reconciliation.state == ReconciliationState.UNRESOLVED.value:
+            unresolved.append(reconciliation)
+            continue
+        canonical = canonical_events[reconciliation.source_event_id]
+        events.append(
+            IngestedEvent(
+                canonical=canonical,
+                source_reference=source_references[reconciliation.source_event_id],
+                reconciliation=reconciliation,
+            )
+        )
+    if unresolved:
+        warnings.append(f"unresolved_events={len(unresolved)}")
+
+    resolved_event_ids = {event.source_reference.source_event_id for event in events}
+    quotes = [quote for quote in quotes if quote.source_event_id in resolved_event_ids]
+    statistics_rows = [
+        item for item in statistics_rows if item.source_event_id in resolved_event_ids
+    ]
+
+    sorted_events = sorted(
+        events,
         key=lambda item: (
-            item.event_date.toordinal(),
+            item.canonical.event_date.toordinal(),
             # Null scheduled_start_utc sorts after non-null (documented policy).
-            1 if item.scheduled_start_utc is None else 0,
-            format_utc_timestamp(item.scheduled_start_utc)
-            if item.scheduled_start_utc is not None
+            1 if item.canonical.scheduled_start_utc is None else 0,
+            format_utc_timestamp(item.canonical.scheduled_start_utc)
+            if item.canonical.scheduled_start_utc is not None
             else "",
-            item.home_team_id,
-            item.away_team_id,
-            item.game_id,
+            item.canonical.home_canonical_participant_id,
+            item.canonical.away_canonical_participant_id,
+            item.canonical.canonical_event_id,
         ),
     )
-    teams = sorted(teams_by_key.values(), key=lambda item: item.team_id)
-    odds_sorted = sorted(
-        odds_quotes,
-        key=lambda item: (
-            item.game_id,
-            item.quote_phase,
-            item.provider_type,
-            item.provider_id,
-            item.selection,
-            item.quote_id,
-        ),
+    sorted_participants = sorted(
+        participants_by_key.values(),
+        key=lambda item: item.canonical.canonical_participant_id,
     )
-    stats_sorted = sorted(statistics_rows, key=lambda item: item.game_id)
+    sorted_quotes = sorted(quotes, key=quote_sort_key)
+    sorted_statistics = sorted(statistics_rows, key=lambda item: item.canonical_event_id)
 
     return NormalizedFootballBundle(
         competitions=(competition,),
         seasons=(season,),
-        teams=tuple(teams),
-        games=tuple(games),
-        odds_1x2=tuple(odds_sorted),
-        post_match_statistics=tuple(stats_sorted),
+        participants=tuple(sorted_participants),
+        events=tuple(sorted_events),
+        unresolved_reconciliations=tuple(unresolved),
+        market_quotes=tuple(sorted_quotes),
+        post_match_statistics=tuple(sorted_statistics),
         duplicate_rows_discarded=duplicate_rows_discarded,
         warnings=tuple(sorted(warnings)),
         pinnacle_caution_quote_count=pinnacle_caution_quote_count,
         source_policy_version=SOURCE_QUALITY_POLICY_VERSION,
+        reconciliation_policy_version=RECONCILIATION_POLICY_VERSION,
     )
 
 
-def _preview_game_key(
+def _build_participant(
     *,
-    row: dict[str, str],
+    source_name: str,
+    normalized_key: str,
+    display_name: str,
+) -> IngestedParticipant:
+    canonical_id = build_canonical_participant_id(
+        sport_code=SPORT_FOOTBALL,
+        participant_type=ParticipantType.TEAM.value,
+        canonical_key=normalized_key,
+    )
+    source_key = build_source_participant_key(
+        source_name=source_name,
+        sport_code=SPORT_FOOTBALL,
+        normalized_name=normalized_key,
+    )
+    return IngestedParticipant(
+        canonical=CanonicalParticipant(
+            canonical_participant_id=canonical_id,
+            sport_code=SPORT_FOOTBALL,
+            participant_type=ParticipantType.TEAM.value,
+            canonical_key=normalized_key,
+            display_name=display_name,
+            schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+        ),
+        source_reference=SourceParticipantReference(
+            source_participant_id=build_source_participant_id(source_participant_key=source_key),
+            source_name=source_name,
+            source_participant_key=source_key,
+            canonical_participant_id=canonical_id,
+            participant_type=ParticipantType.TEAM.value,
+            display_name=display_name,
+            normalized_name=normalized_key,
+            schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+        ),
+    )
+
+
+def _build_row_identity(
+    *,
     source_name: str,
     competition_id: str,
     season_id: str,
-) -> str:
-    """Best-effort preview used only before full validation (internal)."""
-    try:
-        home_key = normalize_team_name(row.get("HomeTeam", ""))[1]
-        away_key = normalize_team_name(row.get("AwayTeam", ""))[1]
-        event_date = parse_source_date(row.get("Date", "")).isoformat()
-        return build_source_game_key(
-            source_name=source_name,
-            competition_id=competition_id,
-            season_id=season_id,
-            event_date=event_date,
-            home_team_key=home_key,
-            away_team_key=away_key,
+    event_date: date,
+    scheduled_start_utc: datetime | None,
+    home: IngestedParticipant,
+    away: IngestedParticipant,
+) -> _RowIdentity:
+    source_event_key = build_source_event_key(
+        source_name=source_name,
+        competition_id=competition_id,
+        season_id=season_id,
+        event_date=event_date,
+        home_source_participant_key=home.source_reference.source_participant_key,
+        away_source_participant_key=away.source_reference.source_participant_key,
+    )
+    canonical_event_id = build_canonical_event_id(
+        sport_code=SPORT_FOOTBALL,
+        competition_id=competition_id,
+        season_id=season_id,
+        event_date=event_date,
+        home_canonical_participant_id=home.canonical.canonical_participant_id,
+        away_canonical_participant_id=away.canonical.canonical_participant_id,
+    )
+    return _RowIdentity(
+        source_event_key=source_event_key,
+        source_event_id=build_source_event_id(source_event_key=source_event_key),
+        canonical_event_id=canonical_event_id,
+        home_canonical_participant_id=home.canonical.canonical_participant_id,
+        away_canonical_participant_id=away.canonical.canonical_participant_id,
+        event_date=event_date,
+        scheduled_start_utc=scheduled_start_utc,
+    )
+
+
+def _family_quotes(
+    *,
+    row: dict[str, str],
+    family: OddsColumnFamily,
+    row_index: int,
+    canonical_event_id: str,
+    source_event_id: str,
+    event_date: date,
+    observed: datetime,
+    source_file_sha256: str,
+) -> tuple[list[OddsQuote], int]:
+    parsed = {
+        outcome: parse_decimal_odds(
+            row.get(family.column_for(outcome), ""),
+            field_name=family.column_for(outcome),
         )
-    except NormalizationError:
-        return ""
+        for outcome in MATCH_RESULT_1X2_OUTCOMES
+    }
+    present = [value is not None for value in parsed.values()]
+    if not any(present):
+        return [], 0
+    if not all(present):
+        msg = f"row {row_index}: odds family {family.family_id} requires a complete H/D/A triple"
+        raise NormalizationError(msg)
+
+    quality_status, quality_reason = _family_quality(family, event_date)
+    caution = 0
+    if quality_status == QuoteQualityStatus.CAUTION.value:
+        caution = len(MATCH_RESULT_1X2_OUTCOMES)
+
+    quotes: list[OddsQuote] = []
+    for outcome in MATCH_RESULT_1X2_OUTCOMES:
+        odds_value = parsed[outcome]
+        assert odds_value is not None
+        selection = match_result_1x2_selection(outcome)
+        column = family.column_for(outcome)
+        quote_id = build_quote_id(
+            canonical_event_id=canonical_event_id,
+            selection=selection,
+            provider_type=family.provider_type,
+            provider_id=family.provider_id,
+            quote_phase=family.quote_phase,
+            source_field=column,
+        )
+        quotes.append(
+            OddsQuote(
+                quote_id=quote_id,
+                canonical_event_id=canonical_event_id,
+                source_event_id=source_event_id,
+                selection=selection,
+                provider_type=family.provider_type,
+                provider_id=family.provider_id,
+                decimal_odds=odds_value,
+                quote_phase=family.quote_phase,
+                source_observed_at_utc=observed,
+                # Football-Data.co.uk publishes no original quote timestamp.
+                quoted_at_utc=None,
+                quote_timestamp_precision=(QuoteTimestampPrecision.SNAPSHOT_OBSERVATION_ONLY.value),
+                quote_valid_from_utc=None,
+                quote_valid_to_utc=None,
+                market_status=MarketStatus.UNKNOWN.value,
+                selection_status=SelectionStatus.UNKNOWN.value,
+                source_field=column,
+                quality_status=quality_status,
+                quality_reason=quality_reason,
+                source_file_sha256=source_file_sha256,
+                schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+            )
+        )
+    return quotes, caution
+
+
+def _build_statistics(
+    *,
+    row: dict[str, str],
+    canonical_event_id: str,
+    source_event_id: str,
+    half_time_home_goals: int | None,
+    half_time_away_goals: int | None,
+    half_time_result: str | None,
+    observed: datetime,
+    source_file_sha256: str,
+) -> PostMatchStatisticsRecord | None:
+    referee = _normalize_referee(row.get("Referee", ""))
+    hs, as_ = parse_required_pair(
+        row.get("HS", ""),
+        row.get("AS", ""),
+        home_field="HS",
+        away_field="AS",
+        maximum=MAX_SHOTS,
+    )
+    hst, ast = parse_required_pair(
+        row.get("HST", ""),
+        row.get("AST", ""),
+        home_field="HST",
+        away_field="AST",
+        maximum=MAX_SHOTS,
+    )
+    hc, ac = parse_required_pair(
+        row.get("HC", ""),
+        row.get("AC", ""),
+        home_field="HC",
+        away_field="AC",
+        maximum=MAX_CORNERS,
+    )
+    hf, af = parse_required_pair(
+        row.get("HF", ""),
+        row.get("AF", ""),
+        home_field="HF",
+        away_field="AF",
+        maximum=MAX_FOULS,
+    )
+    hy, ay = parse_required_pair(
+        row.get("HY", ""),
+        row.get("AY", ""),
+        home_field="HY",
+        away_field="AY",
+        maximum=MAX_CARDS,
+    )
+    hr, ar = parse_required_pair(
+        row.get("HR", ""),
+        row.get("AR", ""),
+        home_field="HR",
+        away_field="AR",
+        maximum=MAX_CARDS,
+    )
+    values = (
+        referee,
+        hs,
+        as_,
+        hst,
+        ast,
+        hc,
+        ac,
+        hf,
+        af,
+        hy,
+        ay,
+        hr,
+        ar,
+        half_time_home_goals,
+        half_time_away_goals,
+    )
+    if not any(value is not None for value in values):
+        return None
+    return PostMatchStatisticsRecord(
+        canonical_event_id=canonical_event_id,
+        source_event_id=source_event_id,
+        availability_stage=AVAILABILITY_POST_MATCH,
+        half_time_home_goals=half_time_home_goals,
+        half_time_away_goals=half_time_away_goals,
+        half_time_result=half_time_result,
+        referee=referee,
+        home_shots=hs,
+        away_shots=as_,
+        home_shots_on_target=hst,
+        away_shots_on_target=ast,
+        home_corners=hc,
+        away_corners=ac,
+        home_fouls=hf,
+        away_fouls=af,
+        home_yellow_cards=hy,
+        away_yellow_cards=ay,
+        home_red_cards=hr,
+        away_red_cards=ar,
+        source_observed_at_utc=observed,
+        source_file_sha256=source_file_sha256,
+        schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+    )
