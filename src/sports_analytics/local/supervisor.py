@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 from sports_analytics.core.cli import CONFIG_ERROR_EXIT, handle_common_modes
 from sports_analytics.core.cli import build_argument_parser as build_common_argument_parser
@@ -29,6 +29,7 @@ from sports_analytics.jobs.errors import sanitize_error_text
 
 SignalHandler = signal.Handlers | int | Callable[[int, FrameType | None], object] | None
 _LOGGER = logging.getLogger(__name__)
+_SIGNAL_NAMES: Final[tuple[str, ...]] = ("SIGINT", "SIGTERM", "SIGBREAK")
 
 
 class ChildProcess(Protocol):
@@ -182,9 +183,10 @@ class LocalSupervisor:
             raise WorkerError(msg) from exc
 
         stop_requested = threading.Event()
-        originals = self._install_signal_handlers(stop_requested)
+        originals: dict[int, SignalHandler] = {}
         primary_exc: BaseException | None = None
         try:
+            originals = self._install_signal_handlers(stop_requested)
             while True:
                 if stop_requested.is_set():
                     return self._shutdown_child(
@@ -204,7 +206,7 @@ class LocalSupervisor:
             )
             raise
         finally:
-            self._restore_signal_handlers(originals)
+            self._restore_signal_handlers(originals, primary_exc=primary_exc)
 
     def _build_worker_command(
         self,
@@ -232,6 +234,12 @@ class LocalSupervisor:
         self,
         stop_requested: threading.Event,
     ) -> dict[int, SignalHandler]:
+        """Install stop handlers atomically.
+
+        If a later registration fails after earlier handlers were changed, every
+        already-changed handler is restored before the installation exception is
+        re-raised.
+        """
         if not self._install_signals or threading.current_thread() is not threading.main_thread():
             return {}
 
@@ -241,18 +249,52 @@ class LocalSupervisor:
             del signum, frame
             stop_requested.set()
 
-        for signum_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
-            signum = getattr(signal, signum_name, None)
-            if signum is None:
-                continue
-            originals[signum] = signal.getsignal(signum)
-            signal.signal(signum, _handler)
+        try:
+            for signum_name in _SIGNAL_NAMES:
+                signum = getattr(signal, signum_name, None)
+                if signum is None:
+                    continue
+                previous = signal.getsignal(signum)
+                signal.signal(signum, _handler)
+                originals[signum] = previous
+        except BaseException:
+            for signum, previous in list(originals.items()):
+                try:
+                    signal.signal(signum, previous)
+                except Exception:  # noqa: BLE001 - preserve installation failure
+                    pass
+            raise
         return originals
 
-    @staticmethod
-    def _restore_signal_handlers(originals: Mapping[int, SignalHandler]) -> None:
+    def _restore_signal_handlers(
+        self,
+        originals: Mapping[int, SignalHandler],
+        *,
+        primary_exc: BaseException | None = None,
+    ) -> None:
+        """Restore saved handlers without replacing an already-active primary."""
+        restoration_errors: list[BaseException] = []
         for signum, handler in originals.items():
-            signal.signal(signum, handler)
+            try:
+                signal.signal(signum, handler)
+            except BaseException as exc:  # noqa: BLE001 - attempt every restoration
+                restoration_errors.append(exc)
+
+        if not restoration_errors:
+            return
+
+        if primary_exc is not None:
+            for error in restoration_errors:
+                note = f"signal handler restoration also failed: {sanitize_error_text(error)}"
+                _LOGGER.error(note)
+                try:
+                    primary_exc.add_note(note)
+                except (AttributeError, TypeError):
+                    pass
+            return
+
+        msg = "failed to restore signal handlers after supervising worker child"
+        raise WorkerError(msg) from restoration_errors[0]
 
     def _shutdown_child(self, child: ChildProcess, *, shutdown_grace_seconds: float) -> int:
         grace = validate_positive_duration_seconds(
@@ -282,7 +324,11 @@ class LocalSupervisor:
         shutdown_grace_seconds: float,
         primary_exc: BaseException,
     ) -> None:
-        """Best-effort child cleanup that preserves ``primary_exc``."""
+        """Best-effort child cleanup that preserves ``primary_exc``.
+
+        Inside this boundary, a second ``KeyboardInterrupt`` / ``SystemExit`` or
+        other cleanup failure is recorded but never replaces the original primary.
+        """
         try:
             if child.poll() is not None:
                 return
@@ -297,6 +343,8 @@ class LocalSupervisor:
                     "graceful child stop failed during cleanup error=%s",
                     sanitize_error_text(graceful_exc),
                 )
+            except BaseException as base_exc:  # noqa: BLE001 - preserve primary
+                self._attach_cleanup_note(primary_exc, base_exc)
             try:
                 child.wait(timeout=grace)
                 return
@@ -307,15 +355,24 @@ class LocalSupervisor:
                     "child wait failed during cleanup error=%s",
                     sanitize_error_text(wait_exc),
                 )
-            child.kill()
-            child.wait()
-        except Exception as cleanup_exc:  # noqa: BLE001 - never replace primary
-            note = f"child cleanup also failed: {sanitize_error_text(cleanup_exc)}"
-            _LOGGER.error(note)
+            except BaseException as base_exc:  # noqa: BLE001 - preserve primary
+                self._attach_cleanup_note(primary_exc, base_exc)
             try:
-                primary_exc.add_note(note)
-            except (AttributeError, TypeError):
-                pass
+                child.kill()
+                child.wait()
+            except BaseException as kill_exc:  # noqa: BLE001 - preserve primary
+                self._attach_cleanup_note(primary_exc, kill_exc)
+        except BaseException as cleanup_exc:  # noqa: BLE001 - never replace primary
+            self._attach_cleanup_note(primary_exc, cleanup_exc)
+
+    @staticmethod
+    def _attach_cleanup_note(primary_exc: BaseException, cleanup_exc: BaseException) -> None:
+        note = f"child cleanup also failed: {sanitize_error_text(cleanup_exc)}"
+        _LOGGER.error(note)
+        try:
+            primary_exc.add_note(note)
+        except (AttributeError, TypeError):
+            pass
 
 
 def build_argument_parser() -> argparse.ArgumentParser:

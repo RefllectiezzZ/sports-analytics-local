@@ -295,6 +295,10 @@ Behaviour:
 - never uses `shell=True`;
 - forwards only validated config/env paths and worker flags;
 - propagates the child exit code;
+- after successful child creation, signal-handler installation and supervision
+  share one cleanup boundary so no post-spawn exception can orphan the child;
+- installs `SIGINT` / `SIGTERM` / `SIGBREAK` (when available) atomically: a later
+  registration failure restores every already-changed handler before re-raising;
 - parent signal handlers only set a `threading.Event`; process operations run in
   the supervisor loop;
 - requests platform-specific child shutdown on SIGINT/SIGTERM/SIGBREAK exactly
@@ -304,6 +308,9 @@ Behaviour:
 - guarantees bounded child cleanup on unexpected wait/signal errors and on
   parent `KeyboardInterrupt` / `SystemExit`, without replacing an already-active
   primary exception;
+- restores signal handlers after every path; restoration failures never replace an
+  already-active primary exception, and raise `WorkerError` when no primary
+  exists;
 - wraps child-start `OSError` as `WorkerError` so the CLI returns exit code 2
   without a traceback.
 
@@ -324,6 +331,12 @@ rejected for polling, heartbeat, stale-job timeout, retry backoff, and shutdown
 grace settings. Repository lease durations, stale thresholds, heartbeat
 intervals, and wait/join timeouts use the same representable-duration rules so
 `timedelta` and wait APIs cannot overflow.
+
+Datetime arithmetic uses shared `add_duration` / `subtract_duration` helpers that
+require timezone-aware inputs, validate the duration, and convert datetime-range
+overflow or underflow into `RepositoryError` without clamping. Recovery batch
+sizes are bounded by `MAX_RECOVERY_BATCH_SIZE` (`5000`) in configuration and in
+`recover_expired_leases` before any SQLite `LIMIT` binding.
 
 ## Migration 0002 upgrade preflight
 

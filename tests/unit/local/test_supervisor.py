@@ -419,3 +419,215 @@ def test_supervisor_main_reports_popen_failure_without_traceback(
     assert code == 2
     assert "failed to start worker child" in captured.err
     assert "Traceback" not in captured.err
+
+
+class _SignalBoard:
+    """Deterministic fake signal registry for installation/restoration tests."""
+
+    def __init__(self, *, fail_install_on_count: int | None = None) -> None:
+        self.handlers: dict[int, object] = {}
+        self.install_count = 0
+        self.restore_attempts: list[int] = []
+        self.fail_install_on_count = fail_install_on_count
+        self.fail_restore_on: set[int] = set()
+        self.fail_all_restores = False
+
+    def getsignal(self, signum: int) -> object:
+        return self.handlers.get(signum, f"original-{signum}")
+
+    def signal(self, signum: int, handler: object) -> object:
+        previous = self.getsignal(signum)
+        if callable(handler):
+            self.install_count += 1
+            if (
+                self.fail_install_on_count is not None
+                and self.install_count == self.fail_install_on_count
+            ):
+                raise OSError("signal install failed")
+        else:
+            self.restore_attempts.append(signum)
+            if self.fail_all_restores or signum in self.fail_restore_on:
+                raise OSError(f"restore failed for {signum}")
+        self.handlers[signum] = handler
+        return previous
+
+
+def test_partial_signal_installation_failure_restores_and_cleans_child(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _write_config(isolated_cwd)
+    child = FakeChild(exit_code=0)
+    popen = FakePopenFactory(child)
+    board = _SignalBoard(fail_install_on_count=2)
+    monkeypatch.setattr(signal, "getsignal", board.getsignal)
+    monkeypatch.setattr(signal, "signal", board.signal)
+    monkeypatch.setattr(signal, "SIGBREAK", None, raising=False)
+
+    runner = LocalSupervisor(
+        worker_script=isolated_cwd / "worker.py",
+        popen_factory=popen,
+        install_signals=True,
+        platform_name="linux",
+    )
+    with pytest.raises(OSError, match="signal install failed"):
+        runner.run(config=str(config))
+
+    assert board.install_count == 2
+    assert board.handlers.get(signal.SIGINT) == f"original-{signal.SIGINT}"
+    assert child.terminated == 1 or child.killed == 1
+    assert child.poll() is not None
+
+
+def test_signal_installation_fails_before_any_handler_still_cleans_child(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _write_config(isolated_cwd)
+    child = FakeChild(exit_code=0)
+    popen = FakePopenFactory(child)
+    board = _SignalBoard(fail_install_on_count=1)
+    monkeypatch.setattr(signal, "getsignal", board.getsignal)
+    monkeypatch.setattr(signal, "signal", board.signal)
+
+    runner = LocalSupervisor(
+        worker_script=isolated_cwd / "worker.py",
+        popen_factory=popen,
+        install_signals=True,
+        platform_name="linux",
+    )
+    with pytest.raises(OSError, match="signal install failed"):
+        runner.run(config=str(config))
+
+    assert board.handlers == {}
+    assert child.poll() is not None
+
+
+def test_signal_restoration_failure_after_normal_exit_raises_worker_error(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _write_config(isolated_cwd)
+    child = FakeChild(exit_code=0)
+    popen = FakePopenFactory(child)
+    board = _SignalBoard()
+    board.fail_all_restores = True
+    monkeypatch.setattr(signal, "getsignal", board.getsignal)
+    monkeypatch.setattr(signal, "signal", board.signal)
+    monkeypatch.setattr(signal, "SIGBREAK", None, raising=False)
+
+    runner = LocalSupervisor(
+        worker_script=isolated_cwd / "worker.py",
+        popen_factory=popen,
+        install_signals=True,
+        platform_name="linux",
+    )
+    with pytest.raises(WorkerError, match="failed to restore signal handlers"):
+        runner.run(config=str(config))
+    assert child.poll() is not None
+    assert board.restore_attempts
+
+
+def test_signal_restoration_failure_preserves_wait_exception_and_continues(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _write_config(isolated_cwd)
+    child = FakeChild(exit_code=0, wait_error=RuntimeError("primary wait failure"))
+    popen = FakePopenFactory(child)
+    board = _SignalBoard()
+    first_restore: int | None = None
+
+    def selective_signal(signum: int, handler: object) -> object:
+        nonlocal first_restore
+        previous = board.getsignal(signum)
+        if callable(handler):
+            board.handlers[signum] = handler
+            board.install_count += 1
+            return previous
+        board.restore_attempts.append(signum)
+        if first_restore is None:
+            first_restore = signum
+            raise OSError("first restore failed")
+        board.handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(signal, "getsignal", board.getsignal)
+    monkeypatch.setattr(signal, "signal", selective_signal)
+    monkeypatch.setattr(signal, "SIGBREAK", None, raising=False)
+
+    runner = LocalSupervisor(
+        worker_script=isolated_cwd / "worker.py",
+        popen_factory=popen,
+        install_signals=True,
+        platform_name="linux",
+    )
+    with pytest.raises(RuntimeError, match="primary wait failure") as exc_info:
+        runner.run(config=str(config))
+    notes = getattr(exc_info.value, "__notes__", [])
+    assert any("signal handler restoration also failed" in note for note in notes)
+    assert len(board.restore_attempts) >= 2
+    assert child.poll() is not None
+
+
+def test_cleanup_keyboardinterrupt_does_not_replace_primary(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+) -> None:
+    config = _write_config(isolated_cwd)
+    child = FakeChild(exit_code=0, wait_error=RuntimeError("primary wait failure"))
+    child.terminate_error = KeyboardInterrupt()
+    child.kill_error = KeyboardInterrupt()
+    popen = FakePopenFactory(child)
+    runner = LocalSupervisor(
+        worker_script=isolated_cwd / "worker.py",
+        popen_factory=popen,
+        install_signals=False,
+        platform_name="linux",
+    )
+    with pytest.raises(RuntimeError, match="primary wait failure"):
+        runner.run(config=str(config))
+
+
+def test_cleanup_systemexit_does_not_replace_primary(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+) -> None:
+    config = _write_config(isolated_cwd)
+    child = FakeChild(exit_code=0, wait_error=RuntimeError("primary wait failure"))
+    child.terminate_error = SystemExit(9)
+    child.kill_error = SystemExit(9)
+    popen = FakePopenFactory(child)
+    runner = LocalSupervisor(
+        worker_script=isolated_cwd / "worker.py",
+        popen_factory=popen,
+        install_signals=False,
+        platform_name="linux",
+    )
+    with pytest.raises(RuntimeError, match="primary wait failure"):
+        runner.run(config=str(config))
+
+
+def test_supervisor_remains_reusable_after_completed_run(
+    isolated_cwd: Path,
+    clear_sports_analytics_env: None,
+) -> None:
+    config = _write_config(isolated_cwd)
+    first = FakeChild(exit_code=1)
+    second = FakeChild(exit_code=2)
+    popen = FakePopenFactory(children=[first, second])
+    runner = LocalSupervisor(
+        worker_script=isolated_cwd / "worker.py",
+        popen_factory=popen,
+        install_signals=False,
+        platform_name="linux",
+    )
+    assert runner.run(config=str(config)) == 1
+    assert first.poll() is not None
+    assert runner.run(config=str(config)) == 2
+    assert second.poll() is not None
+    assert runner._graceful_stop_sent is False

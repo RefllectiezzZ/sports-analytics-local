@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sports_analytics.core.exceptions import DatabaseIntegrityError, RepositoryError
+from sports_analytics.core.validation import subtract_duration
 from sports_analytics.data.codec import (
     dumps_canonical_json,
     ensure_json_value,
@@ -22,7 +23,6 @@ from sports_analytics.data.types import (
     validate_identifier,
     validate_limit_offset,
     validate_plain_text,
-    validate_positive_duration_seconds,
     validate_strict_int,
 )
 from sports_analytics.jobs.errors import sanitize_error_text
@@ -383,11 +383,11 @@ class WorkerRepository:
         if now.tzinfo is None:
             msg = "now must be timezone-aware"
             raise RepositoryError(msg)
-        stale_threshold_seconds = validate_positive_duration_seconds(
+        cutoff = subtract_duration(
+            now,
             stale_threshold_seconds,
             field_name="stale_threshold_seconds",
         )
-        cutoff = now - timedelta(seconds=stale_threshold_seconds)
         cutoff_text = format_utc_timestamp(cutoff)
         try:
             rows = self._connection.execute(

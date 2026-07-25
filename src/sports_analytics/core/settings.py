@@ -22,7 +22,11 @@ from pydantic import (
 )
 
 from sports_analytics.core.exceptions import ConfigurationError, RepositoryError
-from sports_analytics.core.validation import MAX_DURATION_SECONDS, parse_positive_decimal_int
+from sports_analytics.core.validation import (
+    MAX_DURATION_SECONDS,
+    MAX_RECOVERY_BATCH_SIZE,
+    parse_positive_decimal_int,
+)
 
 ENV_PREFIX: Final[str] = "SPORTS_ANALYTICS_"
 NESTED_DELIMITER: Final[str] = "__"
@@ -152,7 +156,7 @@ class WorkerSettings(_FrozenModel):
     retry_backoff_base_seconds: float = Field(default=5, gt=0)
     retry_backoff_max_seconds: float = Field(default=300, gt=0)
     shutdown_grace_seconds: float = Field(default=30, gt=0)
-    recovery_batch_size: int = Field(default=100, gt=0)
+    recovery_batch_size: int = Field(default=100, gt=0, le=MAX_RECOVERY_BATCH_SIZE)
 
     @field_validator(
         "poll_interval_seconds",
@@ -199,7 +203,11 @@ class WorkerSettings(_FrozenModel):
     @classmethod
     def _normalize_recovery_batch_size(cls, value: object) -> int:
         try:
-            return parse_positive_decimal_int(value, field_name="worker.recovery_batch_size")
+            return parse_positive_decimal_int(
+                value,
+                field_name="worker.recovery_batch_size",
+                maximum=MAX_RECOVERY_BATCH_SIZE,
+            )
         except RepositoryError as exc:
             raise ValueError(str(exc)) from exc
 

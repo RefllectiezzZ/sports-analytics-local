@@ -197,8 +197,16 @@ deterministic and cover:
   clear `current_job_id`; reciprocal lease triggers reject invalid direct SQL);
 - signal arrival while the active-context lock is already held (handler only sets
   an Event and must return without blocking);
+- partial signal-handler installation failures that restore already-changed
+  handlers and still clean up the child;
+- signal restoration failures that preserve an existing primary wait exception
+  or raise `WorkerError` when no primary exists;
+- cleanup interrupted by `KeyboardInterrupt` / `SystemExit` that must not replace
+  the original primary exception;
 - supervisor reuse across sequential runs, exceptional child cleanup, and
   cleanup failures that preserve the primary exception;
+- `datetime.min` / `datetime.max` duration arithmetic through shared helpers;
+- oversized recovery-batch / SQLite `LIMIT` parameters rejected before SQL;
 - very large finite duration values and non-canonical `recovery_batch_size`
   inputs rejected as project-specific configuration/repository errors;
 - Windows supervision using a new process group and `CTRL_BREAK_EVENT`;

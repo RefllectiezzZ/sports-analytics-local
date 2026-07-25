@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sports_analytics.core.exceptions import RepositoryError, WorkerError
-from sports_analytics.data.types import validate_positive_duration_seconds
+from sports_analytics.core.validation import add_duration, validate_positive_duration_seconds
 
 
 def compute_retry_delay_seconds(
@@ -64,8 +64,4 @@ def compute_retry_available_at(
         base_seconds=base_seconds,
         max_seconds=max_seconds,
     )
-    try:
-        return failed_at + timedelta(seconds=delay)
-    except OverflowError as exc:
-        msg = "retry available_at overflow for the computed delay"
-        raise RepositoryError(msg) from exc
+    return add_duration(failed_at, delay, field_name="retry_delay_seconds")

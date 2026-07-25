@@ -157,12 +157,13 @@ Validation relationships:
   `heartbeat_interval_seconds`;
 - `retry_backoff_max_seconds` must be greater than or equal to
   `retry_backoff_base_seconds`;
-- `recovery_batch_size` must be a strict positive integer: real `int` values
-  greater than zero, or canonical decimal digit strings matching
-  `^[1-9][0-9]*$`. Booleans, floats (including `1.0`), scientific notation,
-  signed forms, whitespace padding, leading zeros, empty strings, zero, and
-  negatives are rejected. Accepted values are normalized to `int` before field
-  validation.
+- `recovery_batch_size` must be a strict positive integer from `1` through
+  `MAX_RECOVERY_BATCH_SIZE` (`5000`): real `int` values in range, or canonical
+  decimal digit strings matching `^[1-9][0-9]*$` within that range. Booleans,
+  floats (including `1.0`), scientific notation, signed forms, whitespace
+  padding, leading zeros, empty strings, zero, negatives, values above the
+  maximum, and excessively long digit strings are rejected before `int()`
+  conversion. Accepted values are normalized to `int` before field validation.
 
 Retry scheduling is deterministic and has no jitter:
 
