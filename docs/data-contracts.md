@@ -162,10 +162,12 @@ implemented. Downstream-safe states are `exact` and `manual`.
 
 When multiple downstream-safe sources map to one canonical event, immutable
 identity dimensions must agree. Conflicting finished outcomes raise
-`SourceIntegrityError`. Mutable scheduling and status metadata is selected from
-the most recent source observation, then by source authority, then by
-lexicographic `source_name`. Every original source fact remains in
-`source_events`.
+`SourceIntegrityError`. For non-finished events, mutable scheduling and status
+metadata is selected from the most recent source observation, then by source
+authority, then by lexicographic `source_name`. Once an agreeing finished
+outcome exists, canonical metadata is selected only from those finished source
+events and newer non-finished observations cannot downgrade it. Every original
+source fact remains in `source_events`.
 
 ## Datasets
 

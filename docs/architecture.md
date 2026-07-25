@@ -73,9 +73,12 @@ unifies them.
 
 When multiple downstream-safe source events resolve to one canonical event,
 immutable identity dimensions must agree. Conflicting finished outcomes raise
-`SourceIntegrityError`; mutable scheduling and status metadata is selected by
-most recent observation, then source authority, then lexicographic source name,
-while every original source event remains auditable in `source_events`.
+`SourceIntegrityError`. For non-finished events, mutable scheduling and status
+metadata is selected by most recent observation, then source authority, then
+lexicographic source name. Once an agreeing finished outcome exists, canonical
+metadata is selected only from those finished source events and newer
+non-finished observations cannot downgrade it. Every original source event
+remains auditable in `source_events`.
 
 ### Market boundary
 

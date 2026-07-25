@@ -249,3 +249,156 @@ def test_equal_recency_prefers_source_authority_then_lexicographic_source_name()
     assert authority_winner.canonical.event_date == date(2023, 8, 13)
     assert name_winner.reconciliation.source_name == "alpha-source"
     assert name_winner.canonical.event_date == date(2023, 8, 15)
+
+
+def test_newer_scheduled_observation_cannot_downgrade_established_finished_result() -> None:
+    finished = _source_event(
+        source_name="fixture-source-alpha",
+        observed=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+    )
+    scheduled = _source_event(
+        source_name="fixture-source-beta",
+        observed=datetime(2024, 1, 16, 12, 0, tzinfo=UTC),
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.SCHEDULED.value,
+        source_row_number=3,
+    )
+
+    (event,) = resolve_canonical_events_from_sources((finished, scheduled))
+
+    assert event.canonical.canonical_event_id == CANONICAL_EVENT_ID
+    assert event.canonical.status == EventStatus.FINISHED.value
+    assert event.canonical.home_score == 2
+    assert event.canonical.away_score == 1
+    assert event.canonical.result_code == "home"
+    assert event.canonical.outcome_availability_stage == OutcomeAvailability.POST_EVENT.value
+    assert event.reconciliation.source_name == "fixture-source-alpha"
+
+
+def test_agreeing_finished_observations_select_preferred_finished_source() -> None:
+    older_finished = _source_event(
+        source_name="zz-low-priority",
+        observed=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+    )
+    newer_finished = _source_event(
+        source_name="fixture-source-beta",
+        observed=datetime(2024, 1, 16, 12, 0, tzinfo=UTC),
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+        source_row_number=3,
+    )
+
+    (event,) = resolve_canonical_events_from_sources((older_finished, newer_finished))
+
+    assert event.reconciliation.source_name == "fixture-source-beta"
+    assert event.canonical.status == EventStatus.FINISHED.value
+    assert event.canonical.home_score == 2
+    assert event.canonical.away_score == 1
+    assert event.canonical.result_code == "home"
+
+
+def test_agreeing_finished_observations_tie_break_by_authority_then_source_name() -> None:
+    observed = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+    low_authority = _source_event(
+        source_name="zz-low-priority",
+        observed=observed,
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+    )
+    football_data = _source_event(
+        source_name="football-data-co-uk",
+        observed=observed,
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+        source_row_number=3,
+    )
+    beta = _source_event(
+        source_name="beta-source",
+        observed=observed,
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+        source_row_number=4,
+    )
+    alpha = _source_event(
+        source_name="alpha-source",
+        observed=observed,
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+        source_row_number=5,
+    )
+
+    (authority_winner,) = resolve_canonical_events_from_sources((low_authority, football_data))
+    (name_winner,) = resolve_canonical_events_from_sources((beta, alpha))
+
+    assert authority_winner.reconciliation.source_name == "football-data-co-uk"
+    assert name_winner.reconciliation.source_name == "alpha-source"
+    assert authority_winner.canonical.home_score == 2
+    assert authority_winner.canonical.away_score == 1
+    assert authority_winner.canonical.result_code == "home"
+
+
+def test_input_ordering_does_not_change_canonical_event() -> None:
+    finished = _source_event(
+        source_name="fixture-source-alpha",
+        observed=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.FINISHED.value,
+        home_score=2,
+        away_score=1,
+        result_code="home",
+        outcome_availability_stage=OutcomeAvailability.POST_EVENT.value,
+    )
+    scheduled = _source_event(
+        source_name="fixture-source-beta",
+        observed=datetime(2024, 1, 16, 12, 0, tzinfo=UTC),
+        event_date=date(2023, 8, 12),
+        scheduled_start_utc=datetime(2023, 8, 12, 14, 0, tzinfo=UTC),
+        status=EventStatus.SCHEDULED.value,
+        source_row_number=3,
+    )
+
+    forward = resolve_canonical_events_from_sources((finished, scheduled))
+    reverse = resolve_canonical_events_from_sources((scheduled, finished))
+
+    assert forward == reverse

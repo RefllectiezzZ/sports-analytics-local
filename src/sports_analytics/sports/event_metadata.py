@@ -3,10 +3,14 @@
 When multiple downstream-safe source events map to one canonical event:
 
 1. immutable identity dimensions must agree;
-2. contradictory finished outcomes raise ``SourceIntegrityError``;
-3. mutable scheduling/status metadata prefers the most recently observed valid
-   state, then higher source authority, then lexicographic source name;
-4. every original source fact remains in ``source_events``.
+2. when any agreeing finished outcome exists, canonical metadata is selected
+   only from those finished source events and non-finished observations cannot
+   downgrade it;
+3. contradictory finished outcomes raise ``SourceIntegrityError``;
+4. when no finished source event exists, mutable scheduling/status metadata
+   prefers the most recently observed valid state, then higher source authority,
+   then lexicographic source name;
+5. every original source fact remains in ``source_events``.
 """
 
 from __future__ import annotations
@@ -49,7 +53,11 @@ def resolve_canonical_events_from_sources(
     for group in grouped.values():
         _validate_immutable_identity_agreement(group)
         _reject_conflicting_finished_outcomes(group)
-        selected = select_current_source_event(tuple(group))
+        finished_events = tuple(item for item in group if item.status == EventStatus.FINISHED.value)
+        if finished_events:
+            selected = select_current_source_event(finished_events)
+        else:
+            selected = select_current_source_event(tuple(group))
         events.append(
             IngestedEvent(
                 canonical=canonical_event_from_source(selected),
