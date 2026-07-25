@@ -17,6 +17,14 @@ MAX_RECOVERY_BATCH_SIZE: Final[int] = 5_000
 # Reject digit strings longer than this before calling int() to avoid conversion traps.
 _MAX_POSITIVE_DECIMAL_DIGITS: Final[int] = 64
 _POSITIVE_DECIMAL_INT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[1-9][0-9]*$")
+# Canonical decimal int for CLI priority: optional leading minus, no plus/whitespace/leading zeros.
+_BOUNDED_DECIMAL_INT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(0|-?[1-9][0-9]*)$")
+# Conservative signed 32-bit bound keeps priorities SQLite-safe and UI/tooling friendly.
+MAX_CLI_PRIORITY: Final[int] = 2_147_483_647
+MIN_CLI_PRIORITY: Final[int] = -2_147_483_648
+# Conservative maximum attempts bound for local SQLite job rows.
+MAX_CLI_MAXIMUM_ATTEMPTS: Final[int] = 1_000
+_MAX_BOUNDED_DECIMAL_DIGITS: Final[int] = 16
 
 
 def validate_positive_finite_number(
@@ -168,3 +176,57 @@ def parse_positive_decimal_int(
         return parsed
     msg = f"{field_name} must be a positive integer"
     raise RepositoryError(msg)
+
+
+def parse_cli_bounded_int(
+    value: object,
+    *,
+    field_name: str,
+    minimum: int = MIN_CLI_PRIORITY,
+    maximum: int = MAX_CLI_PRIORITY,
+) -> int:
+    """Parse a CLI priority-style integer from an int or canonical decimal string.
+
+    Policy:
+    - accepts a real ``int`` (not ``bool``) within ``[minimum, maximum]``;
+    - accepts canonical decimal strings matching ``^(0|-?[1-9][0-9]*)$``;
+    - rejects whitespace, plus signs, leading zeros (except literal ``0``),
+      floats, scientific notation, and over-long digit strings before ``int()``.
+    """
+    if isinstance(value, bool):
+        msg = f"{field_name} must be a bounded integer"
+        raise RepositoryError(msg)
+    if type(value) is int:
+        if value < minimum or value > maximum:
+            msg = f"{field_name} must be between {minimum} and {maximum}"
+            raise RepositoryError(msg)
+        return value
+    if not isinstance(value, str):
+        msg = f"{field_name} must be a bounded integer"
+        raise RepositoryError(msg)
+    if _BOUNDED_DECIMAL_INT_PATTERN.fullmatch(value) is None:
+        msg = f"{field_name} must be a bounded integer"
+        raise RepositoryError(msg)
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > _MAX_BOUNDED_DECIMAL_DIGITS:
+        msg = f"{field_name} must be a bounded integer"
+        raise RepositoryError(msg)
+    try:
+        parsed = int(value, 10)
+    except ValueError as exc:
+        msg = f"{field_name} must be a bounded integer"
+        raise RepositoryError(msg) from exc
+    if parsed < minimum or parsed > maximum:
+        msg = f"{field_name} must be between {minimum} and {maximum}"
+        raise RepositoryError(msg)
+    return parsed
+
+
+def parse_cli_positive_bounded_int(
+    value: object,
+    *,
+    field_name: str,
+    maximum: int = MAX_CLI_MAXIMUM_ATTEMPTS,
+) -> int:
+    """Parse a strict positive CLI integer with a conservative upper bound."""
+    return parse_positive_decimal_int(value, field_name=field_name, maximum=maximum)

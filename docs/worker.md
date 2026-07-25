@@ -21,7 +21,7 @@ Implemented now:
 Not implemented in this release:
 
 - Streamlit child process;
-- sports ingestion, modelling, predictions, or betting jobs;
+- modelling, predictions, or betting jobs;
 - parallel job execution inside one worker process;
 - cooperative cancellation of an already-running job handler.
 
@@ -207,12 +207,14 @@ The registry rejects duplicate job types, validates identifiers, freezes before
 worker execution, and iterates job types deterministically. There is no mutable
 module-level singleton registry.
 
-Built-in infrastructure handler:
+Built-in handlers in the frozen default registry:
 
-- `system.noop` — no I/O, no sleep, no network, no filesystem or database writes;
-  returns deterministic JSON for end-to-end tests.
+- `system.noop` — infrastructure only: no I/O, no sleep, no network, no
+  filesystem or database writes; returns deterministic JSON for end-to-end tests;
+- `ingest.football-data-csv` — football Football-Data.co.uk CSV ingestion into
+  immutable Parquet snapshots.
 
-Do not enqueue `system.noop` automatically. No sports handlers exist yet.
+Do not enqueue `system.noop` automatically.
 
 ## Handler errors
 
@@ -373,7 +375,30 @@ added without colliding with handler-defined payloads.
 
 - one job at a time per worker process;
 - no cooperative running-job cancellation;
-- no sports-domain handlers;
+- only one sports-domain handler (`ingest.football-data-csv`); no Betclic,
+  Betano, modelling, combination, or settlement handlers;
 - no Streamlit supervision yet;
 - at-least-once, not exactly-once;
-- handlers must eventually be idempotent when they perform side effects.
+- handlers that perform side effects must be idempotent (football ingestion
+  relies on snapshot READY reuse).
+
+
+## Football ingestion handler
+
+Registered job type: `ingest.football-data-csv`
+
+Payload keys:
+
+- required: `competition_id`, `season`
+- optional: `raw_sha256`
+- unknown keys rejected; arbitrary URL/path/division controls rejected
+
+The handler checkpoints between major stages (before download/cache, after raw
+acquisition, after parsing, after normalization, before publication, after
+publication). Transient source/network and snapshot-busy errors map to
+`RetryableJobError`. Malformed CSV, unsupported competition/season, HTTP 404/410,
+integrity conflicts, and similar failures map to `PermanentJobError`.
+
+Snapshot READY reuse makes identical source-content reprocessing idempotent at
+the snapshot layer. No SQLite transaction remains open during download, CSV
+parsing, or Parquet writing.

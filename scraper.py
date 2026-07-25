@@ -1,17 +1,13 @@
-"""Data ingestion coordinator entry point (placeholder)."""
+"""Data ingestion coordinator entry point."""
 
 from collections.abc import Sequence
 
-from sports_analytics.core.cli import run_component
+from sports_analytics.ingestion.cli import main as cli_main
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Bootstrap the scraper component and report that ingestion is not implemented."""
-    return run_component(
-        "scraper",
-        "Data ingestion coordinator entry point (placeholder).",
-        argv=argv,
-    )
+    """Run the scraper CLI."""
+    return cli_main(argv)
 
 
 if __name__ == "__main__":

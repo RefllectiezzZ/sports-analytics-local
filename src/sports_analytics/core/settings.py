@@ -229,12 +229,139 @@ class WorkerSettings(_FrozenModel):
 
 
 class ScrapingSettings(_FrozenModel):
-    """Scraping coordinator settings (adapters not implemented)."""
+    """Scraping coordinator and Football-Data.co.uk HTTP adapter settings."""
 
     enabled: bool = False
     request_timeout_seconds: float = Field(default=30, gt=0)
-    maximum_retries: int = Field(default=3, ge=0)
+    maximum_retries: int = Field(default=3, ge=0, le=10)
     browser_headless: bool = True
+    retry_backoff_base_seconds: float = Field(default=2, gt=0)
+    retry_backoff_max_seconds: float = Field(default=30, gt=0)
+    minimum_request_interval_seconds: float = Field(default=2, ge=0)
+    maximum_download_bytes: int = Field(default=26_214_400, gt=0, le=104_857_600)
+
+    @field_validator(
+        "request_timeout_seconds",
+        "retry_backoff_base_seconds",
+        "retry_backoff_max_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _reject_non_finite_scraping_timing(cls, value: object) -> object:
+        import math
+
+        if isinstance(value, bool):
+            msg = "scraping timing settings must not be boolean"
+            raise ValueError(msg)
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except (OverflowError, ValueError) as exc:
+                msg = "scraping timing settings must be positive finite numbers"
+                raise ValueError(msg) from exc
+        if not isinstance(value, int | float):
+            msg = "scraping timing settings must be positive finite numbers"
+            raise ValueError(msg)
+        try:
+            number = float(value)
+        except (OverflowError, ValueError, TypeError) as exc:
+            msg = "scraping timing settings must be positive finite numbers"
+            raise ValueError(msg) from exc
+        if not math.isfinite(number) or number <= 0:
+            msg = "scraping timing settings must be positive finite numbers"
+            raise ValueError(msg)
+        # Bound request and retry timing to five minutes.
+        max_seconds = 300.0
+        if number > max_seconds:
+            msg = f"scraping timing settings must be <= {max_seconds} seconds"
+            raise ValueError(msg)
+        return number
+
+    @field_validator("minimum_request_interval_seconds", mode="before")
+    @classmethod
+    def _reject_non_finite_minimum_interval(cls, value: object) -> object:
+        import math
+
+        if isinstance(value, bool):
+            msg = "scraping.minimum_request_interval_seconds must not be boolean"
+            raise ValueError(msg)
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except (OverflowError, ValueError) as exc:
+                msg = "scraping.minimum_request_interval_seconds must be a finite number"
+                raise ValueError(msg) from exc
+        if not isinstance(value, int | float):
+            msg = "scraping.minimum_request_interval_seconds must be a finite number"
+            raise ValueError(msg)
+        try:
+            number = float(value)
+        except (OverflowError, ValueError, TypeError) as exc:
+            msg = "scraping.minimum_request_interval_seconds must be a finite number"
+            raise ValueError(msg) from exc
+        if not math.isfinite(number) or number < 0:
+            msg = "scraping.minimum_request_interval_seconds must be a non-negative finite number"
+            raise ValueError(msg)
+        if number > 300.0:
+            msg = "scraping.minimum_request_interval_seconds must be <= 300 seconds"
+            raise ValueError(msg)
+        return number
+
+    @field_validator("maximum_retries", mode="before")
+    @classmethod
+    def _normalize_maximum_retries(cls, value: object) -> int:
+        if isinstance(value, bool):
+            msg = "scraping.maximum_retries must not be boolean"
+            raise ValueError(msg)
+        if isinstance(value, str):
+            if value != value.strip() or not value:
+                msg = "scraping.maximum_retries must be a non-negative integer"
+                raise ValueError(msg)
+            if (
+                value.startswith("-")
+                or value.startswith("+")
+                or "." in value
+                or "e" in value.lower()
+            ):
+                msg = "scraping.maximum_retries must be a non-negative integer"
+                raise ValueError(msg)
+            if not value.isdigit():
+                msg = "scraping.maximum_retries must be a non-negative integer"
+                raise ValueError(msg)
+            try:
+                value = int(value, 10)
+            except ValueError as exc:
+                msg = "scraping.maximum_retries must be a non-negative integer"
+                raise ValueError(msg) from exc
+        if type(value) is not int:
+            msg = "scraping.maximum_retries must be a non-negative integer"
+            raise ValueError(msg)
+        if value < 0 or value > 10:
+            msg = "scraping.maximum_retries must be between 0 and 10 inclusive"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("maximum_download_bytes", mode="before")
+    @classmethod
+    def _normalize_maximum_download_bytes(cls, value: object) -> int:
+        try:
+            return parse_positive_decimal_int(
+                value,
+                field_name="scraping.maximum_download_bytes",
+                maximum=104_857_600,
+            )
+        except RepositoryError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @model_validator(mode="after")
+    def _validate_scraping_relations(self) -> Self:
+        if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
+            msg = (
+                "scraping.retry_backoff_max_seconds must be greater than or equal to "
+                "scraping.retry_backoff_base_seconds"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class ModellingSettings(_FrozenModel):

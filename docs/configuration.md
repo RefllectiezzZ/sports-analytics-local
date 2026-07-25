@@ -11,7 +11,7 @@ This document describes the local configuration system for
 | `storage` | Local filesystem locations for data and logs |
 | `logging` | Console and optional rotating file logging |
 | `worker` | Durable local worker timing, lease, retry, and shutdown settings |
-| `scraping` | Settings for a future ingestion coordinator |
+| `scraping` | Football-Data.co.uk HTTP adapter and enqueue gating |
 | `modelling` | Settings for future local modelling |
 
 All models are immutable after validation and reject unknown fields.
@@ -230,10 +230,11 @@ needed, applies pending migrations, and exits without starting workers or
 business workflows.
 
 Normal non-worker execution bootstraps the runtime (directories, seeding,
-logging, automatic idempotent SQLite migration) and then prints that the
-component business functionality is not implemented. `worker.py` starts the
-durable local worker, and `run_local.py` currently supervises only that worker
-child.
+logging, automatic idempotent SQLite migration). `app.py` and `engine.py` then
+report that their business functionality is not implemented. `scraper.py`
+implements source listing, football ingestion enqueue, snapshot listing, and
+read-only snapshot verification after bootstrap. `worker.py` starts the durable
+local worker, and `run_local.py` currently supervises only that worker child.
 
 Default SQLite path: `storage/operational.sqlite3` (`storage.sqlite_path`).
 
@@ -266,6 +267,21 @@ generator during normal bootstrap only.
 - Do not use pickle for configuration.
 - Do not follow network URLs during configuration loading.
 
+## Scraping settings
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `enabled` | `false` | Must be true to enqueue football-data ingestion |
+| `request_timeout_seconds` | `30` | Positive, at most 5 minutes |
+| `maximum_retries` | `3` | Integer 0..10 |
+| `browser_headless` | `true` | Retained for compatibility; unused by this adapter |
+| `retry_backoff_base_seconds` | `2` | Deterministic exponential backoff base |
+| `retry_backoff_max_seconds` | `30` | Must be >= base; at most 5 minutes |
+| `minimum_request_interval_seconds` | `2` | Non-negative pacing between requests |
+| `maximum_download_bytes` | `26214400` | Strict positive integer, at most 100 MiB |
+
+This source requires no API key. Do not place credentials in configuration examples.
+
 ## Representative example
 
 ```toml
@@ -283,6 +299,16 @@ retry_backoff_max_seconds = 300
 shutdown_grace_seconds = 30
 recovery_batch_size = 100
 
+[scraping]
+enabled = false
+request_timeout_seconds = 30
+maximum_retries = 3
+browser_headless = true
+retry_backoff_base_seconds = 2
+retry_backoff_max_seconds = 30
+minimum_request_interval_seconds = 2
+maximum_download_bytes = 26214400
+
 [logging]
 level = "INFO"
 file_enabled = true
@@ -294,4 +320,6 @@ SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=production
 SPORTS_ANALYTICS_LOGGING__LEVEL=WARNING
 SPORTS_ANALYTICS_WORKER__HEARTBEAT_INTERVAL_SECONDS=10
 SPORTS_ANALYTICS_WORKER__STALE_JOB_TIMEOUT_SECONDS=120
+SPORTS_ANALYTICS_SCRAPING__ENABLED=false
+SPORTS_ANALYTICS_SCRAPING__MAXIMUM_DOWNLOAD_BYTES=26214400
 ```

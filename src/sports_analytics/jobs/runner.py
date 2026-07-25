@@ -333,6 +333,7 @@ class LocalWorker:
             lease_expires_at=claim.lease_expires_at,
             logger=logger,
         )
+        context.bind_runtime(runtime_context)
         controller = LeaseHeartbeatController(
             service=service,
             context=context,

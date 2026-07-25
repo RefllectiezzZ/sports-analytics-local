@@ -32,6 +32,8 @@ EXPECTED_INDEXES: Final[tuple[str, ...]] = (
     "uq_worker_instances_current_job",
     "idx_snapshots_type_status_created",
     "uq_snapshots_relative_path",
+    "uq_snapshots_active_source_version",
+    "idx_snapshots_source_version_status",
     "idx_audit_events_occurred",
     "idx_audit_events_entity",
     "idx_audit_events_correlation",

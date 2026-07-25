@@ -20,11 +20,33 @@ Provide a localhost-only toolchain that:
 
 ## Current status
 
-This repository is in **pre-alpha** state. Packaging, typed configuration, local
-runtime bootstrap, SQLite operational persistence, migrations, durable worker
-infrastructure, documentation, linting, typing, and tests are in place.
-Application features (scraping, modelling, predictions, Streamlit UI, and
-sports-domain schemas/jobs) are **not implemented**.
+This repository is in **pre-alpha** state.
+
+Implemented now:
+
+- packaging, typed configuration, local runtime bootstrap, and logging;
+- SQLite operational persistence with forward-only migrations `0001`, `0002`, and
+  `0003`;
+- durable local job worker infrastructure and a worker-only supervisor;
+- one Football-Data.co.uk **ingestion adapter** covering two competitions
+  (`eng-premier-league`, `prt-primeira-liga`), with allowlisted HTTPS retrieval,
+  content-addressed raw storage, and strict CSV parsing;
+- sport-agnostic canonical participant and event contracts with source
+  participant/event provenance datasets, plus conservative versioned participant
+  and event reconciliation;
+- a generic canonical market quote contract, with historical 1X2 mapped into it;
+- immutable generic Parquet snapshots;
+- worker job integration: the `ingest.football-data-csv` handler is registered in
+  the frozen default registry;
+- snapshot listing and verification through `scraper.py`;
+- documentation, linting, typing, and tests.
+
+**Not implemented**: Betclic; Betano; current bookmaker prices; browser scraping
+or automation; additional sports; markets beyond production 1X2 plus a synthetic
+contract proof; models; features; predictions; combinations and accumulators;
+backtesting; settlement; bankroll management; Streamlit UI pages; an opportunity
+search engine; an automatic bet builder; user bet filters; cross-source fuzzy
+resolution.
 
 ## Supported Python version
 
@@ -113,9 +135,13 @@ Default SQLite location (configurable via `storage.sqlite_path`):
 storage/operational.sqlite3
 ```
 
-No sports-domain data tables or model schemas exist yet. The current schema
-covers operational foundations only: application metadata, jobs, job events,
-worker instances, snapshot metadata, and audit events.
+No sports-domain tables exist in SQLite. Analytical football datasets are stored
+as immutable Parquet snapshots under the configured snapshots directory, with
+operational metadata in SQLite:
+
+```text
+storage/snapshots/football-ingestion/football-canonical-v2/<competition_id>/<YYYY-YYYY>/<snapshot-uuid>/
+```
 
 Logging:
 
@@ -163,8 +189,54 @@ python run_local.py --worker-once
 currently available job, and no flag starts the polling loop.
 
 `run_local.py` currently supervises **only** the worker child process. Streamlit
-supervision is planned for a later phase. The built-in `system.noop` job handler
-is infrastructure-only test plumbing; no sports-domain jobs exist yet.
+supervision is planned for a later phase. The frozen default handler registry
+contains `system.noop` (infrastructure only) and `ingest.football-data-csv`
+(football ingestion).
+
+### Football ingestion workflow
+
+Enable scraping in a local config (do not commit secrets or operational data):
+
+```toml
+[scraping]
+enabled = true
+```
+
+Then:
+
+```bash
+python scraper.py --config config/settings.toml --migrate-database
+python scraper.py --config config/settings.toml --list-competitions
+python scraper.py \
+  --config config/settings.toml \
+  --enqueue-football-data \
+  --competition eng-premier-league \
+  --season 2023-2024
+python worker.py --config config/settings.toml --once
+python scraper.py --config config/settings.toml --list-snapshots
+python scraper.py --config config/settings.toml --verify-snapshot <SNAPSHOT_UUID>
+```
+
+The scraper enqueues a job; the worker performs the HTTPS download, raw storage,
+normalization, and Parquet publication. Real downloads depend on the external
+Football-Data.co.uk website and network availability. Users must review and
+respect the source’s current terms.
+
+Additional scraper modes:
+
+```bash
+python scraper.py --list-sources
+python scraper.py --list-competitions
+```
+
+`--list-sources` prints one tab-separated line per implemented source adapter
+(`source_id`, `display_name`, role, adapter version, capabilities, supported
+sports) without touching the database or the network. Only the
+Football-Data.co.uk ingestion adapter is registered; no bookmaker or current-odds
+adapter exists.
+
+See [docs/sources.md](docs/sources.md), [docs/snapshots.md](docs/snapshots.md),
+and [docs/data-contracts.md](docs/data-contracts.md).
 
 ### Windows PowerShell overrides
 
@@ -226,17 +298,19 @@ pre-commit run --all-files
 
 ## Entry points
 
-| File | Future role |
-| --- | --- |
-| `app.py` | Streamlit user interface entry point |
-| `scraper.py` | Coordinates permitted public data ingestion |
-| `engine.py` | Coordinates features, predictions, and combinations |
-| `worker.py` | Runs durable background jobs outside the Streamlit process |
-| `run_local.py` | Supervises the local worker child process |
+| File | Role | Status |
+| --- | --- | --- |
+| `app.py` | Streamlit user interface entry point | Placeholder |
+| `scraper.py` | Coordinates permitted public data ingestion | Implemented |
+| `engine.py` | Coordinates features, predictions, and combinations | Placeholder |
+| `worker.py` | Runs durable background jobs outside the Streamlit process | Implemented |
+| `run_local.py` | Supervises the local worker child process | Implemented |
 
 Each file supports shared validation / database CLI modes. `worker.py` and
-`run_local.py` implement durable worker infrastructure; `app.py`, `scraper.py`,
-and `engine.py` remain business-function placeholders after bootstrap.
+`run_local.py` implement durable worker infrastructure. `scraper.py` implements
+source and competition listing, football ingestion enqueue, snapshot listing, and
+read-only snapshot verification. `app.py` and `engine.py` remain
+business-function placeholders after bootstrap.
 
 ## Directory structure
 
@@ -262,6 +336,19 @@ and `engine.py` remain business-function placeholders after bootstrap.
 │       ├── __init__.py
 │       ├── core/
 │       ├── data/
+│       │   └── sql/migrations/
+│       │       ├── 0001_initial.sql
+│       │       ├── 0002_worker_runtime.sql
+│       │       └── 0003_snapshot_source_deduplication.sql
+│       ├── jobs/
+│       ├── local/
+│       ├── sources/
+│       │   └── football_data_co_uk/
+│       ├── sports/
+│       │   └── football/
+│       ├── markets/
+│       ├── snapshots/
+│       ├── ingestion/
 │       ├── scrapers/
 │       ├── features/
 │       ├── models/
@@ -282,33 +369,54 @@ and `engine.py` remain business-function placeholders after bootstrap.
 └── docs/
     ├── architecture.md
     ├── configuration.md
+    ├── data-contracts.md
     ├── database.md
     ├── development.md
+    ├── snapshots.md
+    ├── sources.md
     └── worker.md
 ```
 
-## High-level future architecture
+`scrapers`, `features`, `models`, `combinations`, `services`, and `evaluation` are
+reserved package placeholders and are currently empty.
 
-- **Streamlit** (`app.py`) for local interactive use.
-- **Scraper coordinator** (`scraper.py`) for permitted public sources only.
-- **Engine** (`engine.py`) for deterministic feature generation, local models, and combination proposals.
-- **Worker** (`worker.py`) for durable background jobs, leases, and retries.
+## High-level architecture
+
+- **Streamlit** (`app.py`) for local interactive use (planned).
+- **Ingestion coordinator** (`scraper.py`) for permitted public sources only
+  (implemented for the Football-Data.co.uk ingestion adapter).
+- **Engine** (`engine.py`) for deterministic feature generation, local models, and
+  combination proposals (planned).
+- **Worker** (`worker.py`) for durable background jobs, leases, and retries
+  (implemented).
 - **SQLite** for operational state, jobs, snapshot metadata, and audit records.
-- **Parquet** for historical and analytical datasets under versioned snapshots.
+- **Parquet** for historical and analytical datasets under versioned immutable
+  snapshots.
 
 See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 
 ## Current limitations
 
-- No scraping, prediction, ML, betting, or UI logic is implemented.
-- No sports-domain database schemas are defined.
-- Durable worker claiming, lease heartbeat, expired-lease recovery, and
-  `run_local.py` worker supervision are implemented.
+- Only one source is implemented: the Football-Data.co.uk historical CSV
+  **ingestion adapter**. No **bookmaker / current-odds adapter** exists, so there
+  is no Betclic, no Betano, and no current price data.
+- Only two football competitions are supported, and only historical 1X2 is
+  emitted into the generic market contract. A synthetic totals fixture proves the
+  contract generalizes, but no adapter produces other markets.
+- Cross-source resolution is limited to exact canonical identity. There is no
+  fuzzy or machine-learning matching and no silent alias merge; unresolved source
+  events stay in `source_events` and are excluded from downstream-safe datasets.
+- No feature engineering, models, predictions, combinations, accumulators,
+  backtesting, settlement, or bankroll management.
+- No opportunity search engine, automatic bet builder, or user bet filters.
+- No sports-domain SQLite schemas: analytical data lives in Parquet snapshots and
+  SQLite stores only snapshot metadata.
+- No browser automation and no HTML scraping.
 - `run_local.py` supervises only the worker; no Streamlit child process is
-  started yet.
-- `system.noop` is infrastructure-only; no sports-domain jobs exist yet.
-- Configuration, runtime bootstrap, and operational SQLite persistence are implemented.
-- Non-worker business entry points remain functional placeholders after bootstrap.
+  started yet, and no Streamlit UI pages exist.
+- `system.noop` remains infrastructure-only; `ingest.football-data-csv` is the
+  only sports-domain job handler.
+- `app.py` and `engine.py` remain functional placeholders after bootstrap.
 
 ## Contribution workflow
 

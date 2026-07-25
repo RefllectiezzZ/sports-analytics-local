@@ -1,15 +1,17 @@
 # Database
 
 Operational persistence for `sports-analytics-local` uses local SQLite via the
-standard-library `sqlite3` module. Analytical datasets will use Parquet in later
-phases; this document describes the current SQLite foundation only.
+standard-library `sqlite3` module. Analytical sports datasets live in immutable
+Parquet snapshots; this document describes the SQLite operational foundation
+only.
 
 ## Roles
 
 - **SQLite** stores operational state: application metadata, jobs, job events,
   worker instances, snapshot metadata, audit events, and migration history.
-- **Parquet** (future) will store historical and analytical datasets under
-  versioned snapshot directories. Repository methods do not write Parquet files.
+- **Parquet** stores historical and analytical football snapshots under
+  versioned directories. `SnapshotRepository` stores metadata only and never writes
+  Parquet files itself.
 
 ## Connection ownership
 
@@ -248,8 +250,8 @@ After installing the lease triggers, migration `0002` validates every existing
 running job with a NULL lease aborts the migration atomically (`DatabaseMigrationError`),
 leaving schema version 1 and no `worker_instances` objects behind.
 
-No sports-domain tables (teams, fixtures, odds, predictions, bets, etc.) exist
-yet.
+No sports-domain SQLite tables exist. Analytical sports data lives in immutable
+Parquet snapshots; SQLite stores only snapshot metadata.
 
 ### Job priority
 
@@ -366,8 +368,27 @@ manual database manipulation. Do not edit applied migration history by hand.
 
 ## Current limitations
 
-- No sports-domain job handlers.
-- No Parquet writers.
-- No sports-domain schema.
-- No scraping, modelling, betting, or Streamlit UI logic.
+- No sports-domain SQLite tables: analytical sports data lives in Parquet
+  snapshots under `sports_analytics.snapshots`, with metadata only in the
+  `snapshots` table.
+- Sports-domain job handlers live outside this package (`ingest.football-data-csv`
+  in `sports_analytics.ingestion`); SQLite only records job and snapshot
+  metadata.
+- No modelling, betting, settlement, bankroll, or Streamlit UI logic.
 - No paid API or external AI runtime dependency.
+
+
+## Migration 0003
+
+Filename: `0003_snapshot_source_deduplication.sql`
+
+Adds operational indexes only. No sports-domain SQLite tables are created.
+
+- `uq_snapshots_active_source_version` — unique partial index preventing two
+  active (`building`/`ready`) snapshots for the same
+  `(snapshot_type, source_name, source_version, schema_version)`.
+- `idx_snapshots_source_version_status` — lookup index for source identity and
+  status.
+
+Failed snapshots are excluded from the unique key so replacements can proceed.
+Migrations `0001` and `0002` remain immutable.

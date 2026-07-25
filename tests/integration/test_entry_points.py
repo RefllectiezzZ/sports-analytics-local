@@ -20,6 +20,12 @@ ENTRY_POINTS = (
     ("run_local", "run_local.py", "Local startup coordinator"),
 )
 
+EXPECTED_SOURCE_LINE = (
+    "football-data-co-uk\tFootball-Data.co.uk\thistorical-data\t"
+    "football-data-co-uk-adapter-v1\t"
+    "historical-odds,historical-results,historical-statistics\tfootball"
+)
+
 
 @pytest.mark.parametrize(("module_name", "script", "snippet"), ENTRY_POINTS)
 def test_entry_point_imports_and_main_callable(module_name: str, script: str, snippet: str) -> None:
@@ -94,13 +100,23 @@ def test_normal_placeholder_execution(
         argv = ["--once"]
     elif module_name == "run_local":
         argv = ["--worker-once"]
+    elif module_name == "scraper":
+        argv = ["--list-sources"]
     else:
         argv = []
     code = module.main(argv)
     assert code == 0
     captured = capsys.readouterr()
-    if module_name in {"app", "scraper", "engine"}:
+    if module_name in {"app", "engine"}:
         assert "not implemented" in captured.out.lower()
+    elif module_name == "scraper":
+        source_lines = captured.out.splitlines()
+        assert source_lines == [EXPECTED_SOURCE_LINE]
+        assert len(source_lines[0].split("\t")) == 6
+        assert "betclic" not in captured.out.lower()
+        assert "betano" not in captured.out.lower()
+        assert not (isolated_cwd / "storage").exists()
+        return
     elif module_name == "worker":
         assert "worker stopped:" in captured.out
         assert "stop_reason=once_no_job" in captured.out
