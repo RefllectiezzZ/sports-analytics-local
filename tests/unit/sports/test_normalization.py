@@ -19,7 +19,10 @@ from sports_analytics.sources.football_data_co_uk.catalog import get_competition
 from sports_analytics.sources.football_data_co_uk.parser import parse_football_data_csv
 from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
 from sports_analytics.sports.contracts import IngestedEvent, IngestedSourceEvent
-from sports_analytics.sports.football.identifiers import parse_canonical_season
+from sports_analytics.sports.football.identifiers import (
+    football_club_identity_scope,
+    parse_canonical_season,
+)
 from sports_analytics.sports.football.markets import (
     MARKET_KEY_MATCH_RESULT_1X2,
     SUPPORTED_ODDS_FAMILIES,
@@ -415,7 +418,11 @@ def test_participant_identifiers_separate_canonical_and_source_scopes() -> None:
         source_id = participant.source_reference.source_participant_id
         assert canonical_id != source_id
         assert participant.source_reference.canonical_participant_id == canonical_id
-        assert participant.canonical.participant_type == "team"
+        assert participant.canonical.participant_type == "club"
+        assert participant.canonical.participant_identity_scope == football_club_identity_scope(
+            "ENG"
+        )
+        assert participant.source_reference.competition_id == "eng-premier-league"
         assert participant.canonical.canonical_key == participant.canonical.display_name.casefold()
         uuid.UUID(canonical_id)
         uuid.UUID(source_id)

@@ -50,10 +50,12 @@ the scraper CLI.
 
 Canonical participant and event identities are deterministic UUIDv5 values
 derived only from source-independent facts. Participant identity is scoped by
-sport, competition, participant type, and normalized canonical name; raw display
-names are not global identities. Event identity is scoped by sport, competition,
-season, canonical participants, and `event_occurrence_key`; `event_date` and
-kickoff are mutable scheduling metadata.
+sport, participant type, `participant_identity_scope`, and normalized canonical
+name, never by `source_name`, `competition_id`, season, or membership. Football
+clubs currently use provisional scopes such as `club:england` and
+`club:portugal`. Event identity is scoped by sport, competition, season,
+canonical participants, and `event_occurrence_key`; `event_date` and kickoff are
+mutable scheduling metadata.
 
 Source-scoped identities (`source_participant_id`, `source_event_id`,
 `source_event_key`) always include `source_name` and exist for provenance and
@@ -65,7 +67,15 @@ Source-scoped entities are never described as canonical.
 Participant and event reconciliation are conservative and versioned
 (`participant-reconciliation-v1`, `event-reconciliation-v1`): only `exact`
 matches are produced automatically, and unresolved candidates are recorded with a
-reason instead of being merged. There is no fuzzy matching or silent alias merge.
+reason instead of being merged. There is no fuzzy matching or silent alias merge:
+different normalized names stay distinct unless an explicit approved alias mapping
+unifies them.
+
+When multiple downstream-safe source events resolve to one canonical event,
+immutable identity dimensions must agree. Conflicting finished outcomes raise
+`SourceIntegrityError`; mutable scheduling and status metadata is selected by
+most recent observation, then source authority, then lexicographic source name,
+while every original source event remains auditable in `source_events`.
 
 ### Market boundary
 
@@ -295,8 +305,8 @@ Implemented:
 - one Football-Data.co.uk ingestion adapter with allowlisted HTTPS retrieval,
   content-addressed raw storage, and strict CSV parsing;
 - two football competitions (`eng-premier-league`, `prt-primeira-liga`);
-- competition-scoped canonical participants, occurrence-key canonical events,
-  and source participant/event provenance datasets;
+- participant-identity-scope canonical participants, occurrence-key canonical
+  events, and source participant/event provenance datasets;
 - conservative versioned participant and event reconciliation;
 - the generic canonical market quote contract, with historical 1X2 mapped into
   it;

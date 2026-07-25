@@ -89,7 +89,7 @@ def participants_schema(*, schema_version: str, sport_code: str) -> pa.Schema:
         [
             pa.field("canonical_participant_id", pa.string(), nullable=False),
             pa.field("sport_code", dictionary_string(), nullable=False),
-            pa.field("competition_id", pa.string(), nullable=False),
+            pa.field("participant_identity_scope", dictionary_string(), nullable=False),
             pa.field("participant_type", dictionary_string(), nullable=False),
             pa.field("canonical_key", pa.string(), nullable=False),
             pa.field("display_name", pa.string(), nullable=False),
@@ -195,6 +195,7 @@ def source_events_schema(*, schema_version: str, sport_code: str) -> pa.Schema:
             pa.field("source_event_id", pa.string(), nullable=False),
             pa.field("source_event_key", pa.string(), nullable=False),
             pa.field("canonical_event_id", pa.string(), nullable=True),
+            pa.field("sport_code", dictionary_string(), nullable=False),
             pa.field("competition_id", pa.string(), nullable=False),
             pa.field("season_id", pa.string(), nullable=False),
             pa.field("event_occurrence_key", pa.string(), nullable=True),
@@ -390,6 +391,7 @@ def source_event_rows(source_events: tuple[IngestedSourceEvent, ...]) -> list[di
             "source_event_id": item.source_reference.source_event_id,
             "source_event_key": item.source_reference.source_event_key,
             "canonical_event_id": item.source_reference.canonical_event_id,
+            "sport_code": item.sport_code,
             "competition_id": item.competition_id,
             "season_id": item.season_id,
             "event_occurrence_key": item.event_occurrence_key,
@@ -449,7 +451,7 @@ def _canonical_participant_row(item: CanonicalParticipant) -> dict[str, Any]:
     return {
         "canonical_participant_id": item.canonical_participant_id,
         "sport_code": item.sport_code,
-        "competition_id": item.competition_id,
+        "participant_identity_scope": item.participant_identity_scope,
         "participant_type": item.participant_type,
         "canonical_key": item.canonical_key,
         "display_name": item.display_name,

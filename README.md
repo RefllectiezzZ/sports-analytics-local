@@ -404,8 +404,8 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
   emitted into the generic market contract. A synthetic totals fixture proves the
   contract generalizes, but no adapter produces other markets.
 - Cross-source resolution is limited to exact canonical identity. There is no
-  fuzzy or machine-learning matching; unresolved source events stay in
-  `source_events` and are excluded from downstream-safe datasets.
+  fuzzy or machine-learning matching and no silent alias merge; unresolved source
+  events stay in `source_events` and are excluded from downstream-safe datasets.
 - No feature engineering, models, predictions, combinations, accumulators,
   backtesting, settlement, or bankroll management.
 - No opportunity search engine, automatic bet builder, or user bet filters.

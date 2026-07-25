@@ -43,6 +43,7 @@ class ParticipantType(StrEnum):
     """Kinds of competitor supported by canonical participant identity."""
 
     TEAM = "team"
+    CLUB = "club"
     PLAYER = "player"
 
 
@@ -190,13 +191,15 @@ class SeasonRecord:
 class CanonicalParticipant:
     """A source-independent competitor identity.
 
-    ``competition_id`` scopes the identity for the current domestic-league exact
-    policy so the same normalized name in two competitions cannot silently merge.
+    Identity is scoped by ``participant_identity_scope`` (for example
+    ``club:england``), never by ``source_name``, ``competition_id``, season, or
+    current membership. Competition context belongs on source references and
+    events.
     """
 
     canonical_participant_id: str
     sport_code: str
-    competition_id: str
+    participant_identity_scope: str
     participant_type: str
     canonical_key: str
     display_name: str
@@ -204,7 +207,10 @@ class CanonicalParticipant:
 
     def __post_init__(self) -> None:
         validate_domain_identifier(self.sport_code, field_name="sport_code")
-        validate_domain_identifier(self.competition_id, field_name="competition_id")
+        validate_domain_identifier(
+            self.participant_identity_scope,
+            field_name="participant_identity_scope",
+        )
         validate_domain_identifier(self.participant_type, field_name="participant_type")
         validate_canonical_key(self.canonical_key, field_name="canonical_key")
         validate_display_name(self.display_name, field_name="display_name")
@@ -446,6 +452,7 @@ class IngestedSourceEvent:
 
     source_reference: SourceEventReference
     reconciliation: EventReconciliation
+    sport_code: str
     competition_id: str
     season_id: str
     event_occurrence_key: str | None
@@ -464,6 +471,7 @@ class IngestedSourceEvent:
     schema_version: str
 
     def __post_init__(self) -> None:
+        validate_domain_identifier(self.sport_code, field_name="sport_code")
         if self.scheduled_start_utc is not None:
             object.__setattr__(
                 self,
@@ -508,6 +516,9 @@ def validate_reconciliation_state(value: str) -> str:
 def _validate_state_confidence(state: str, confidence: float) -> None:
     if state == ReconciliationState.EXACT.value and confidence != 1.0:
         msg = "exact reconciliation requires confidence 1.0"
+        raise NormalizationError(msg)
+    if state == ReconciliationState.MANUAL.value and confidence != 1.0:
+        msg = "manual reconciliation requires confidence 1.0"
         raise NormalizationError(msg)
     if state == ReconciliationState.UNRESOLVED.value and confidence != 0.0:
         msg = "unresolved reconciliation requires confidence 0.0"

@@ -183,12 +183,18 @@ row's `Div` must match the catalog division.
 
 Each ingested row produces both identities:
 
-- canonical participant IDs derived from sport, competition, participant type,
-  and normalized name, never from `source_name`;
+- canonical participant IDs derived from sport, participant type,
+  `participant_identity_scope`, and normalized name, never from `source_name`,
+  `competition_id`, season, or membership;
 - canonical event IDs derived from sport, competition, season, canonical
   participants, and `event_occurrence_key`, never from `event_date` or kickoff;
 - source-scoped participant and event references that always include
   `source_name`, retained for provenance and adapter tracing.
+
+Football club identity scopes are provisional and derived from catalog
+`country_code`: England uses `club:england`, and Portugal uses `club:portugal`.
+`SourceParticipantReference` retains `competition_id` for source context, but
+that context is not part of canonical participant identity.
 
 For Football-Data.co.uk domestic leagues, the occurrence key is
 `season-ordered-pair-home-1`: one home fixture per ordered pair per season.
@@ -197,8 +203,10 @@ other multi-meeting formats need different occurrence-key policies later.
 
 Participant reconciliation uses policy `participant-reconciliation-v1`; event
 reconciliation uses policy `event-reconciliation-v1`. Only exact automatic
-matches are produced. Unresolved source events are retained in `source_events`
-and `event_reconciliations`, but are excluded from canonical `events`,
+matches are produced. Different normalized participant names are not silently
+merged as aliases; an explicit approved alias mapping is required to unify them.
+Unresolved source events are retained in `source_events` and
+`event_reconciliations`, but are excluded from canonical `events`,
 `market_quotes`, and `post_match_statistics`. See
 [data-contracts.md](data-contracts.md).
 
@@ -269,6 +277,7 @@ Policy ID: `football-data-co-uk-policy-v1`
 - no current bookmaker prices, no current fixtures, and no settlement feed;
 - no HTML scraping and no browser automation;
 - no Betclic or Betano bookmaker adapter;
-- no cross-source fuzzy resolution: only exact canonical identity matching;
+- no cross-source fuzzy resolution: only exact canonical identity matching, with
+  no silent alias merge;
 - no live-network CI dependency;
 - external website availability is required for real downloads.

@@ -9,7 +9,6 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from sports_analytics.core.exceptions import NormalizationError, SourceIntegrityError
-from sports_analytics.data.codec import format_utc_timestamp
 from sports_analytics.markets.contracts import (
     MarketStatus,
     OddsQuote,
@@ -23,7 +22,6 @@ from sports_analytics.markets.identifiers import (
 )
 from sports_analytics.markets.schemas import quote_sort_key
 from sports_analytics.sports.contracts import (
-    CanonicalEvent,
     CanonicalParticipant,
     CompetitionRecord,
     EventReconciliation,
@@ -40,7 +38,9 @@ from sports_analytics.sports.contracts import (
     SourceParticipantReference,
     StartTimePrecision,
 )
+from sports_analytics.sports.event_metadata import resolve_canonical_events_from_sources
 from sports_analytics.sports.football.contracts import FOOTBALL_CANONICAL_SCHEMA_VERSION
+from sports_analytics.sports.football.identifiers import football_club_identity_scope
 from sports_analytics.sports.football.markets import (
     MATCH_RESULT_1X2_OUTCOMES,
     SUPPORTED_ODDS_FAMILIES,
@@ -64,7 +64,6 @@ from sports_analytics.sports.football.validation import (
 from sports_analytics.sports.identifiers import (
     FOOTBALL_DOMESTIC_HOME_OCCURRENCE_KEY,
     SPORT_FOOTBALL,
-    build_canonical_event_id,
     build_canonical_participant_id,
     build_season_id,
     build_source_event_id,
@@ -298,6 +297,7 @@ def normalize_football_rows(
         msg = "source_observed_at_utc must be timezone-aware"
         raise NormalizationError(msg)
     observed = source_observed_at_utc.astimezone(UTC)
+    identity_scope = football_club_identity_scope(country_code)
     season_id = build_season_id(competition_id=competition_id, label=season_label)
 
     competition = CompetitionRecord(
@@ -362,6 +362,7 @@ def normalize_football_rows(
     participants = _reconcile_participants(
         tuple(source_participants.references()),
         observed=observed,
+        participant_identity_scope=identity_scope,
     )
     participants_by_source_id = {
         participant.source_reference.source_participant_id: participant
@@ -403,7 +404,7 @@ def normalize_football_rows(
         if event.reconciliation.state == ReconciliationState.UNRESOLVED.value
     )
 
-    events = _canonical_events_from_sources(source_events)
+    events = resolve_canonical_events_from_sources(source_events)
     canonical_event_ids = {event.canonical.canonical_event_id for event in events}
     resolved_source_events = tuple(
         event
@@ -524,7 +525,7 @@ class _SourceParticipantRegistry:
             source_participant_key=source_key,
             canonical_participant_id=None,
             competition_id=self._competition_id,
-            participant_type=ParticipantType.TEAM.value,
+            participant_type=ParticipantType.CLUB.value,
             display_name=display_name,
             normalized_name=normalized_name,
             schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
@@ -721,6 +722,7 @@ def _reconcile_participants(
     references: tuple[SourceParticipantReference, ...],
     *,
     observed: datetime,
+    participant_identity_scope: str,
 ) -> tuple[IngestedParticipant, ...]:
     candidates = tuple(
         ParticipantReconciliationCandidate(
@@ -728,7 +730,7 @@ def _reconcile_participants(
             source_participant_id=reference.source_participant_id,
             source_participant_key=reference.source_participant_key,
             sport_code=SPORT_FOOTBALL,
-            competition_id=reference.competition_id,
+            participant_identity_scope=participant_identity_scope,
             participant_type=reference.participant_type,
             normalized_name=reference.normalized_name,
             display_name=reference.display_name,
@@ -750,7 +752,7 @@ def _reconcile_participants(
         if reconciliation.state == ReconciliationState.EXACT.value:
             canonical_id = build_canonical_participant_id(
                 sport_code=SPORT_FOOTBALL,
-                competition_id=reference.competition_id,
+                participant_identity_scope=participant_identity_scope,
                 participant_type=reference.participant_type,
                 canonical_key=reference.normalized_name,
             )
@@ -760,7 +762,7 @@ def _reconcile_participants(
             canonical = CanonicalParticipant(
                 canonical_participant_id=canonical_id,
                 sport_code=SPORT_FOOTBALL,
-                competition_id=reference.competition_id,
+                participant_identity_scope=participant_identity_scope,
                 participant_type=reference.participant_type,
                 canonical_key=reference.normalized_name,
                 display_name=reference.display_name,
@@ -825,6 +827,7 @@ def _ingested_source_event(
     return IngestedSourceEvent(
         source_reference=source_reference,
         reconciliation=reconciliation,
+        sport_code=SPORT_FOOTBALL,
         competition_id=parsed.competition_id,
         season_id=parsed.season_id,
         event_occurrence_key=parsed.event_occurrence_key,
@@ -841,78 +844,6 @@ def _ingested_source_event(
         result_code=parsed.result_code,
         outcome_availability_stage=parsed.outcome_availability_stage,
         schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
-    )
-
-
-def _canonical_events_from_sources(
-    source_events: tuple[IngestedSourceEvent, ...],
-) -> tuple[IngestedEvent, ...]:
-    selected_by_canonical_id: dict[str, IngestedSourceEvent] = {}
-    for source_event in source_events:
-        canonical_event_id = source_event.reconciliation.canonical_event_id
-        if not source_event.reconciliation.is_downstream_safe or canonical_event_id is None:
-            continue
-        current = selected_by_canonical_id.get(canonical_event_id)
-        if current is None or _canonical_metadata_preference_key(source_event) < (
-            _canonical_metadata_preference_key(current)
-        ):
-            selected_by_canonical_id[canonical_event_id] = source_event
-
-    events = [
-        IngestedEvent(
-            canonical=_canonical_event_from_source(source_event),
-            reconciliation=source_event.reconciliation,
-        )
-        for source_event in selected_by_canonical_id.values()
-    ]
-    return tuple(sorted(events, key=_event_sort_key))
-
-
-def _canonical_event_from_source(source_event: IngestedSourceEvent) -> CanonicalEvent:
-    canonical_event_id = source_event.reconciliation.canonical_event_id
-    if canonical_event_id is None:
-        msg = "cannot build canonical event from unresolved source event"
-        raise NormalizationError(msg)
-    if source_event.event_occurrence_key is None:
-        msg = "resolved source event missing event occurrence key"
-        raise NormalizationError(msg)
-    if source_event.event_date is None:
-        msg = "resolved source event missing event date"
-        raise NormalizationError(msg)
-    if (
-        source_event.home_canonical_participant_id is None
-        or source_event.away_canonical_participant_id is None
-    ):
-        msg = "resolved source event missing canonical participants"
-        raise NormalizationError(msg)
-    expected_id = build_canonical_event_id(
-        sport_code=SPORT_FOOTBALL,
-        competition_id=source_event.competition_id,
-        season_id=source_event.season_id,
-        home_canonical_participant_id=source_event.home_canonical_participant_id,
-        away_canonical_participant_id=source_event.away_canonical_participant_id,
-        event_occurrence_key=source_event.event_occurrence_key,
-    )
-    if canonical_event_id != expected_id:
-        msg = "event reconciliation canonical id does not match canonical event key"
-        raise NormalizationError(msg)
-    return CanonicalEvent(
-        canonical_event_id=canonical_event_id,
-        sport_code=SPORT_FOOTBALL,
-        competition_id=source_event.competition_id,
-        season_id=source_event.season_id,
-        event_occurrence_key=source_event.event_occurrence_key,
-        event_date=source_event.event_date,
-        scheduled_start_utc=source_event.scheduled_start_utc,
-        start_time_precision=source_event.start_time_precision,
-        status=source_event.status,
-        home_canonical_participant_id=source_event.home_canonical_participant_id,
-        away_canonical_participant_id=source_event.away_canonical_participant_id,
-        home_score=source_event.home_score,
-        away_score=source_event.away_score,
-        result_code=source_event.result_code,
-        outcome_availability_stage=source_event.outcome_availability_stage,
-        schema_version=source_event.schema_version,
     )
 
 
@@ -1153,32 +1084,4 @@ def _source_event_sort_key(event: IngestedSourceEvent) -> tuple[str, str]:
     return (
         event.source_reference.source_name,
         event.source_reference.source_event_id,
-    )
-
-
-def _event_sort_key(event: IngestedEvent) -> tuple[int, int, str, str, str, str]:
-    scheduled = event.canonical.scheduled_start_utc
-    return (
-        event.canonical.event_date.toordinal(),
-        1 if scheduled is None else 0,
-        format_utc_timestamp(scheduled) if scheduled is not None else "",
-        event.canonical.home_canonical_participant_id,
-        event.canonical.away_canonical_participant_id,
-        event.canonical.canonical_event_id,
-    )
-
-
-def _canonical_metadata_preference_key(
-    source_event: IngestedSourceEvent,
-) -> tuple[int, int, str, str]:
-    if source_event.event_date is None:
-        event_date_ordinal = date.max.toordinal()
-    else:
-        event_date_ordinal = source_event.event_date.toordinal()
-    scheduled = source_event.scheduled_start_utc
-    return (
-        event_date_ordinal,
-        1 if scheduled is None else 0,
-        format_utc_timestamp(scheduled) if scheduled is not None else "",
-        source_event.source_reference.source_name,
     )

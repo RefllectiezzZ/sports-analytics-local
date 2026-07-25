@@ -2,10 +2,14 @@
 
 Participant policy ``participant-reconciliation-v1``:
 
-* ``exact`` — competition-scoped normalized name is known and unambiguous.
+* ``exact`` — a normalized name within a ``participant_identity_scope`` maps to
+  that name's own canonical key. Different normalized names are distinct
+  identities unless an explicit ``supported_alias_canonical_key`` mapping unifies
+  them.
 * ``probable`` / ``manual`` — reserved; never produced automatically here.
+  Manual confidence is always ``1.0`` when recorded.
 * ``unresolved`` — incomplete identity, conflicting duplicate source identities,
-  or aliases without an explicit supported mapping.
+  or an explicit alias/equivalence claim submitted without an approved mapping.
 
 Event policy ``event-reconciliation-v1``:
 
@@ -51,19 +55,27 @@ UNRESOLVED_CONFIDENCE: Final[float] = 0.0
 
 @dataclass(frozen=True, slots=True)
 class ParticipantReconciliationCandidate:
-    """One source's naming of a participant submitted for reconciliation."""
+    """One source's naming of a participant submitted for reconciliation.
+
+    Exact matching uses ``participant_identity_scope`` plus normalized name.
+    Different normalized names are distinct identities unless
+    ``supported_alias_canonical_key`` supplies an approved mapping. Competition
+    context is not part of canonical identity; callers may still retain it on
+    source references separately.
+    """
 
     source_name: str
     source_participant_id: str
     source_participant_key: str
     sport_code: str
-    competition_id: str
+    participant_identity_scope: str
     participant_type: str
     normalized_name: str | None
     display_name: str
     source_observed_at_utc: datetime
     schema_version: str
-    #: Optional explicit alias target key. Without this, aliases stay unresolved.
+    #: Optional explicit alias target key. Without this, different names stay
+    #: distinct exact identities rather than being treated as aliases.
     supported_alias_canonical_key: str | None = None
 
 
@@ -108,7 +120,7 @@ def reconcile_participant_candidates(
         canonical_key = candidate.supported_alias_canonical_key or candidate.normalized_name
         match_key = build_canonical_participant_key(
             sport_code=candidate.sport_code,
-            competition_id=candidate.competition_id,
+            participant_identity_scope=candidate.participant_identity_scope,
             participant_type=candidate.participant_type,
             canonical_key=canonical_key,
         )
@@ -265,7 +277,7 @@ def _reject_duplicate_participant_identities(
         signatures = {
             (
                 item.source_participant_key,
-                item.competition_id,
+                item.participant_identity_scope,
                 item.normalized_name,
                 item.supported_alias_canonical_key,
             )

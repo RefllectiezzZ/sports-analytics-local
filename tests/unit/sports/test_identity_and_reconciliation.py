@@ -16,11 +16,13 @@ from sports_analytics.sports.contracts import (
     validate_confidence,
     validate_reconciliation_state,
 )
+from sports_analytics.sports.football.identifiers import football_club_identity_scope
 from sports_analytics.sports.identifiers import (
     FOOTBALL_DOMESTIC_HOME_OCCURRENCE_KEY,
     SPORT_FOOTBALL,
     build_canonical_event_id,
     build_canonical_participant_id,
+    build_canonical_participant_key,
     build_season_id,
     build_source_event_id,
     build_source_event_key,
@@ -43,8 +45,11 @@ RESCHEDULED_DATE = date(2023, 8, 19)
 KICKOFF = datetime(2023, 8, 12, 14, 0, tzinfo=UTC)
 COMPETITION_ID = "eng-premier-league"
 OTHER_COMPETITION_ID = "prt-primeira-liga"
+FICTIONAL_ENGLISH_CUP_ID = "eng-fictional-cup"
 SEASON_ID = build_season_id(competition_id=COMPETITION_ID, label="2023-2024")
 SCHEMA_VERSION = "football-canonical-v2"
+ENGLISH_CLUB_SCOPE = football_club_identity_scope("ENG")
+PORTUGUESE_CLUB_SCOPE = football_club_identity_scope("PRT")
 
 # Fictional source identifiers prove cross-source behaviour without requiring
 # extra production source adapters.
@@ -59,12 +64,13 @@ OTHER_KEY = "eastvale rovers"
 def _canonical_participant_id(
     canonical_key: str,
     *,
-    competition_id: str = COMPETITION_ID,
+    participant_identity_scope: str = ENGLISH_CLUB_SCOPE,
+    participant_type: str = ParticipantType.CLUB.value,
 ) -> str:
     return build_canonical_participant_id(
         sport_code=SPORT_FOOTBALL,
-        competition_id=competition_id,
-        participant_type=ParticipantType.TEAM.value,
+        participant_identity_scope=participant_identity_scope,
+        participant_type=participant_type,
         canonical_key=canonical_key,
     )
 
@@ -89,6 +95,8 @@ def _participant_candidate(
     normalized_name: str = HOME_KEY,
     display_name: str = "Northbridge FC",
     competition_id: str = COMPETITION_ID,
+    participant_identity_scope: str = ENGLISH_CLUB_SCOPE,
+    participant_type: str = ParticipantType.CLUB.value,
     supported_alias_canonical_key: str | None = None,
 ) -> ParticipantReconciliationCandidate:
     source_key = _source_participant_key(
@@ -101,8 +109,8 @@ def _participant_candidate(
         source_participant_id=build_source_participant_id(source_participant_key=source_key),
         source_participant_key=source_key,
         sport_code=SPORT_FOOTBALL,
-        competition_id=competition_id,
-        participant_type=ParticipantType.TEAM.value,
+        participant_identity_scope=participant_identity_scope,
+        participant_type=participant_type,
         normalized_name=normalized_name,
         display_name=display_name,
         source_observed_at_utc=OBSERVED_AT,
@@ -147,20 +155,12 @@ def _candidate(
     home_canonical = (
         None
         if home_canonical_missing
-        else (
-            home_override
-            if home_override is not None
-            else _canonical_participant_id(home_key, competition_id=competition_id)
-        )
+        else (home_override if home_override is not None else _canonical_participant_id(home_key))
     )
     away_canonical = (
         None
         if away_canonical_missing
-        else (
-            away_override
-            if away_override is not None
-            else _canonical_participant_id(away_key, competition_id=competition_id)
-        )
+        else (away_override if away_override is not None else _canonical_participant_id(away_key))
     )
     return ReconciliationCandidate(
         source_name=source_name,
@@ -194,11 +194,12 @@ def test_different_sources_resolve_exact_participant_to_one_scoped_id() -> None:
     assert all(item.is_downstream_safe for item in results)
 
 
-def test_same_normalized_name_in_incompatible_competitions_does_not_merge() -> None:
+def test_same_normalized_name_in_different_association_scopes_does_not_merge() -> None:
     english = _participant_candidate(source_name=SOURCE_ALPHA, competition_id=COMPETITION_ID)
     portuguese = _participant_candidate(
         source_name=SOURCE_BETA,
         competition_id=OTHER_COMPETITION_ID,
+        participant_identity_scope=PORTUGUESE_CLUB_SCOPE,
     )
 
     results = reconcile_participant_candidates((english, portuguese))
@@ -206,8 +207,20 @@ def test_same_normalized_name_in_incompatible_competitions_does_not_merge() -> N
     assert {item.state for item in results} == {ReconciliationState.EXACT.value}
     assert len({item.canonical_participant_id for item in results}) == 2
     assert results[0].match_key != results[1].match_key
-    assert COMPETITION_ID in (results[0].match_key or "")
-    assert OTHER_COMPETITION_ID in (results[1].match_key or "")
+    assert {item.match_key for item in results} == {
+        build_canonical_participant_key(
+            sport_code=SPORT_FOOTBALL,
+            participant_identity_scope=ENGLISH_CLUB_SCOPE,
+            participant_type=ParticipantType.CLUB.value,
+            canonical_key=HOME_KEY,
+        ),
+        build_canonical_participant_key(
+            sport_code=SPORT_FOOTBALL,
+            participant_identity_scope=PORTUGUESE_CLUB_SCOPE,
+            participant_type=ParticipantType.CLUB.value,
+            canonical_key=HOME_KEY,
+        ),
+    }
 
 
 def test_alias_names_are_not_automatically_merged_without_mapping() -> None:
@@ -256,26 +269,85 @@ def test_explicit_supported_alias_mapping_can_resolve_to_one_participant() -> No
     assert {item.state for item in results} == {ReconciliationState.EXACT.value}
     assert len({item.canonical_participant_id for item in results}) == 1
     assert {item.match_key for item in results} == {
-        (f"participant|{SPORT_FOOTBALL}|{COMPETITION_ID}|{ParticipantType.TEAM.value}|sporting cp")
+        (
+            f"participant|{SPORT_FOOTBALL}|{ENGLISH_CLUB_SCOPE}|"
+            f"{ParticipantType.CLUB.value}|sporting cp"
+        )
     }
 
 
-def test_canonical_participant_id_is_competition_scoped_and_not_source_scoped() -> None:
+def test_canonical_participant_id_is_scope_scoped_and_not_source_or_competition_scoped() -> None:
     first = _canonical_participant_id(HOME_KEY)
     second = _canonical_participant_id(HOME_KEY)
-    other_competition = _canonical_participant_id(
+    same_association_other_competition = _canonical_participant_id(
         HOME_KEY,
-        competition_id=OTHER_COMPETITION_ID,
+        participant_identity_scope=ENGLISH_CLUB_SCOPE,
+    )
+    other_association = _canonical_participant_id(
+        HOME_KEY,
+        participant_identity_scope=PORTUGUESE_CLUB_SCOPE,
     )
 
     assert first == second
-    assert first != other_competition
-    for source_name in (SOURCE_ALPHA, SOURCE_BETA):
-        source_key = _source_participant_key(source_name=source_name, normalized_name=HOME_KEY)
+    assert first == same_association_other_competition
+    assert first != other_association
+    for source_name, competition_id in (
+        (SOURCE_ALPHA, COMPETITION_ID),
+        (SOURCE_BETA, FICTIONAL_ENGLISH_CUP_ID),
+    ):
+        source_key = _source_participant_key(
+            source_name=source_name,
+            competition_id=competition_id,
+            normalized_name=HOME_KEY,
+        )
         assert source_name in source_key
-        assert COMPETITION_ID in source_key
+        assert competition_id in source_key
         assert source_name not in first
+        assert competition_id not in first
         assert build_source_participant_id(source_participant_key=source_key) != first
+
+
+def test_one_club_across_two_english_competitions_uses_one_canonical_id() -> None:
+    league = _participant_candidate(source_name=SOURCE_ALPHA, competition_id=COMPETITION_ID)
+    cup = _participant_candidate(source_name=SOURCE_BETA, competition_id=FICTIONAL_ENGLISH_CUP_ID)
+
+    results = reconcile_participant_candidates((cup, league))
+
+    assert {item.state for item in results} == {ReconciliationState.EXACT.value}
+    assert len({item.canonical_participant_id for item in results}) == 1
+    assert {item.match_key for item in results} == {
+        build_canonical_participant_key(
+            sport_code=SPORT_FOOTBALL,
+            participant_identity_scope=ENGLISH_CLUB_SCOPE,
+            participant_type=ParticipantType.CLUB.value,
+            canonical_key=HOME_KEY,
+        )
+    }
+
+
+def test_player_identity_uses_identity_scope_without_competition_id() -> None:
+    player_key = build_canonical_participant_key(
+        sport_code=SPORT_FOOTBALL,
+        participant_identity_scope="player:fifa",
+        participant_type=ParticipantType.PLAYER.value,
+        canonical_key="casey midfielder",
+    )
+    player_id = build_canonical_participant_id(
+        sport_code=SPORT_FOOTBALL,
+        participant_identity_scope="player:fifa",
+        participant_type=ParticipantType.PLAYER.value,
+        canonical_key="casey midfielder",
+    )
+    other_competition_player_id = build_canonical_participant_id(
+        sport_code=SPORT_FOOTBALL,
+        participant_identity_scope="player:fifa",
+        participant_type=ParticipantType.PLAYER.value,
+        canonical_key="casey midfielder",
+    )
+
+    assert player_id == other_competition_player_id
+    assert COMPETITION_ID not in player_key
+    assert OTHER_COMPETITION_ID not in player_key
 
 
 def test_changing_event_date_or_kickoff_does_not_change_canonical_event_id() -> None:
@@ -465,7 +537,8 @@ def _participant_reconciliation(**overrides: object) -> ParticipantReconciliatio
         "confidence": 1.0,
         "policy_version": PARTICIPANT_RECONCILIATION_POLICY_VERSION,
         "match_key": (
-            f"participant|{SPORT_FOOTBALL}|{COMPETITION_ID}|{ParticipantType.TEAM.value}|{HOME_KEY}"
+            f"participant|{SPORT_FOOTBALL}|{ENGLISH_CLUB_SCOPE}|"
+            f"{ParticipantType.CLUB.value}|{HOME_KEY}"
         ),
         "reason": None,
         "source_observed_at_utc": OBSERVED_AT,
@@ -531,3 +604,8 @@ def test_manual_reconciliation_state_is_available_in_the_contract() -> None:
 
     assert manual.state == ReconciliationState.MANUAL.value
     assert manual.is_downstream_safe
+
+
+def test_manual_reconciliation_requires_full_confidence() -> None:
+    with pytest.raises(NormalizationError, match="manual reconciliation requires confidence 1.0"):
+        _event_reconciliation(state=ReconciliationState.MANUAL.value, confidence=0.9)

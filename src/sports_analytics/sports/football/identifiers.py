@@ -1,4 +1,4 @@
-"""Football season parsing and football source-version identifiers.
+"""Football season parsing, club identity scopes, and source-version identifiers.
 
 Canonical and source-scoped entity identifiers live in
 :mod:`sports_analytics.sports.identifiers` because they are sport-agnostic.
@@ -18,13 +18,40 @@ _CANONICAL_SEASON_PATTERN: Final[re.Pattern[str]] = re.compile(r"^([0-9]{4})-([0
 MIN_SUPPORTED_START_YEAR: Final[int] = 1993
 MAX_SUPPORTED_START_YEAR: Final[int] = 2092
 
+#: Provisional exact club identity scopes for the currently catalogued countries.
+#: Versioned with participant-reconciliation-v1; renames/aliases need explicit
+#: mappings later. Competition membership is intentionally absent.
+_FOOTBALL_CLUB_IDENTITY_SCOPES_BY_COUNTRY: Final[dict[str, str]] = {
+    "ENG": "club:england",
+    "PRT": "club:portugal",
+}
+
 __all__ = [
     "MAX_SUPPORTED_START_YEAR",
     "MIN_SUPPORTED_START_YEAR",
     "build_season_id",
     "build_source_version",
+    "football_club_identity_scope",
     "parse_canonical_season",
 ]
+
+
+def football_club_identity_scope(country_code: str) -> str:
+    """Return the provisional club identity scope for a competition country code.
+
+    Example: ``ENG`` → ``club:england``. The same club name in league and cup
+    competitions that share this association scope receives one canonical ID.
+    Equal names in different association scopes do not merge.
+    """
+    if not isinstance(country_code, str):
+        msg = "country_code must be a string"
+        raise NormalizationError(msg)
+    normalized = country_code.strip().upper()
+    scope = _FOOTBALL_CLUB_IDENTITY_SCOPES_BY_COUNTRY.get(normalized)
+    if scope is None:
+        msg = f"unsupported football club identity country_code: {country_code!r}"
+        raise NormalizationError(msg)
+    return scope
 
 
 def parse_canonical_season(value: str) -> tuple[str, int, int, str]:

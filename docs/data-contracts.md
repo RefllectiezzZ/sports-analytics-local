@@ -45,12 +45,17 @@ source-independent facts. They never contain and never depend on `source_name`.
 
 | Identifier | Derived from |
 | --- | --- |
-| `canonical_participant_id` | `sport_code`, `competition_id`, `participant_type`, case-folded `canonical_key` |
+| `canonical_participant_id` | `sport_code`, `participant_type`, `participant_identity_scope`, case-folded `canonical_key` |
 | `canonical_event_id` | `sport_code`, `competition_id`, `season_id`, both canonical participant IDs, `event_occurrence_key` |
 
-Canonical participant IDs are competition-scoped. A normalized display name in
-one competition is not a global identity and must not silently merge with the
-same normalized display name in another competition.
+Canonical participant IDs are scoped by `participant_identity_scope`, not by
+`competition_id`. Participant identity is independent of `source_name`,
+`competition_id`, season, and current membership. For football clubs the current
+adapter derives provisional scopes from catalog `country_code`:
+`club:england` for England and `club:portugal` for Portugal. The same club in a
+league and cup inside one association receives the same ID; the same normalized
+name in England and Portugal receives different IDs. Player identity uses
+`participant_identity_scope` without requiring `competition_id`.
 
 Canonical event IDs use `event_occurrence_key`, not `event_date` or kickoff time.
 Dates and scheduled starts are mutable metadata so postponed or rescheduled
@@ -77,6 +82,9 @@ described as canonical.
 | `source_event_key` | `source_name`, `competition_id`, `season_id`, `event_date`, both source participant keys |
 | `source_event_id` | UUIDv5 of `source_event_key` in the source namespace |
 
+`SourceParticipantReference` retains `competition_id` for source context, but
+that context does not participate in canonical participant identity.
+
 The `source_events` dataset retains every source event candidate, including
 unresolved rows, with row-level provenance. The `events` dataset is canonical
 only, unique by `canonical_event_id`, and contains no per-source duplication or
@@ -94,20 +102,27 @@ Other identifiers:
 Policy version: `participant-reconciliation-v1`.
 
 Participant reconciliation is the auditable, versioned decision that links a
-source participant reference to a competition-scoped canonical participant. Every
-decision carries an explicit state and a bounded confidence between `0.0` and
-`1.0` inclusive.
+source participant reference to a canonical participant scoped by sport,
+participant type, `participant_identity_scope`, and canonical key. Every decision
+carries an explicit state and a bounded confidence between `0.0` and `1.0`
+inclusive.
 
 | State | Confidence | Produced automatically | Meaning |
 | --- | --- | --- | --- |
-| `exact` | `1.0` | Yes | Competition-scoped normalized name is known and unambiguous |
+| `exact` | `1.0` | Yes | Valid normalized name in a participant identity scope resolves to its own canonical key |
 | `probable` | strictly between `0.0` and `1.0` | No | Reserved by the contract for future scored matching |
-| `manual` | strictly between `0.0` and `1.0` | No | Reserved by the contract for an operator-confirmed link |
-| `unresolved` | `0.0` | Yes | Identity is incomplete, duplicated, conflicting, or an unsupported alias |
+| `manual` | `1.0` | No | Reserved by the contract for an operator-confirmed link |
+| `unresolved` | `0.0` | Yes | Identity is incomplete, duplicated, conflicting, or has an explicit alias/equivalence claim without an approved mapping |
 
-Only `exact` is produced by an automatic rule in this release. There is no fuzzy
-name matching. Aliases are not merged unless an explicit supported alias mapping
-names the canonical key.
+Only `exact` is produced by an automatic rule in this release. The
+`participant-reconciliation-v1` policy is provisional name-based exact matching:
+a valid normalized name in a scope resolves to its own canonical key. Different
+normalized names are distinct exact identities unless an explicit supported alias
+mapping unifies them. Unknown pairs of different names are not automatically
+unresolved aliases, and aliases are not merged silently; for example `Sporting
+CP` and `Sporting Lisbon` remain separate unless an approved mapping says
+otherwise. An explicit alias or equivalence claim submitted without an approved
+mapping may remain unresolved with an auditable reason.
 
 ## Event reconciliation
 
@@ -121,7 +136,7 @@ a bounded confidence between `0.0` and `1.0` inclusive.
 | --- | --- | --- | --- |
 | `exact` | `1.0` | Yes | Sport, competition, season, both canonical participants, and `event_occurrence_key` are known and unambiguous |
 | `probable` | strictly between `0.0` and `1.0` | No | Reserved by the contract for future scored matching |
-| `manual` | strictly between `0.0` and `1.0` | No | Reserved by the contract for an operator-confirmed link |
+| `manual` | `1.0` | No | Reserved by the contract for an operator-confirmed link |
 | `unresolved` | `0.0` | Yes | Identity is incomplete or source candidates conflict |
 
 Only `exact` is produced by an automatic rule in this release. Scheduled date and
@@ -145,6 +160,13 @@ There is no fuzzy name matching, no scored heuristic, and no machine-learning
 matcher. Cross-source resolution beyond exact canonical identity is not
 implemented. Downstream-safe states are `exact` and `manual`.
 
+When multiple downstream-safe sources map to one canonical event, immutable
+identity dimensions must agree. Conflicting finished outcomes raise
+`SourceIntegrityError`. Mutable scheduling and status metadata is selected from
+the most recent source observation, then by source authority, then by
+lexicographic `source_name`. Every original source fact remains in
+`source_events`.
+
 ## Datasets
 
 Each `football-canonical-v2` snapshot writes these ten Parquet files.
@@ -153,7 +175,7 @@ Each `football-canonical-v2` snapshot writes these ten Parquet files.
 | --- | --- | --- |
 | competitions | `competitions.parquet` | One competition row for the requested catalog entry |
 | seasons | `seasons.parquet` | One season row for the requested `YYYY-YYYY` label |
-| participants | `participants.parquet` | Canonical competition-scoped participants |
+| participants | `participants.parquet` | Canonical participants scoped by participant identity scope |
 | source_participants | `source_participants.parquet` | How each source names each participant, resolved or unresolved |
 | participant_reconciliations | `participant_reconciliations.parquet` | Every participant reconciliation decision |
 | events | `events.parquet` | Canonical events, unique by `canonical_event_id` |
@@ -194,9 +216,9 @@ two-digit year pairs (`2023-2024` becomes `2324`).
 ## Participants and source participants
 
 `participants` holds canonical identity only: `canonical_participant_id`,
-`sport_code`, `competition_id`, `participant_type`, `canonical_key`,
+`sport_code`, `participant_identity_scope`, `participant_type`, `canonical_key`,
 `display_name`, `schema_version`. No field is nullable, and no field names a
-source.
+source or competition.
 
 `source_participants` holds the source-scoped view:
 `source_participant_id`, `source_name`, `source_participant_key`,
@@ -216,8 +238,8 @@ not claim a canonical ID.
 participant reconciliations. `reason` is null exactly when no problem was
 recorded.
 
-`participant_type` is `team` or `player`. Only `team` is produced by the current
-adapter.
+`participant_type` is `team`, `club`, or `player`. The current football adapter
+produces `club`.
 
 Display names preserve readable punctuation. Canonical keys are Unicode NFC,
 whitespace-collapsed, and case-folded. Empty names, NUL, control characters, and
@@ -537,11 +559,11 @@ migration.
 | --- | --- |
 | competitions | `176b0c72d1e9540ac39bf3b6f784c7ceb87fb01b61b0274968eb636e1d18c43d` |
 | seasons | `405d7ae31d3ac696a1665a953d03c5d90d5c2964ecb0807626349f4147279c37` |
-| participants | `1a1c9b70f21d0fc504a7d0023711b00b4f89462e5dd27f0579d74d53178e15e9` |
+| participants | `c4744a6bf603531abdee573a7d52ed0c565c71f432970fadcc865fe85c9c2ba2` |
 | source_participants | `45f11469fe57b11d57fb1fa86dca839816ab8c13a201610966d2d1f69d0a1103` |
 | participant_reconciliations | `8dbcd38f873aa54aa72a882832d578f7d286f73bc6a2a606752f48fe7dc16590` |
 | events | `927b0e1848798b84d39a243432a7f70bc774582c08db66b1274e00ba31addcb4` |
-| source_events | `58a1d119e0b829f86ed77da2f9a94dae52ecfeccfa3c2f39e51d611f42fe922c` |
+| source_events | `7c30592e8d79788f7dfd2903fcc9540cb4c77a0317ffb6f5cd439ab4b541968e` |
 | event_reconciliations | `526bdd5ea0977488f28d201b15043378d2a6b4f8354fdc51b2182d71ebe40d7b` |
 | market_quotes | `42941e0f8cdc107bbed850f42a7ac510a19b93b892844f49d66a84304120c871` |
 | post_match_statistics | `ac215e601f6ba9af7ae5b36459dfd315b86865b48337ccd4a8c29a9527a037bc` |
@@ -554,8 +576,8 @@ Implemented now:
 - two football competitions (`eng-premier-league`, `prt-primeira-liga`);
 - strict CSV parsing;
 - content-addressed raw storage;
-- competition-scoped canonical participant IDs and occurrence-key canonical
-  event IDs;
+- participant-identity-scope canonical participant IDs and occurrence-key
+  canonical event IDs;
 - source participant/event provenance datasets, including unresolved source
   events;
 - conservative participant and event reconciliation (`exact` and `unresolved`

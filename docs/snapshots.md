@@ -65,7 +65,9 @@ manifests.
 The `football-canonical-v2` suite has ten datasets: `competitions`, `seasons`,
 `participants`, `source_participants`, `participant_reconciliations`, `events`,
 `source_events`, `event_reconciliations`, `market_quotes`, and
-`post_match_statistics`. The `events` file is canonical-only; source-event
+`post_match_statistics`. The `participants` file contains canonical
+participant-identity-scope records; competition context for source names stays in
+`source_participants`. The `events` file is canonical-only; source-event
 provenance, including unresolved source rows, lives in `source_events`.
 
 ## Manifest

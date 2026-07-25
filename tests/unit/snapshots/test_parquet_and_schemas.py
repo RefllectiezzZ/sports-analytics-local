@@ -76,7 +76,7 @@ EXPECTED_FIELDS: dict[str, list[tuple[str, str, bool]]] = {
     "participants": [
         ("canonical_participant_id", "string", False),
         ("sport_code", DICTIONARY_STRING, False),
-        ("competition_id", "string", False),
+        ("participant_identity_scope", DICTIONARY_STRING, False),
         ("participant_type", DICTIONARY_STRING, False),
         ("canonical_key", "string", False),
         ("display_name", "string", False),
@@ -129,6 +129,7 @@ EXPECTED_FIELDS: dict[str, list[tuple[str, str, bool]]] = {
         ("source_event_id", "string", False),
         ("source_event_key", "string", False),
         ("canonical_event_id", "string", True),
+        ("sport_code", DICTIONARY_STRING, False),
         ("competition_id", "string", False),
         ("season_id", "string", False),
         ("event_occurrence_key", "string", True),
@@ -293,13 +294,13 @@ EXPECTED_NULLABLE_FIELDS: dict[str, set[str]] = {
 EXPECTED_FINGERPRINTS = {
     "competitions": "176b0c72d1e9540ac39bf3b6f784c7ceb87fb01b61b0274968eb636e1d18c43d",
     "seasons": "405d7ae31d3ac696a1665a953d03c5d90d5c2964ecb0807626349f4147279c37",
-    "participants": ("1a1c9b70f21d0fc504a7d0023711b00b4f89462e5dd27f0579d74d53178e15e9"),
+    "participants": "c4744a6bf603531abdee573a7d52ed0c565c71f432970fadcc865fe85c9c2ba2",
     "source_participants": ("45f11469fe57b11d57fb1fa86dca839816ab8c13a201610966d2d1f69d0a1103"),
     "participant_reconciliations": (
         "8dbcd38f873aa54aa72a882832d578f7d286f73bc6a2a606752f48fe7dc16590"
     ),
     "events": "927b0e1848798b84d39a243432a7f70bc774582c08db66b1274e00ba31addcb4",
-    "source_events": ("58a1d119e0b829f86ed77da2f9a94dae52ecfeccfa3c2f39e51d611f42fe922c"),
+    "source_events": "7c30592e8d79788f7dfd2903fcc9540cb4c77a0317ffb6f5cd439ab4b541968e",
     "event_reconciliations": "526bdd5ea0977488f28d201b15043378d2a6b4f8354fdc51b2182d71ebe40d7b",
     "market_quotes": "42941e0f8cdc107bbed850f42a7ac510a19b93b892844f49d66a84304120c871",
     "post_match_statistics": "ac215e601f6ba9af7ae5b36459dfd315b86865b48337ccd4a8c29a9527a037bc",

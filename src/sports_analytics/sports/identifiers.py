@@ -5,10 +5,10 @@ real-world participant or fixture receives one identity across every source.
 Source-scoped identifiers deliberately include ``source_name`` and exist for
 provenance and adapter tracing.
 
-Scheduled date and kickoff are deliberately excluded from canonical event
-identity: they are mutable metadata and reconciliation evidence. Distinct
-occurrences between the same participants are separated by an explicit
-``event_occurrence_key`` instead.
+Canonical participant identity uses ``participant_identity_scope`` (association
+or namespace), never ``competition_id``. Scheduled date and kickoff are excluded
+from canonical event identity: they are mutable metadata. Distinct occurrences
+between the same participants are separated by ``event_occurrence_key``.
 """
 
 from __future__ import annotations
@@ -40,34 +40,39 @@ FOOTBALL_DOMESTIC_HOME_OCCURRENCE_KEY: Final[str] = "season-ordered-pair-home-1"
 def build_canonical_participant_key(
     *,
     sport_code: str,
-    competition_id: str,
+    participant_identity_scope: str,
     participant_type: str,
     canonical_key: str,
 ) -> str:
-    """Build a competition-scoped, source-independent canonical participant key.
+    """Build a source-independent canonical participant key.
 
-    Competition scope is intentional: the same normalized display name in two
-    competitions must not silently merge. Raw display-name normalization alone
-    is never treated as a global identity.
+    ``participant_identity_scope`` is a stable association/namespace such as
+    ``club:england``. It must not embed ``source_name``, ``competition_id``,
+    season, or current membership.
     """
     validate_domain_identifier(sport_code, field_name="sport_code")
-    validate_domain_identifier(competition_id, field_name="competition_id")
+    validate_domain_identifier(
+        participant_identity_scope,
+        field_name="participant_identity_scope",
+    )
     validate_domain_identifier(participant_type, field_name="participant_type")
     validate_canonical_key(canonical_key, field_name="canonical_key")
-    return f"participant|{sport_code}|{competition_id}|{participant_type}|{canonical_key}"
+    return (
+        f"participant|{sport_code}|{participant_identity_scope}|{participant_type}|{canonical_key}"
+    )
 
 
 def build_canonical_participant_id(
     *,
     sport_code: str,
-    competition_id: str,
+    participant_identity_scope: str,
     participant_type: str,
     canonical_key: str,
 ) -> str:
     """Return a deterministic canonical participant UUIDv5 (never source-scoped)."""
     key = build_canonical_participant_key(
         sport_code=sport_code,
-        competition_id=competition_id,
+        participant_identity_scope=participant_identity_scope,
         participant_type=participant_type,
         canonical_key=canonical_key,
     )
