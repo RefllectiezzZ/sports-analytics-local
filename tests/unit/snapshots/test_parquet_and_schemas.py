@@ -208,3 +208,37 @@ def test_verify_parquet_file_rejects_absolute_path_metadata(tmp_path: Path) -> N
             expected_schema=schemas.dataset_schema("games"),
             expected_rows=0,
         )
+
+
+EXPECTED_FINGERPRINTS = {
+    "competitions": "88945f5eedda2d1f4d3362d28c3f9fc366824fd66b2f1992c8c2a9f273afaf4a",
+    "seasons": "5463a8174d402bf1b2f997b4ae64ae6f7e1fd51119d66674d8cc1a03e21b1b06",
+    "teams": "9294c43877e65c8b5e05bd54d99619c16415a518717dd2fb9a7c1fd8851b1a8d",
+    "games": "d6e5bbc7891b5428bd8e6b1decaed5694c848619cbaf076c209c37389507eca6",
+    "odds_1x2": "2ec4c38e302f7887d29ad913e08aa83a255afb17402137c0db15cba8f7b41d51",
+    "post_match_statistics": "3ca6256838737bee8ed4486ec5ca6ab884be88de13d16f1ac326306134f4d56f",
+}
+
+
+def test_schema_fingerprints_match_documented_contract() -> None:
+    for dataset_name, expected in EXPECTED_FINGERPRINTS.items():
+        assert schemas.schema_fingerprint(schemas.dataset_schema(dataset_name)) == expected
+
+
+def test_required_field_null_rejected_on_write(tmp_path: Path) -> None:
+    schema = schemas.games_schema()
+    # competition_id is required nullable=False
+    row = {field.name: None for field in schema}
+    table = pa.Table.from_pylist([row], schema=schema)
+    path = tmp_path / "games.parquet"
+    with pytest.raises((pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError)):
+        pq.write_table(table, path)
+
+
+def test_optional_null_accepted_for_scheduled_start(tmp_path: Path) -> None:
+    bundle = _normalized_bundle()
+    file_meta = parquet.write_bundle_parquet_files(tmp_path, bundle)
+    games_path = tmp_path / str(file_meta["games"]["relative_filename"])
+    table = pq.read_table(games_path)
+    assert table.schema.field("scheduled_start_utc").nullable is True
+    assert table.column("scheduled_start_utc")[0].as_py() is None

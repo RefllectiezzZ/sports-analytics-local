@@ -19,6 +19,7 @@ from sports_analytics.sports.football.contracts import (
     FOOTBALL_CANONICAL_SCHEMA_VERSION,
     FOOTBALL_INGESTION_SNAPSHOT_TYPE,
     MANIFEST_FILENAME,
+    MANIFEST_VERSION,
 )
 from sports_analytics.sports.football.identifiers import build_season_id, build_source_version
 from sports_analytics.sports.football.normalization import NormalizedFootballBundle
@@ -35,8 +36,12 @@ class PreparedSnapshot:
     source_version: str
     source_name: str
     schema_version: str
+    snapshot_type: str
+    manifest_version: str
     competition_id: str
     season_id: str
+    source_competition_code: str
+    source_season_code: str
     manifest_checksum_sha256: str
     games_count: int
     teams_count: int
@@ -147,6 +152,7 @@ def prepare_snapshot_directory(
     metadata: dict[str, JsonValue] = {
         "competition_id": competition_id,
         "season_id": season_id,
+        "source_competition_code": source_competition_code,
         "source_season_code": source_season_code,
         "games_count": len(bundle.games),
         "teams_count": len(bundle.teams),
@@ -161,8 +167,12 @@ def prepare_snapshot_directory(
         source_version=source_version,
         source_name=artifact.source_name,
         schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+        snapshot_type=FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+        manifest_version=MANIFEST_VERSION,
         competition_id=competition_id,
         season_id=season_id,
+        source_competition_code=source_competition_code,
+        source_season_code=source_season_code,
         manifest_checksum_sha256=manifest_checksum,
         games_count=len(bundle.games),
         teams_count=len(bundle.teams),

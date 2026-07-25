@@ -32,6 +32,8 @@ class SnapshotVerificationResult:
     games_count: int
     file_count: int
     relative_manifest_path: str
+    manifest_version: str | None = None
+    snapshot_type: str | None = None
     source_name: str | None = None
     source_version: str | None = None
     schema_version: str | None = None
@@ -137,6 +139,8 @@ def verify_snapshot_directory(
         games_count=games_count,
         file_count=len(expected_parquet_filenames()),
         relative_manifest_path=relative,
+        manifest_version=manifest.manifest_version,
+        snapshot_type=manifest.snapshot_type,
         source_name=manifest.source_name,
         source_version=manifest.source_version,
         schema_version=manifest.schema_version,

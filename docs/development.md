@@ -294,3 +294,29 @@ Merged migrations are immutable. Do not edit `0001_initial.sql` or
 - Prefer barriers/events over fragile sleeps in concurrency tests.
 - Snapshot and Parquet tests should assert schemas, nullability, ordering, and
   checksums without promising cross-PyArrow-version byte identity.
+
+## Football ingestion regression guidance
+
+When changing snapshot publication, HTTP transport, CSV parsing, or the scraper
+CLI, cover at least:
+
+- fresh-process BUILDING recovery where the retry UUID differs from the BUILDING
+  row path, the temporary prepared directory is discarded, and exactly one READY
+  row remains;
+- bounded orphan discovery/adoption with exact identity match, plus rejection of
+  different competition/season/source-version/raw-hash/schema identities and of
+  multiple matching orphans;
+- instrumentation proving `verify_snapshot_directory` is never called while a
+  SQLite write transaction is open;
+- prepared-directory ownership transitions (failure before/after prepare,
+  READY reuse cleanup, recovery cleanup, published final retention);
+- redirect destination non-contact for disallowed hosts/schemes/credentials;
+- pacing maintained after transport failures, including cases where backoff is
+  shorter than the minimum request interval;
+- streamed multi-chunk raw publication and mid-stream size-limit cleanup;
+- hostile manifests producing `SnapshotVerificationError` / CLI exit code 2;
+- path-component symlink rejection for raw, manifest, Parquet, and orphan paths;
+- malformed quoted CSV (`csv.Error` → `ParserError`) with field-size-limit
+  restoration;
+- pre-bootstrap CLI failures for invalid enqueue arguments that create no
+  storage directory, log file, SQLite database, migration, or network request.

@@ -18,7 +18,10 @@ from sports_analytics.core.exceptions import (
     SportsAnalyticsError,
 )
 from sports_analytics.core.runtime import bootstrap_runtime, validate_configuration
-from sports_analytics.core.validation import parse_positive_decimal_int
+from sports_analytics.core.validation import (
+    parse_cli_bounded_int,
+    parse_cli_positive_bounded_int,
+)
 from sports_analytics.data.cli import inspect_database_status
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
@@ -26,13 +29,17 @@ from sports_analytics.data.types import (
     DEFAULT_JOB_PRIORITY,
     SnapshotStatus,
     normalize_uuid,
-    validate_strict_int,
+    validate_sha256_checksum,
 )
 from sports_analytics.ingestion.football import enqueue_football_data_ingestion
 from sports_analytics.ingestion.types import DEFAULT_INGESTION_MAXIMUM_ATTEMPTS
 from sports_analytics.snapshots.reader import verify_snapshot_directory
 from sports_analytics.sources.catalog import list_source_names
-from sports_analytics.sources.football_data_co_uk.catalog import list_competitions
+from sports_analytics.sources.football_data_co_uk.catalog import (
+    get_competition,
+    list_competitions,
+)
+from sports_analytics.sports.football.identifiers import parse_canonical_season
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -112,17 +119,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return common_exit
 
         if args.list_sources:
-            for name in list_source_names():
-                print(name)
-            return SUCCESS_EXIT
+            return _list_sources(args)
 
         if args.list_competitions:
-            for entry in list_competitions():
-                print(
-                    f"{entry.competition_id}\t{entry.display_name}\t"
-                    f"{entry.division_code}\t{entry.timezone}"
-                )
-            return SUCCESS_EXIT
+            return _list_competitions(args)
 
         if args.list_snapshots:
             return _list_snapshots(args.config, args.env_file)
@@ -177,42 +177,86 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         parser.error("--enqueue-football-data requires --competition and --season")
 
 
-def _enqueue(args: argparse.Namespace) -> int:
-    runtime = bootstrap_runtime(
-        "scraper",
-        config_path=args.config,
-        env_file=args.env_file,
-    )
+def _validate_enqueue_arguments(args: argparse.Namespace) -> tuple[str, str, str | None, int, int]:
+    """Validate enqueue arguments without creating runtime side effects.
+
+    Competition catalog resolution, canonical season parsing, raw SHA validation,
+    priority, and maximum attempts are all argument-only checks performed before
+    ``bootstrap_runtime``.
+    """
+    try:
+        competition = get_competition(args.competition)
+    except PermanentSourceError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    try:
+        parse_canonical_season(args.season)
+    except Exception as exc:  # noqa: BLE001
+        raise ConfigurationError(str(exc)) from exc
+    raw_sha256: str | None = None
+    if args.raw_sha256 is not None:
+        try:
+            raw_sha256 = validate_sha256_checksum(args.raw_sha256)
+        except RepositoryError as exc:
+            raise ConfigurationError(str(exc)) from exc
     priority = DEFAULT_JOB_PRIORITY
     if args.priority is not None:
         try:
-            priority = validate_strict_int(int(args.priority, 10), field_name="priority")
-        except (ValueError, RepositoryError) as exc:
-            raise ConfigurationError("priority must be a strict integer") from exc
+            priority = parse_cli_bounded_int(args.priority, field_name="priority")
+        except RepositoryError as exc:
+            raise ConfigurationError(str(exc)) from exc
     maximum_attempts = DEFAULT_INGESTION_MAXIMUM_ATTEMPTS
     if args.maximum_attempts is not None:
         try:
-            maximum_attempts = parse_positive_decimal_int(
+            maximum_attempts = parse_cli_positive_bounded_int(
                 args.maximum_attempts,
                 field_name="maximum_attempts",
             )
         except RepositoryError as exc:
             raise ConfigurationError(str(exc)) from exc
+    return competition.competition_id, args.season, raw_sha256, priority, maximum_attempts
+
+
+def _enqueue(args: argparse.Namespace) -> int:
+    competition_id, season, raw_sha256, priority, maximum_attempts = _validate_enqueue_arguments(
+        args
+    )
+    runtime = bootstrap_runtime(
+        "scraper",
+        config_path=args.config,
+        env_file=args.env_file,
+    )
     job = enqueue_football_data_ingestion(
         database_path=runtime.database_path,
         scraping=runtime.settings.scraping,
-        competition_id=args.competition,
-        season=args.season,
-        raw_sha256=args.raw_sha256,
+        competition_id=competition_id,
+        season=season,
+        raw_sha256=raw_sha256,
         priority=priority,
         maximum_attempts=maximum_attempts,
         actor="scraper-cli",
         created_at=runtime.started_at,
     )
     print(
-        f"enqueued job_id={job.id} competition={args.competition} "
-        f"season={args.season} status={job.status.value}"
+        f"enqueued job_id={job.id} competition={competition_id} "
+        f"season={season} status={job.status.value}"
     )
+    return SUCCESS_EXIT
+
+
+def _list_sources(args: argparse.Namespace) -> int:
+    validate_configuration(config_path=args.config, env_file=args.env_file)
+    for name in list_source_names():
+        print(name)
+    return SUCCESS_EXIT
+
+
+def _list_competitions(args: argparse.Namespace) -> int:
+    validate_configuration(config_path=args.config, env_file=args.env_file)
+    for entry in list_competitions():
+        print(
+            f"{entry.competition_id}\t{entry.display_name}\t"
+            f"{entry.division_code}\t{entry.timezone}"
+        )
     return SUCCESS_EXIT
 
 

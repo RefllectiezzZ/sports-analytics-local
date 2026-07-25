@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from sports_analytics.core.exceptions import ParserError
@@ -65,58 +66,71 @@ def parse_football_data_csv(
     *,
     expected_division_code: str,
 ) -> ParsedFootballCsv:
-    """Parse Football-Data CSV bytes with strict structural validation."""
+    """Parse Football-Data CSV bytes with strict structural validation.
+
+    Uses ``csv.reader(..., strict=True)`` and a bounded ``csv.field_size_limit``.
+    Every ``csv.Error`` from reader construction, header retrieval, and each
+    iterator advance is converted to ``ParserError``. The previous process-global
+    field-size limit is always restored.
+    """
     text, encoding = decode_csv_bytes(content)
     if any(len(line) > MAX_LINE_LENGTH for line in text.splitlines()):
         msg = f"CSV logical line exceeds maximum length of {MAX_LINE_LENGTH}"
         raise ParserError(msg)
 
-    reader = csv.reader(io.StringIO(text))
+    previous_limit = csv.field_size_limit()
     try:
-        header_row = next(reader)
-    except StopIteration as exc:
-        msg = "CSV content has no header row"
-        raise ParserError(msg) from exc
-    except csv.Error as exc:
-        msg = "malformed CSV header"
-        raise ParserError(msg) from exc
+        csv.field_size_limit(MAX_FIELD_LENGTH)
+        try:
+            reader = csv.reader(io.StringIO(text), strict=True)
+        except csv.Error as exc:
+            msg = "malformed CSV reader construction"
+            raise ParserError(msg) from exc
 
-    headers = tuple(cell.strip() for cell in header_row)
-    if not headers:
-        msg = "CSV header row is empty"
-        raise ParserError(msg)
-    if any(name == "" for name in headers):
-        msg = "CSV header contains an empty column name"
-        raise ParserError(msg)
-    if len(set(headers)) != len(headers):
-        msg = "CSV header contains duplicate column names"
-        raise ParserError(msg)
-    for name in headers:
-        if len(name) > MAX_FIELD_LENGTH:
-            msg = f"CSV header name exceeds maximum length of {MAX_FIELD_LENGTH}"
+        rows_iter = _iter_csv_rows(reader)
+        try:
+            header_row = next(rows_iter)
+        except StopIteration as exc:
+            msg = "CSV content has no header row"
+            raise ParserError(msg) from exc
+
+        headers = tuple(cell.strip() for cell in header_row)
+        if not headers:
+            msg = "CSV header row is empty"
+            raise ParserError(msg)
+        if any(name == "" for name in headers):
+            msg = "CSV header contains an empty column name"
+            raise ParserError(msg)
+        if len(set(headers)) != len(headers):
+            msg = "CSV header contains duplicate column names"
+            raise ParserError(msg)
+        for name in headers:
+            if len(name) > MAX_FIELD_LENGTH:
+                msg = f"CSV header name exceeds maximum length of {MAX_FIELD_LENGTH}"
+                raise ParserError(msg)
+
+        missing_required = [name for name in REQUIRED_COLUMNS if name not in headers]
+        if missing_required:
+            msg = f"CSV missing required columns: {', '.join(missing_required)}"
             raise ParserError(msg)
 
-    missing_required = [name for name in REQUIRED_COLUMNS if name not in headers]
-    if missing_required:
-        msg = f"CSV missing required columns: {', '.join(missing_required)}"
-        raise ParserError(msg)
+        recognized = tuple(
+            name
+            for name in headers
+            if name in REQUIRED_COLUMNS or name in SUPPORTED_OPTIONAL_AND_ODDS
+        )
+        unknown = tuple(sorted(name for name in headers if name not in set(recognized)))
+        missing_optional = tuple(
+            sorted(name for name in OPTIONAL_COLUMNS if name not in headers)
+        )
 
-    recognized = tuple(
-        name for name in headers if name in REQUIRED_COLUMNS or name in SUPPORTED_OPTIONAL_AND_ODDS
-    )
-    unknown = tuple(sorted(name for name in headers if name not in set(recognized)))
-    missing_optional = tuple(sorted(name for name in OPTIONAL_COLUMNS if name not in headers))
-
-    rows: list[dict[str, str]] = []
-    signatures: dict[tuple[tuple[str, str], ...], int] = {}
-    exact_duplicate_count = 0
-    warnings: list[str] = []
-    data_row_number = 1  # header consumed
-    for raw_row in reader:
-        data_row_number += 1
-        try:
-            if raw_row is None:
-                continue
+        rows: list[dict[str, str]] = []
+        signatures: dict[tuple[tuple[str, str], ...], int] = {}
+        exact_duplicate_count = 0
+        warnings: list[str] = []
+        data_row_number = 1  # header consumed
+        for raw_row in rows_iter:
+            data_row_number += 1
             if len(raw_row) == 1 and raw_row[0].strip() == "":
                 continue
             if all(cell.strip() == "" for cell in raw_row):
@@ -153,23 +167,40 @@ def parse_football_data_csv(
             if len(rows) > MAX_ROW_COUNT:
                 msg = f"CSV exceeds maximum row count of {MAX_ROW_COUNT}"
                 raise ParserError(msg)
+
+        if unknown:
+            warnings.append(f"unknown_headers={len(unknown)}")
+        if exact_duplicate_count:
+            warnings.append(f"exact_duplicate_rows={exact_duplicate_count}")
+
+        return ParsedFootballCsv(
+            encoding=encoding,
+            headers=headers,
+            recognized_headers=recognized,
+            unknown_headers=unknown,
+            missing_optional_headers=missing_optional,
+            rows=tuple(rows),
+            row_count=len(rows),
+            exact_duplicate_count=exact_duplicate_count,
+            warnings=tuple(sorted(warnings)),
+        )
+    finally:
+        csv.field_size_limit(previous_limit)
+
+
+def _iter_csv_rows(reader: Iterator[list[str]]) -> Iterator[list[str]]:
+    """Advance a CSV reader while converting every ``csv.Error`` to ``ParserError``.
+
+    Errors raised by the iterator itself (including multiline quoted records and
+    header retrieval) are caught here so callers never observe raw ``csv.Error``.
+    """
+    while True:
+        try:
+            row = next(reader)
+        except StopIteration:
+            return
         except csv.Error as exc:
-            msg = f"row {data_row_number}: malformed CSV"
+            # Do not include raw row content in the error message.
+            msg = "malformed CSV record"
             raise ParserError(msg) from exc
-
-    if unknown:
-        warnings.append(f"unknown_headers={len(unknown)}")
-    if exact_duplicate_count:
-        warnings.append(f"exact_duplicate_rows={exact_duplicate_count}")
-
-    return ParsedFootballCsv(
-        encoding=encoding,
-        headers=headers,
-        recognized_headers=recognized,
-        unknown_headers=unknown,
-        missing_optional_headers=missing_optional,
-        rows=tuple(rows),
-        row_count=len(rows),
-        exact_duplicate_count=exact_duplicate_count,
-        warnings=tuple(sorted(warnings)),
-    )
+        yield row

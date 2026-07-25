@@ -81,11 +81,87 @@ proceed.
 | Situation | Behaviour |
 | --- | --- |
 | No row, no directory | create BUILDING, rename prepared dir, mark READY |
-| READY row + directory | verify and reuse; discard temp |
-| Complete directory, no row | verify and adopt; never overwrite |
-| BUILDING + complete directory | verify and complete READY |
-| BUILDING + missing directory | retryable busy/incomplete error |
+| READY row + directory | verify outside the write transaction, re-check row/version/identity in a short `BEGIN IMMEDIATE`, append reuse audit, discard temp |
+| Complete orphan directory, no row | bounded discovery under `snapshot_type/schema_version/competition_id/season_label`; adopt only exact identity matches |
+| BUILDING + complete directory | derive the final directory from the existing row path (never the newly prepared UUID); verify outside the write transaction; re-check BUILDING/version/identity; mark READY; discard the new temp |
+| BUILDING + missing directory | typed retryable busy error; leave BUILDING unchanged; discard the newly prepared temp; do not create another snapshot row |
 | Conflicting unexpected directory | permanent integrity error; never delete/overwrite |
+| Multiple identity-matching orphans | permanent integrity error |
+| Malformed / symlink orphan candidates | ignored by the deterministic discovery policy (not adopted) |
+
+### BUILDING crash recovery
+
+A retry after a crash may prepare a new random snapshot UUID and therefore a
+different temporary path. When a BUILDING row already exists:
+
+1. derive its final directory from the parent of `existing.relative_path`;
+2. never locate the crashed publication using `prepared.relative_directory`;
+3. validate the existing relative path safely;
+4. inspect and verify the existing directory outside a write transaction;
+5. enter a short `BEGIN IMMEDIATE` transaction;
+6. re-read the same snapshot by id and require unchanged status, version,
+   source identity, schema version, and relative path;
+7. mark READY, append the audit event, commit;
+8. discard the newly prepared temporary snapshot.
+
+### Bounded orphan discovery
+
+Orphan adoption inspects only direct child directories of the exact parent
+`football-ingestion/football-canonical-v1/<competition_id>/<season_label>/`.
+Candidate names must be canonical UUIDs. Symlinks are not followed. Manifests
+and files are verified outside SQLite write transactions.
+
+A candidate may be adopted only when its verified identity matches the
+requested ingestion exactly for:
+
+- `manifest_version`
+- `snapshot_type`
+- `schema_version`
+- `source_name`
+- `source_version`
+- `source_competition_code`
+- `source_season_code`
+- `competition_id`
+- `season_id`
+- raw artifact checksum
+- canonical expected file set
+
+A different manifest checksum from the newly prepared manifest is not automatic
+corruption, because snapshot UUID, environment metadata, or supported PyArrow
+version may differ. Adoption still requires complete identity and file
+verification. Snapshot ID, checksum, row counts, file counts, quality summary,
+source observation time, and metadata are taken from the verified orphan
+manifest; prepared identity is never mixed with unrelated on-disk values.
+
+After verification, a short `BEGIN IMMEDIATE` transaction re-checks that no
+active snapshot exists for the source identity, creates BUILDING metadata from
+the verified orphan, marks READY, appends audit, and commits. The newly
+prepared temporary directory is discarded.
+
+### Transaction boundary
+
+Expensive verification never runs while holding the SQLite writer lock:
+
+1. read candidate metadata with a read-only or ordinary short connection;
+2. close the connection;
+3. verify filesystem content completely;
+4. open `BEGIN IMMEDIATE`;
+5. re-read the exact row and expected version/state;
+6. perform only short metadata operations, same-filesystem atomic rename when
+   required, and audit insertion;
+7. commit.
+
+Race safety relies on migration-0003 active-source uniqueness, row version
+checks, and exact status/identity re-checks.
+
+### Prepared-directory ownership
+
+`FootballIngestionService` owns cleanup of `PreparedSnapshot` until publication
+transfers ownership. Temporary prepared directories are removed on checkpoint or
+publication failure, READY reuse, and BUILDING/orphan recovery. Successful new
+publication retains the renamed final directory. Cleanup failure never replaces
+a primary exception; cleanup failure after an otherwise successful
+non-publication path is reported deliberately.
 
 Temporary cleanup failures must not replace the primary error. Final immutable
 directories are never recursively deleted by publication failure handling.

@@ -83,6 +83,7 @@ class ValidatedManifest:
     """A manifest document validated for read-only verification/publication."""
 
     document: dict[str, JsonValue]
+    manifest_version: str
     snapshot_id: str
     snapshot_type: str
     schema_version: str
@@ -339,6 +340,7 @@ def _validate_manifest_document(document: object) -> ValidatedManifest:
     generated_snapshot_relative_path = _relative_path(doc, "generated_snapshot_relative_path")
     return ValidatedManifest(
         document=doc,
+        manifest_version=manifest_version,
         snapshot_id=snapshot_id,
         snapshot_type=snapshot_type,
         schema_version=schema_version,

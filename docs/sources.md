@@ -50,11 +50,17 @@ Both use cross-year seasons (`YYYY-YYYY`).
 - exact host allowlist: `www.football-data.co.uk`
 - normal TLS verification
 - bounded timeout, retries, pacing, and download size
-- redirects must remain HTTPS on the same host
-- cross-host, HTTP, file, localhost, and private-network redirects rejected
-- response body streamed with a hard maximum (default 25 MiB, max 100 MiB)
+- automatic urllib redirect following is disabled
+- every redirect is validated before any connection attempt to the destination
+- redirects must remain HTTPS on the exact host `www.football-data.co.uk` with the
+  permitted port and no embedded credentials
+- cross-host, HTTP downgrade, file, localhost, loopback, private-network, missing
+  Location, and redirect-loop destinations are rejected without contacting them
+- response body is streamed directly into the content-addressed raw store while
+  hashing and enforcing `maximum_download_bytes` (default 25 MiB, max 100 MiB)
 - apparent HTML bodies rejected
 - cookies are never stored or logged
+- proxy credentials are never logged
 
 ### Retry and pacing
 
@@ -67,8 +73,29 @@ Configured under `[scraping]`:
 - `minimum_request_interval_seconds`
 - `maximum_download_bytes`
 
-Backoff is deterministic exponential without jitter. Tests inject transport,
-clock, monotonic clock, and sleeper. Concurrent downloads are not used.
+Backoff is deterministic exponential without jitter. The request timestamp is
+updated for every transport attempt, including attempts that fail before
+returning a response. `minimum_request_interval_seconds` applies between all
+actual request starts; deterministic exponential backoff also applies after
+retryable failures. A retry is never sent earlier than either constraint
+permits. Identical inputs and fake-clock state produce identical sleep
+sequences. Tests inject transport, clock, monotonic clock, and sleeper.
+Concurrent downloads are not used.
+
+### HTTP metadata
+
+Live retrieval retains typed HTTP metadata for the acquisition and manifest:
+
+- status
+- Content-Type
+- Content-Length when valid
+- ETag
+- Last-Modified
+- final validated URL
+- whether network retrieval occurred
+
+Cached raw execution records that no HTTP request occurred, uses null HTTP
+response fields, and retains the fixed canonical source URL separately.
 
 ### Raw storage
 

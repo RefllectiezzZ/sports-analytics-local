@@ -169,3 +169,100 @@ def test_scraper_validate_config_still_works(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert "configuration valid" in result.stdout
     assert not (tmp_path / "storage").exists()
+
+
+def test_scraper_enqueue_invalid_competition_creates_no_side_effects(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    result = _run_scraper(
+        tmp_path,
+        "--enqueue-football-data",
+        "--competition",
+        "not-a-competition",
+        "--season",
+        "2023-2024",
+    )
+    assert result.returncode == 2
+    assert "error:" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    assert not (tmp_path / "storage").exists()
+    assert not list(tmp_path.glob("**/*.sqlite3"))
+    assert not list(tmp_path.glob("**/*.log"))
+
+
+def test_scraper_enqueue_invalid_season_creates_no_side_effects(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    result = _run_scraper(
+        tmp_path,
+        "--enqueue-football-data",
+        "--competition",
+        "eng-premier-league",
+        "--season",
+        "23-24",
+    )
+    assert result.returncode == 2
+    assert "error:" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    assert not (tmp_path / "storage").exists()
+
+
+def test_scraper_enqueue_invalid_raw_sha_creates_no_side_effects(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    result = _run_scraper(
+        tmp_path,
+        "--enqueue-football-data",
+        "--competition",
+        "eng-premier-league",
+        "--season",
+        "2023-2024",
+        "--raw-sha256",
+        "not-a-sha",
+    )
+    assert result.returncode == 2
+    assert "error:" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    assert not (tmp_path / "storage").exists()
+
+
+def test_scraper_enqueue_rejects_priority_with_plus_and_leading_zeros(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    for bad in ("+7", "07", "1.5", "1e2", " 7"):
+        result = _run_scraper(
+            tmp_path,
+            "--enqueue-football-data",
+            "--competition",
+            "eng-premier-league",
+            "--season",
+            "2023-2024",
+            "--priority",
+            bad,
+        )
+        assert result.returncode == 2, bad
+        assert "priority" in result.stderr.lower()
+        assert "Traceback" not in result.stderr
+        assert not (tmp_path / "storage").exists()
+
+
+def test_scraper_enqueue_rejects_huge_maximum_attempts(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    result = _run_scraper(
+        tmp_path,
+        "--enqueue-football-data",
+        "--competition",
+        "eng-premier-league",
+        "--season",
+        "2023-2024",
+        "--maximum-attempts",
+        "9" * 80,
+    )
+    assert result.returncode == 2
+    assert "maximum_attempts" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    assert not (tmp_path / "storage").exists()
+
+
+def test_scraper_list_sources_validates_config_without_side_effects(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    result = _run_scraper(tmp_path, "--list-sources")
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["football-data-co-uk"]
+    assert not (tmp_path / "storage").exists()

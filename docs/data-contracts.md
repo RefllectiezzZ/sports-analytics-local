@@ -130,3 +130,47 @@ Post-match statistics and finished-game scores are historical outcomes. Feature
 engineering and modelling layers introduced in later PRs must respect
 `availability_stage` and game status so post-match information cannot leak into
 pre-match predictions.
+
+## Arrow nullability
+
+Schemas use explicit `pa.field(..., nullable=...)` declarations. Required fields
+are `nullable=False`. Optional fields keep `nullable=True` only where the
+contract permits absence.
+
+### Required (`nullable=False`) examples
+
+- identifiers (`competition_id`, `season_id`, `team_id`, `game_id`, `quote_id`)
+- `sport_code`
+- competition and season identity fields
+- source identity fields (`source_name`, `source_competition_code`,
+  `source_season_code`, `source_file_sha256`, `source_observed_at_utc`)
+- `event_date`, `start_time_precision`, `status`
+- `home_team_id`, `away_team_id`
+- `schema_version`
+- odds market/provider/selection/price fields when a quote row exists
+- statistics `game_id` and `availability_stage`
+
+### Optional (`nullable=True`) only
+
+- `scheduled_start_utc` for date-only rows
+- full-time / half-time score and result fields for scheduled games or when HT is
+  unavailable
+- `quoted_at_utc`
+- `quality_reason`
+- `referee`
+- optional statistic count columns when that statistic is absent
+
+`schema_fingerprint` includes field name, order, type, and nullability.
+Changing nullability changes the logical fingerprint but does not require a
+SQLite migration.
+
+### Current schema fingerprints (`football-canonical-v1`)
+
+| Dataset | Fingerprint |
+| --- | --- |
+| competitions | `88945f5eedda2d1f4d3362d28c3f9fc366824fd66b2f1992c8c2a9f273afaf4a` |
+| seasons | `5463a8174d402bf1b2f997b4ae64ae6f7e1fd51119d66674d8cc1a03e21b1b06` |
+| teams | `9294c43877e65c8b5e05bd54d99619c16415a518717dd2fb9a7c1fd8851b1a8d` |
+| games | `d6e5bbc7891b5428bd8e6b1decaed5694c848619cbaf076c209c37389507eca6` |
+| odds_1x2 | `2ec4c38e302f7887d29ad913e08aa83a255afb17402137c0db15cba8f7b41d51` |
+| post_match_statistics | `3ca6256838737bee8ed4486ec5ca6ab884be88de13d16f1ac326306134f4d56f` |
