@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -434,10 +435,11 @@ def test_model_rejects_non_finite_coefficients(tmp_path: Path) -> None:
         },
         "serialization": {"pickle": False, "joblib": False},
     }
-    text = json.dumps(document, allow_nan=True) + "\n"
-    (model_dir / "model.json").write_text(text, encoding="utf-8")
-    checksum = __import__("hashlib").sha256(text.encode("utf-8")).hexdigest()
-    (model_dir / "model_checksum.sha256").write_text(f"{checksum}\n", encoding="utf-8")
+    raw = (json.dumps(document, allow_nan=True) + "\n").encode("utf-8")
+    (model_dir / "model.json").write_bytes(raw)
+    checksum = hashlib.sha256(raw).hexdigest()
+    sidecar_path = model_dir / "model_checksum.sha256"
+    sidecar_path.write_text(f"{checksum}\n", encoding="utf-8", newline="\n")
     with pytest.raises(ModelError, match="non-finite"):
         load_model_artifact(
             models_root=models_root,
@@ -495,10 +497,11 @@ def test_model_rejects_malformed_dates(tmp_path: Path) -> None:
         },
         "serialization": {"pickle": False, "joblib": False},
     }
-    text = dumps_canonical_json(document) + "\n"
-    (model_dir / "model.json").write_text(text, encoding="utf-8")
-    checksum = __import__("hashlib").sha256(text.encode("utf-8")).hexdigest()
-    (model_dir / "model_checksum.sha256").write_text(f"{checksum}\n", encoding="utf-8")
+    raw = (dumps_canonical_json(document) + "\n").encode("utf-8")
+    (model_dir / "model.json").write_bytes(raw)
+    checksum = hashlib.sha256(raw).hexdigest()
+    sidecar_path = model_dir / "model_checksum.sha256"
+    sidecar_path.write_text(f"{checksum}\n", encoding="utf-8", newline="\n")
     with pytest.raises(ModelError, match="malformed"):
         load_model_artifact(
             models_root=models_root,
