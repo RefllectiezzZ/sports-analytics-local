@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from sports_analytics.core.exceptions import NormalizationError, PermanentSourceError
-from sports_analytics.sources.catalog import list_source_names
+from sports_analytics.sources.catalog import (
+    FOOTBALL_DATA_ADAPTER_VERSION,
+    get_source_descriptor,
+    list_source_descriptors,
+    list_source_names,
+)
+from sports_analytics.sources.contracts import SourceRole
 from sports_analytics.sources.football_data_co_uk.catalog import (
     build_csv_url,
     get_competition,
@@ -20,6 +26,26 @@ from sports_analytics.sports.types import CompetitionType
 def test_top_level_source_catalog_lists_football_data_source() -> None:
     assert list_source_names() == (SOURCE_FOOTBALL_DATA_CO_UK,)
     assert source_name() == SOURCE_FOOTBALL_DATA_CO_UK
+    assert (
+        tuple(descriptor.source_id for descriptor in list_source_descriptors())
+        == list_source_names()
+    )
+
+
+def test_football_data_descriptor_describes_the_implemented_adapter() -> None:
+    descriptor = get_source_descriptor(SOURCE_FOOTBALL_DATA_CO_UK)
+
+    assert descriptor.display_name == "Football-Data.co.uk"
+    assert descriptor.role is SourceRole.HISTORICAL_DATA
+    assert descriptor.adapter_version == FOOTBALL_DATA_ADAPTER_VERSION
+    assert descriptor.supported_sports == ("football",)
+    assert descriptor.requires_network is True
+    assert "historical" in descriptor.notes.lower()
+
+
+def test_get_source_descriptor_rejects_unknown_source() -> None:
+    with pytest.raises(PermanentSourceError, match="unsupported source_id"):
+        get_source_descriptor("football-data-co-uk-mirror")
 
 
 def test_competition_catalog_is_sorted_and_unique() -> None:

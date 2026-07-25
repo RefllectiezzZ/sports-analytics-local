@@ -420,7 +420,9 @@ def normalize_football_rows(
             home=home_participant,
             away=away_participant,
         )
-        if identity.source_event_key in source_references:
+        if identity.source_event_id in source_references:
+            # Two rows of one source file describing the same fixture with different
+            # content is a source-integrity failure, not a reconciliation ambiguity.
             msg = f"row {index}: conflicting duplicate source game key"
             raise NormalizationError(msg)
 

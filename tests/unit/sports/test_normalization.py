@@ -1,34 +1,41 @@
-"""Football normalization, odds, statistics, and identifier tests."""
+"""Football normalization tests for canonical identity, markets, and statistics."""
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from sports_analytics.core.exceptions import NormalizationError
+from sports_analytics.markets.identifiers import build_quote_id
+from sports_analytics.markets.schemas import quote_sort_key
 from sports_analytics.sources.football_data_co_uk.catalog import get_competition
 from sports_analytics.sources.football_data_co_uk.parser import parse_football_data_csv
 from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
-from sports_analytics.sports.football.identifiers import (
-    build_game_id,
-    build_quote_id,
-    build_source_game_key,
-    build_team_id,
-    parse_canonical_season,
+from sports_analytics.sports.contracts import IngestedEvent
+from sports_analytics.sports.football.identifiers import parse_canonical_season
+from sports_analytics.sports.football.markets import (
+    MARKET_KEY_MATCH_RESULT_1X2,
+    SUPPORTED_ODDS_FAMILIES,
+    match_result_1x2_selection,
 )
 from sports_analytics.sports.football.normalization import (
-    MARKET_TYPE_1X2,
     PINNACLE_CAUTION_CUTOFF,
     NormalizedFootballBundle,
+    PostMatchStatisticsRecord,
+    combine_local_kickoff,
     normalize_football_rows,
+    normalize_team_name,
+    parse_source_date,
 )
+from sports_analytics.sports.reconciliation import RECONCILIATION_POLICY_VERSION
 
 SOURCE_FILE_SHA256 = "c" * 64
 OBSERVED_AT = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
+ALTERNATE_SOURCE_NAME = "synthetic-second-source"
 
 
 def _fixture_rows(name: str, *, expected_division_code: str) -> list[dict[str, str]]:
@@ -42,6 +49,7 @@ def _normalize(
     *,
     competition_id: str = "eng-premier-league",
     season: str = "2023-2024",
+    source_name: str = SOURCE_FOOTBALL_DATA_CO_UK,
 ) -> NormalizedFootballBundle:
     competition = get_competition(competition_id)
     label, start_year, end_year, source_season_code = parse_canonical_season(season)
@@ -56,7 +64,7 @@ def _normalize(
         start_year=start_year,
         end_year=end_year,
         source_season_code=source_season_code,
-        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
+        source_name=source_name,
         source_file_sha256=SOURCE_FILE_SHA256,
         source_observed_at_utc=OBSERVED_AT,
     )
@@ -93,6 +101,17 @@ def _finished_row(**overrides: str) -> dict[str, str]:
     return row
 
 
+def _statistics_for(
+    bundle: NormalizedFootballBundle,
+    event: IngestedEvent,
+) -> PostMatchStatisticsRecord:
+    return next(
+        item
+        for item in bundle.post_match_statistics
+        if item.canonical_event_id == event.canonical.canonical_event_id
+    )
+
+
 def test_normalize_synthetic_fixture_builds_canonical_bundle() -> None:
     rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
 
@@ -102,64 +121,260 @@ def test_normalize_synthetic_fixture_builds_canonical_bundle() -> None:
     assert bundle.competitions[0].source_competition_code == "E0"
     assert bundle.seasons[0].season_id == "eng-premier-league:2023-2024"
     assert bundle.seasons[0].source_season_code == "2324"
-    assert {team.display_name for team in bundle.teams} == {
+    assert {item.canonical.display_name for item in bundle.participants} == {
         "Northbridge FC",
         "Southport Athletic",
     }
-    assert len(bundle.games) == 3
-    assert len(bundle.odds_1x2) == 48
+    assert len(bundle.events) == 3
+    assert len(bundle.market_quotes) == 48
     assert len(bundle.post_match_statistics) == 2
+    assert bundle.unresolved_reconciliations == ()
     assert bundle.duplicate_rows_discarded == 0
     assert bundle.warnings == ()
     assert bundle.pinnacle_caution_quote_count == 0
+    assert bundle.source_policy_version == "football-data-co-uk-policy-v1"
+    assert bundle.reconciliation_policy_version == RECONCILIATION_POLICY_VERSION
 
 
-def test_normalize_fixture_games_have_expected_statuses_and_times() -> None:
+def test_normalize_fixture_events_have_expected_statuses_and_times() -> None:
     rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
 
     bundle = _normalize(rows)
 
-    first, second, third = bundle.games
+    first, second, third = (event.canonical for event in bundle.events)
     assert first.status == "finished"
-    assert first.full_time_result == "home"
+    assert first.result_code == "home"
+    assert (first.home_score, first.away_score) == (2, 1)
+    assert first.event_date == date(2023, 8, 12)
     assert first.scheduled_start_utc == datetime(2023, 8, 12, 14, 0, tzinfo=UTC)
     assert first.start_time_precision == "minute"
-    assert second.full_time_result == "draw"
+    assert second.result_code == "draw"
     assert second.scheduled_start_utc == datetime(2023, 8, 12, 16, 30, tzinfo=UTC)
     assert third.status == "scheduled"
-    assert third.full_time_home_goals is None
+    assert third.home_score is None
+    assert third.result_code is None
     assert third.scheduled_start_utc is None
     assert third.start_time_precision == "date-only"
 
 
-def test_normalize_fixture_odds_are_decimal_and_deterministically_identified() -> None:
+def test_normalize_fixture_records_source_row_provenance() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    bundle = _normalize(rows)
+
+    references = [event.source_reference for event in bundle.events]
+    # Header is row 1, so the first data row is row 2.
+    assert [item.source_row_number for item in references] == [2, 3, 4]
+    for reference, event in zip(references, bundle.events, strict=True):
+        assert reference.source_name == SOURCE_FOOTBALL_DATA_CO_UK
+        assert reference.canonical_event_id == event.canonical.canonical_event_id
+        assert reference.source_event_key.startswith(f"{SOURCE_FOOTBALL_DATA_CO_UK}|")
+        assert reference.source_observed_at_utc == OBSERVED_AT
+        assert reference.source_file_sha256 == SOURCE_FILE_SHA256
+
+
+def test_normalize_reconciles_single_source_events_exactly() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    bundle = _normalize(rows)
+
+    for event in bundle.events:
+        assert event.reconciliation.state == "exact"
+        assert event.reconciliation.confidence == 1.0
+        assert event.reconciliation.policy_version == RECONCILIATION_POLICY_VERSION
+        assert event.reconciliation.canonical_event_id == event.canonical.canonical_event_id
+        assert event.reconciliation.reason is None
+        assert event.reconciliation.is_downstream_safe
+    reconciliations = bundle.reconciliations
+    assert len(reconciliations) == len(bundle.events)
+    assert list(reconciliations) == sorted(
+        reconciliations,
+        key=lambda item: (item.source_name, item.source_event_id),
+    )
+
+
+def test_normalize_fixture_market_quotes_use_canonical_1x2_market() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    bundle = _normalize(rows)
+
+    assert {quote.selection.outcome_key for quote in bundle.market_quotes} == {
+        "home",
+        "draw",
+        "away",
+    }
+    for quote in bundle.market_quotes:
+        definition = quote.selection.definition
+        assert definition.market_key == MARKET_KEY_MATCH_RESULT_1X2
+        assert definition.market_key == "football.match-result.1x2.full-match"
+        assert definition.market_family == "match-result"
+        assert definition.market_period == "full-match"
+        assert definition.participant_scope == "event"
+        assert definition.line_type == "none"
+        assert definition.line_value is None
+        assert definition.canonical_participant_id is None
+        assert quote.quoted_at_utc is None
+        assert quote.quote_timestamp_precision == "snapshot-observation-only"
+        assert quote.source_observed_at_utc == OBSERVED_AT
+
+
+def test_normalize_fixture_market_quote_is_decimal_and_deterministically_identified() -> None:
     rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
     bundle = _normalize(rows)
-    first_game = bundle.games[0]
+    first_event = bundle.events[0]
 
     quote = next(
         item
-        for item in bundle.odds_1x2
-        if item.game_id == first_game.game_id
+        for item in bundle.market_quotes
+        if item.canonical_event_id == first_event.canonical.canonical_event_id
         and item.provider_id == "bet365"
         and item.quote_phase == "opening"
-        and item.selection == "home"
+        and item.selection.outcome_key == "home"
     )
 
-    assert quote.market_type == MARKET_TYPE_1X2
     assert quote.decimal_odds == Decimal("1.8000")
-    assert quote.source_column == "B365H"
-    assert quote.quoted_at_utc is None
-    assert quote.source_observed_at_utc == OBSERVED_AT
+    assert quote.source_field == "B365H"
+    assert quote.source_event_id == first_event.source_reference.source_event_id
+    assert quote.source_file_sha256 == SOURCE_FILE_SHA256
     assert quote.quote_id == build_quote_id(
-        game_id=first_game.game_id,
-        market_type=MARKET_TYPE_1X2,
-        selection="home",
+        canonical_event_id=first_event.canonical.canonical_event_id,
+        selection=match_result_1x2_selection("home"),
         provider_type="bookmaker",
         provider_id="bet365",
         quote_phase="opening",
-        source_column_family="b365-opening",
+        source_field="B365H",
     )
+    uuid.UUID(quote.quote_id)
+
+
+def test_market_quotes_preserve_provider_phase_and_source_column() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+    bundle = _normalize(rows)
+    first_event_id = bundle.events[0].canonical.canonical_event_id
+
+    home_quotes = {
+        (quote.provider_id, quote.quote_phase): quote
+        for quote in bundle.market_quotes
+        if quote.canonical_event_id == first_event_id and quote.selection.outcome_key == "home"
+    }
+
+    assert set(home_quotes) == {
+        (family.provider_id, family.quote_phase) for family in SUPPORTED_ODDS_FAMILIES
+    }
+    assert home_quotes[("bet365", "opening")].decimal_odds == Decimal("1.8000")
+    assert home_quotes[("bet365", "closing")].decimal_odds == Decimal("1.8500")
+    assert home_quotes[("pinnacle", "opening")].decimal_odds == Decimal("1.8200")
+    assert home_quotes[("pinnacle", "closing")].decimal_odds == Decimal("1.8800")
+    assert home_quotes[("market-average", "opening")].decimal_odds == Decimal("1.8100")
+    assert home_quotes[("market-maximum", "closing")].decimal_odds == Decimal("1.9200")
+    assert home_quotes[("bet365", "opening")].provider_type == "bookmaker"
+    assert home_quotes[("market-average", "opening")].provider_type == "source-market-average"
+    assert home_quotes[("market-maximum", "opening")].provider_type == "source-market-maximum"
+    assert home_quotes[("market-average", "closing")].quality_status == "source-provided-aggregate"
+    assert {quote.source_field for quote in home_quotes.values()} == {
+        family.home_column for family in SUPPORTED_ODDS_FAMILIES
+    }
+    # Unsupported source columns are never ingested as quotes.
+    assert all(quote.source_field != "WeirdBookH" for quote in bundle.market_quotes)
+
+
+def test_opening_and_closing_quotes_are_separate_rows() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+    bundle = _normalize(rows)
+    first_event_id = bundle.events[0].canonical.canonical_event_id
+
+    bet365_home = [
+        quote
+        for quote in bundle.market_quotes
+        if quote.canonical_event_id == first_event_id
+        and quote.provider_id == "bet365"
+        and quote.selection.outcome_key == "home"
+    ]
+
+    assert [quote.quote_phase for quote in bet365_home] == ["closing", "opening"]
+    assert len({quote.quote_id for quote in bet365_home}) == 2
+    assert len({quote.decimal_odds for quote in bet365_home}) == 2
+
+
+def test_market_quotes_are_deterministically_ordered() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    first = _normalize(rows)
+    second = _normalize(list(rows))
+
+    assert list(first.market_quotes) == sorted(first.market_quotes, key=quote_sort_key)
+    assert [quote.quote_id for quote in first.market_quotes] == [
+        quote.quote_id for quote in second.market_quotes
+    ]
+
+
+def test_repeated_normalization_is_byte_stable() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    first = _normalize(rows)
+    second = _normalize(list(rows))
+
+    assert first.events == second.events
+    assert first.participants == second.participants
+    assert first.market_quotes == second.market_quotes
+    assert first.post_match_statistics == second.post_match_statistics
+    assert first.reconciliations == second.reconciliations
+
+
+def test_canonical_identity_is_independent_of_source_name() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    first = _normalize(rows)
+    second = _normalize(rows, source_name=ALTERNATE_SOURCE_NAME)
+
+    assert [event.canonical for event in first.events] == [
+        event.canonical for event in second.events
+    ]
+    assert [item.canonical for item in first.participants] == [
+        item.canonical for item in second.participants
+    ]
+    assert [quote.quote_id for quote in first.market_quotes] == [
+        quote.quote_id for quote in second.market_quotes
+    ]
+
+
+def test_source_scoped_identity_depends_on_source_name() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    first = _normalize(rows)
+    second = _normalize(rows, source_name=ALTERNATE_SOURCE_NAME)
+
+    first_event_ids = {event.source_reference.source_event_id for event in first.events}
+    second_event_ids = {event.source_reference.source_event_id for event in second.events}
+    assert first_event_ids.isdisjoint(second_event_ids)
+    first_participant_ids = {
+        item.source_reference.source_participant_id for item in first.participants
+    }
+    second_participant_ids = {
+        item.source_reference.source_participant_id for item in second.participants
+    }
+    assert first_participant_ids.isdisjoint(second_participant_ids)
+    assert all(
+        item.source_reference.source_name == ALTERNATE_SOURCE_NAME for item in second.participants
+    )
+    assert all(
+        event.source_reference.source_event_key.startswith(f"{ALTERNATE_SOURCE_NAME}|")
+        for event in second.events
+    )
+
+
+def test_participant_identifiers_separate_canonical_and_source_scopes() -> None:
+    bundle = _normalize([_finished_row()])
+
+    for participant in bundle.participants:
+        canonical_id = participant.canonical.canonical_participant_id
+        source_id = participant.source_reference.source_participant_id
+        assert canonical_id != source_id
+        assert participant.source_reference.canonical_participant_id == canonical_id
+        assert participant.canonical.participant_type == "team"
+        assert participant.canonical.canonical_key == participant.canonical.display_name.casefold()
+        uuid.UUID(canonical_id)
+        uuid.UUID(source_id)
 
 
 def test_normalize_fixture_statistics_are_post_match_only() -> None:
@@ -167,8 +382,10 @@ def test_normalize_fixture_statistics_are_post_match_only() -> None:
 
     bundle = _normalize(rows)
 
-    stats = bundle.post_match_statistics[0]
-    assert stats.game_id == bundle.games[0].game_id
+    first_event = bundle.events[0]
+    stats = _statistics_for(bundle, first_event)
+    assert stats.source_event_id == first_event.source_reference.source_event_id
+    assert stats.availability_stage == "post-match"
     assert stats.referee == "A Official"
     assert stats.home_shots == 10
     assert stats.away_shots == 8
@@ -182,7 +399,19 @@ def test_normalize_fixture_statistics_are_post_match_only() -> None:
     assert stats.away_yellow_cards == 1
     assert stats.home_red_cards == 0
     assert stats.away_red_cards == 0
-    assert stats.availability_stage == "post-match"
+
+
+def test_half_time_goals_live_in_post_match_statistics_only() -> None:
+    rows = _fixture_rows("epl_2023_2024_synthetic.csv", expected_division_code="E0")
+
+    bundle = _normalize(rows)
+
+    stats = _statistics_for(bundle, bundle.events[0])
+    assert (stats.half_time_home_goals, stats.half_time_away_goals) == (1, 0)
+    assert stats.half_time_result == "home"
+    canonical = bundle.events[0].canonical
+    assert not hasattr(canonical, "half_time_home_goals")
+    assert not hasattr(canonical, "half_time_result")
 
 
 def test_normalize_accepts_minimal_primeira_liga_fixture_without_statistics() -> None:
@@ -191,8 +420,8 @@ def test_normalize_accepts_minimal_primeira_liga_fixture_without_statistics() ->
     bundle = _normalize(rows, competition_id="prt-primeira-liga")
 
     assert bundle.competitions[0].competition_id == "prt-primeira-liga"
-    assert len(bundle.games) == 2
-    assert len(bundle.odds_1x2) == 6
+    assert len(bundle.events) == 2
+    assert len(bundle.market_quotes) == 6
     assert bundle.post_match_statistics == ()
 
 
@@ -201,12 +430,18 @@ def test_normalize_discards_exact_duplicate_rows() -> None:
 
     bundle = _normalize([row, dict(row)])
 
-    assert len(bundle.games) == 1
+    assert len(bundle.events) == 1
     assert bundle.duplicate_rows_discarded == 1
     assert bundle.warnings == ("discarded_exact_duplicate_rows=1",)
 
 
-def test_normalize_rejects_conflicting_duplicate_source_game_key() -> None:
+def test_conflicting_duplicate_source_rows_are_rejected() -> None:
+    """One source file describing the same fixture twice is a source-integrity error.
+
+    Cross-source ambiguity is handled by the reconciler (unresolved); a conflicting
+    duplicate inside a single file is rejected loudly instead of silently dropping
+    the fixture from the snapshot.
+    """
     with pytest.raises(NormalizationError, match="conflicting duplicate source game key"):
         _normalize([_finished_row(), _finished_row(FTHG="3", FTAG="1")])
 
@@ -238,18 +473,94 @@ def test_normalize_requires_timezone_aware_observation_time() -> None:
     [
         ({"FTHG": "1", "FTAG": "0", "FTR": "A"}, "FTR inconsistent"),
         ({"FTHG": "", "FTAG": "", "FTR": "H"}, "FTR must be empty"),
+        ({"FTHG": "2", "FTAG": "", "FTR": "H"}, "FTHG/FTAG must both be present"),
+        ({"FTHG": "2", "FTAG": "1", "FTR": ""}, "FTR is required"),
         ({"HTHG": "1", "HTAG": "0", "HTR": "A"}, "HTR inconsistent"),
+        ({"HTHG": "", "HTAG": "", "HTR": "H"}, "HTR must be empty"),
+        ({"HTHG": "1", "HTAG": "0", "HTR": ""}, "HTR is required"),
         ({"HomeTeam": "Northbridge FC", "AwayTeam": "Northbridge\tFC"}, "must differ"),
         ({"Date": "2023-08-12"}, "Date must use"),
+        ({"Date": ""}, "Date is required"),
         ({"Time": "25:00"}, "Time must use"),
     ],
 )
-def test_normalize_rejects_invalid_game_rows(
+def test_normalize_rejects_invalid_event_rows(
     overrides: dict[str, str],
     message: str,
 ) -> None:
     with pytest.raises(NormalizationError, match=message):
         _normalize([_finished_row(**overrides)])
+
+
+def test_normalize_rejects_team_name_normalization_collision() -> None:
+    rows = [
+        _finished_row(),
+        _finished_row(Date="19/08/2023", HomeTeam="NORTHBRIDGE FC"),
+    ]
+
+    with pytest.raises(NormalizationError, match="team normalization collision"):
+        _normalize(rows)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("  Northbridge   FC ", ("Northbridge FC", "northbridge fc")),
+        ("Northbridge\tFC", ("Northbridge FC", "northbridge fc")),
+        ("Cafe\u0301 Rovers", ("Caf\u00e9 Rovers", "caf\u00e9 rovers")),
+    ],
+)
+def test_normalize_team_name_collapses_whitespace_and_composes_unicode(
+    raw: str,
+    expected: tuple[str, str],
+) -> None:
+    assert normalize_team_name(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("Northbridge\nFC", "control characters"),
+        ("Northbridge\x00FC", "NUL"),
+        ("   ", "non-empty after normalization"),
+        ("N" * 129, "exceeds maximum length"),
+    ],
+)
+def test_normalize_team_name_rejects_unsafe_values(raw: str, message: str) -> None:
+    with pytest.raises(NormalizationError, match=message):
+        normalize_team_name(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("12/08/2023", date(2023, 8, 12)),
+        ("12/08/23", date(2023, 8, 12)),
+    ],
+)
+def test_parse_source_date_accepts_documented_formats(raw: str, expected: date) -> None:
+    assert parse_source_date(raw) == expected
+
+
+def test_combine_local_kickoff_prefers_earlier_ambiguous_local_time() -> None:
+    # 01:30 local occurs twice on the UK DST fall-back day; policy takes fold=0.
+    combined = combine_local_kickoff(
+        date(2024, 10, 27),
+        time(1, 30),
+        timezone_name="Europe/London",
+    )
+
+    assert combined == datetime(2024, 10, 27, 0, 30, tzinfo=UTC)
+
+
+def test_combine_local_kickoff_rejects_nonexistent_local_time() -> None:
+    with pytest.raises(NormalizationError, match="does not exist"):
+        combine_local_kickoff(date(2024, 3, 31), time(1, 30), timezone_name="Europe/London")
+
+
+def test_combine_local_kickoff_rejects_unknown_timezone() -> None:
+    with pytest.raises(NormalizationError, match="invalid competition timezone"):
+        combine_local_kickoff(date(2024, 5, 1), time(15, 0), timezone_name="Not/AZone")
 
 
 def test_normalize_rejects_partial_odds_triples() -> None:
@@ -267,6 +578,23 @@ def test_normalize_rejects_invalid_decimal_odds(bad_odds: str) -> None:
         _normalize([row])
 
 
+def test_normalize_parses_odds_as_exact_decimals() -> None:
+    row = _finished_row(B365H="1.83", B365D="3.55", B365A="4.45")
+
+    bundle = _normalize([row])
+
+    odds = {
+        quote.selection.outcome_key: quote.decimal_odds
+        for quote in bundle.market_quotes
+        if quote.provider_id == "bet365" and quote.quote_phase == "opening"
+    }
+    assert odds == {
+        "home": Decimal("1.8300"),
+        "draw": Decimal("3.5500"),
+        "away": Decimal("4.4500"),
+    }
+
+
 @pytest.mark.parametrize(
     ("event_date", "expected_status", "expected_count"),
     [
@@ -274,7 +602,7 @@ def test_normalize_rejects_invalid_decimal_odds(bad_odds: str) -> None:
         ("23/07/2025", "caution", 3),
     ],
 )
-def test_pinnacle_odds_quality_changes_at_documented_cutoff(
+def test_pinnacle_quote_quality_changes_at_documented_cutoff(
     event_date: str,
     expected_status: str,
     expected_count: int,
@@ -283,7 +611,7 @@ def test_pinnacle_odds_quality_changes_at_documented_cutoff(
 
     bundle = _normalize([row], season="2025-2026")
 
-    pinnacle_quotes = [quote for quote in bundle.odds_1x2 if quote.provider_id == "pinnacle"]
+    pinnacle_quotes = [quote for quote in bundle.market_quotes if quote.provider_id == "pinnacle"]
     assert len(pinnacle_quotes) == 3
     assert {quote.quality_status for quote in pinnacle_quotes} == {expected_status}
     assert bundle.pinnacle_caution_quote_count == expected_count
@@ -309,70 +637,3 @@ def test_statistics_reject_partial_home_away_pairs() -> None:
 
     with pytest.raises(NormalizationError, match="HS/AS must both be present"):
         _normalize([row])
-
-
-def test_scheduled_game_with_no_post_match_fields_has_no_statistics() -> None:
-    row = {
-        "Div": "E0",
-        "Date": "01/05/2024",
-        "Time": "",
-        "HomeTeam": "Northbridge FC",
-        "AwayTeam": "Southport Athletic",
-        "FTHG": "",
-        "FTAG": "",
-        "FTR": "",
-    }
-
-    bundle = _normalize([row])
-
-    assert bundle.games[0].status == "scheduled"
-    assert bundle.post_match_statistics == ()
-
-
-def test_team_game_and_quote_identifiers_are_deterministic_uuids() -> None:
-    team_id = build_team_id(
-        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
-        normalized_source_team_key="northbridge fc",
-    )
-    same_team_id = build_team_id(
-        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
-        normalized_source_team_key="northbridge fc",
-    )
-    other_team_id = build_team_id(
-        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
-        normalized_source_team_key="southport athletic",
-    )
-    source_game_key = build_source_game_key(
-        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
-        competition_id="eng-premier-league",
-        season_id="eng-premier-league:2023-2024",
-        event_date=date(2023, 8, 12).isoformat(),
-        home_team_key="northbridge fc",
-        away_team_key="southport athletic",
-    )
-    game_id = build_game_id(source_game_key=source_game_key)
-    quote_id = build_quote_id(
-        game_id=game_id,
-        market_type=MARKET_TYPE_1X2,
-        selection="home",
-        provider_type="bookmaker",
-        provider_id="bet365",
-        quote_phase="opening",
-        source_column_family="b365-opening",
-    )
-    away_quote_id = build_quote_id(
-        game_id=game_id,
-        market_type=MARKET_TYPE_1X2,
-        selection="away",
-        provider_type="bookmaker",
-        provider_id="bet365",
-        quote_phase="opening",
-        source_column_family="b365-opening",
-    )
-
-    assert team_id == same_team_id
-    assert team_id != other_team_id
-    assert quote_id != away_quote_id
-    uuid.UUID(team_id)
-    uuid.UUID(game_id)
-    uuid.UUID(quote_id)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sports_analytics.core.runtime import RuntimeContext, bootstrap_runtime
@@ -11,18 +11,39 @@ from sports_analytics.data.repositories.jobs import JobRepository
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
 from sports_analytics.data.types import JobStatus, SnapshotStatus
 from sports_analytics.ingestion.football import enqueue_football_data_ingestion
+from sports_analytics.ingestion.snapshot_specs import resolve_snapshot_suite
 from sports_analytics.ingestion.types import INGEST_FOOTBALL_DATA_CSV_JOB_TYPE
 from sports_analytics.jobs.runner import LocalWorker
 from sports_analytics.jobs.types import WorkerStatus
 from sports_analytics.snapshots.reader import verify_snapshot_directory
-from sports_analytics.sources.football_data_co_uk.catalog import build_csv_url
-from sports_analytics.sources.raw_store import RawSourceStore
-from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
+from sports_analytics.sports.football.contracts import (
+    FOOTBALL_CANONICAL_SCHEMA_VERSION,
+    FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+)
+from tests.helpers_snapshots import OBSERVED_AT, SYNTHETIC_CSV_WITH_ODDS, store_artifact
 
-OBSERVED_AT = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
-SYNTHETIC_CSV = (
-    b"Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
-    b"E0,12/08/2023,Northbridge FC,Southport Athletic,2,1,H\n"
+EXPECTED_ROW_COUNTS = (
+    ("competitions", 1),
+    ("seasons", 1),
+    ("participants", 2),
+    ("source_participants", 2),
+    ("events", 1),
+    ("event_reconciliations", 1),
+    ("market_quotes", 3),
+    ("post_match_statistics", 1),
+)
+EXPECTED_DIRECTORY_FILES = frozenset(
+    {
+        "manifest.json",
+        "competitions.parquet",
+        "seasons.parquet",
+        "participants.parquet",
+        "source_participants.parquet",
+        "events.parquet",
+        "event_reconciliations.parquet",
+        "market_quotes.parquet",
+        "post_match_statistics.parquet",
+    }
 )
 
 
@@ -71,15 +92,9 @@ def _runtime(tmp_path: Path) -> RuntimeContext:
 
 
 def _store_raw(runtime: RuntimeContext) -> str:
-    artifact = RawSourceStore(runtime.paths.raw_directory).store_bytes(
-        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
-        source_url=build_csv_url(division_code="E0", source_season_code="2324"),
-        content=SYNTHETIC_CSV,
-        retrieved_at=OBSERVED_AT,
-        content_type="text/csv",
-        etag='"etag-1"',
-        last_modified="Wed, 01 Jan 2025 00:00:00 GMT",
-        encoding="utf-8",
+    artifact = store_artifact(
+        runtime.paths.raw_directory,
+        content=SYNTHETIC_CSV_WITH_ODDS,
     )
     return artifact.checksum_sha256
 
@@ -122,15 +137,31 @@ def test_local_worker_once_processes_enqueued_football_ingestion_from_cached_raw
     assert completed.status is JobStatus.SUCCEEDED
     assert completed.result is not None
     assert completed.result["snapshot_status"] == "ready"
+    assert completed.result["snapshot_reused"] is False
     assert completed.result["source_file_sha256"] == raw_sha
-    assert completed.result["games_count"] == 1
+    assert completed.result["snapshot_type"] == FOOTBALL_INGESTION_SNAPSHOT_TYPE
+    assert completed.result["schema_version"] == FOOTBALL_CANONICAL_SCHEMA_VERSION
+    assert completed.result["events_count"] == 1
+    assert completed.result["participants_count"] == 2
+    assert completed.result["market_quotes_count"] == 3
+    assert completed.result["post_match_statistics_count"] == 1
+    assert completed.result["unresolved_event_count"] == 0
     assert len(snapshots) == 1
     assert snapshots[0].status is SnapshotStatus.READY
-    assert (
-        verify_snapshot_directory(
-            snapshots_directory=runtime.paths.snapshots_directory,
-            relative_manifest_path=snapshots[0].relative_path,
-            expected_snapshot=snapshots[0],
-        ).games_count
-        == 1
+    verification = verify_snapshot_directory(
+        snapshots_directory=runtime.paths.snapshots_directory,
+        relative_manifest_path=snapshots[0].relative_path,
+        suite=resolve_snapshot_suite(
+            snapshot_type=FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+            schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+        ),
+        expected_snapshot=snapshots[0],
+    )
+    assert verification.row_counts == EXPECTED_ROW_COUNTS
+    assert verification.file_count == len(EXPECTED_ROW_COUNTS)
+    snapshot_directory = runtime.paths.snapshots_directory / Path(snapshots[0].relative_path).parent
+    assert {path.name for path in snapshot_directory.iterdir()} == EXPECTED_DIRECTORY_FILES
+    assert snapshots[0].relative_path.startswith(
+        f"{FOOTBALL_INGESTION_SNAPSHOT_TYPE}/{FOOTBALL_CANONICAL_SCHEMA_VERSION}/"
+        "eng-premier-league/2023-2024/"
     )

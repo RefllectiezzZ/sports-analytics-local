@@ -20,6 +20,12 @@ ENTRY_POINTS = (
     ("run_local", "run_local.py", "Local startup coordinator"),
 )
 
+EXPECTED_SOURCE_LINE = (
+    "football-data-co-uk\tFootball-Data.co.uk\thistorical-data\t"
+    "football-data-co-uk-adapter-v1\t"
+    "historical-odds,historical-results,historical-statistics\tfootball"
+)
+
 
 @pytest.mark.parametrize(("module_name", "script", "snippet"), ENTRY_POINTS)
 def test_entry_point_imports_and_main_callable(module_name: str, script: str, snippet: str) -> None:
@@ -104,7 +110,11 @@ def test_normal_placeholder_execution(
     if module_name in {"app", "engine"}:
         assert "not implemented" in captured.out.lower()
     elif module_name == "scraper":
-        assert "football-data-co-uk" in captured.out
+        source_lines = captured.out.splitlines()
+        assert source_lines == [EXPECTED_SOURCE_LINE]
+        assert len(source_lines[0].split("\t")) == 6
+        assert "betclic" not in captured.out.lower()
+        assert "betano" not in captured.out.lower()
         assert not (isolated_cwd / "storage").exists()
         return
     elif module_name == "worker":

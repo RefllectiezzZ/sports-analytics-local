@@ -2,30 +2,62 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import logging
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from sports_analytics.core.exceptions import PermanentJobError, RetryableJobError
+from sports_analytics.core.exceptions import (
+    JobLeaseError,
+    PermanentJobError,
+    RetryableJobError,
+    WorkerShutdownError,
+)
 from sports_analytics.core.runtime import RuntimeContext, bootstrap_runtime
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
-from sports_analytics.data.types import SnapshotStatus
+from sports_analytics.data.types import SnapshotRecord, SnapshotStatus
 from sports_analytics.ingestion.handlers import ingest_football_data_csv_handler
+from sports_analytics.ingestion.snapshot_specs import resolve_snapshot_suite
 from sports_analytics.ingestion.types import INGEST_FOOTBALL_DATA_CSV_JOB_TYPE
 from sports_analytics.jobs.context import JobExecutionContext
 from sports_analytics.jobs.registry import build_default_registry
 from sports_analytics.snapshots.reader import verify_snapshot_directory
-from sports_analytics.sources.football_data_co_uk.catalog import build_csv_url
-from sports_analytics.sources.raw_store import RawSourceStore
-from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
+from sports_analytics.snapshots.spec import SnapshotDatasetSuite
+from sports_analytics.sports.football.contracts import (
+    FOOTBALL_CANONICAL_SCHEMA_VERSION,
+    FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+)
 from tests.helpers_http import FakeClock, FakeHttpTransport
+from tests.helpers_snapshots import (
+    OBSERVED_AT,
+    SYNTHETIC_CSV_WITH_ODDS,
+    store_artifact,
+)
 
-OBSERVED_AT = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
-SYNTHETIC_CSV = (
-    b"Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
-    b"E0,12/08/2023,Northbridge FC,Southport Athletic,2,1,H\n"
+EXPECTED_ROW_COUNTS = (
+    ("competitions", 1),
+    ("seasons", 1),
+    ("participants", 2),
+    ("source_participants", 2),
+    ("events", 1),
+    ("event_reconciliations", 1),
+    ("market_quotes", 3),
+    ("post_match_statistics", 1),
+)
+EXPECTED_DIRECTORY_FILES = frozenset(
+    {
+        "manifest.json",
+        "competitions.parquet",
+        "seasons.parquet",
+        "participants.parquet",
+        "source_participants.parquet",
+        "events.parquet",
+        "event_reconciliations.parquet",
+        "market_quotes.parquet",
+        "post_match_statistics.parquet",
+    }
 )
 
 
@@ -75,22 +107,23 @@ def _payload(raw_sha256: str | None = None) -> dict[str, object]:
 
 
 def _stored_raw(runtime: RuntimeContext) -> str:
-    artifact = RawSourceStore(runtime.paths.raw_directory).store_bytes(
-        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
-        source_url=build_csv_url(division_code="E0", source_season_code="2324"),
-        content=SYNTHETIC_CSV,
-        retrieved_at=OBSERVED_AT,
-        content_type="text/csv",
-        etag='"etag-1"',
-        last_modified="Wed, 01 Jan 2025 00:00:00 GMT",
-        encoding="utf-8",
+    artifact = store_artifact(
+        runtime.paths.raw_directory,
+        content=SYNTHETIC_CSV_WITH_ODDS,
     )
     return artifact.checksum_sha256
 
 
-def _snapshot_records(runtime: RuntimeContext):
+def _snapshot_records(runtime: RuntimeContext) -> list[SnapshotRecord]:
     with connect_database(runtime.database_path, read_only=True) as connection:
         return SnapshotRepository(connection).list_snapshots()
+
+
+def _suite() -> SnapshotDatasetSuite:
+    return resolve_snapshot_suite(
+        snapshot_type=FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+        schema_version=FOOTBALL_CANONICAL_SCHEMA_VERSION,
+    )
 
 
 def test_ingest_handler_downloads_with_fake_transport_and_publishes(
@@ -99,7 +132,7 @@ def test_ingest_handler_downloads_with_fake_transport_and_publishes(
     runtime = _runtime(tmp_path)
     context = _context(runtime)
     fake_clock = FakeClock()
-    transport = FakeHttpTransport([SYNTHETIC_CSV])
+    transport = FakeHttpTransport([SYNTHETIC_CSV_WITH_ODDS])
     context.bind_test_dependencies(
         transport=transport,
         sleeper=fake_clock.sleep,
@@ -111,22 +144,51 @@ def test_ingest_handler_downloads_with_fake_transport_and_publishes(
 
     assert result["snapshot_status"] == "ready"
     assert result["snapshot_reused"] is False
+    assert result["snapshot_type"] == FOOTBALL_INGESTION_SNAPSHOT_TYPE
+    assert result["schema_version"] == FOOTBALL_CANONICAL_SCHEMA_VERSION
     assert result["competition_id"] == "eng-premier-league"
-    assert result["games_count"] == 1
-    assert result["teams_count"] == 2
-    assert result["odds_quotes_count"] == 0
+    assert result["season_label"] == "2023-2024"
+    assert result["season_id"] == "eng-premier-league:2023-2024"
+    assert result["events_count"] == 1
+    assert result["participants_count"] == 2
+    assert result["market_quotes_count"] == 3
+    assert result["post_match_statistics_count"] == 1
+    assert result["unresolved_event_count"] == 0
     assert len(transport.calls) == 1
     records = _snapshot_records(runtime)
     assert len(records) == 1
     assert records[0].status is SnapshotStatus.READY
-    assert (
-        verify_snapshot_directory(
-            snapshots_directory=runtime.paths.snapshots_directory,
-            relative_manifest_path=str(result["snapshot_relative_path"]),
-            expected_snapshot=records[0],
-        ).games_count
-        == 1
+    verification = verify_snapshot_directory(
+        snapshots_directory=runtime.paths.snapshots_directory,
+        relative_manifest_path=str(result["snapshot_relative_path"]),
+        suite=_suite(),
+        expected_snapshot=records[0],
     )
+    assert verification.row_counts == EXPECTED_ROW_COUNTS
+    assert verification.file_count == len(EXPECTED_ROW_COUNTS)
+    assert verification.primary_dataset_name == "events"
+
+
+def test_ingest_handler_publishes_expected_filesystem_layout(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    raw_sha = _stored_raw(runtime)
+    context = _context(runtime)
+    context.bind_test_dependencies(clock=lambda: OBSERVED_AT)
+
+    result = ingest_football_data_csv_handler(context, _payload(raw_sha))
+
+    snapshot_id = str(result["snapshot_id"])
+    expected_relative_path = (
+        f"{FOOTBALL_INGESTION_SNAPSHOT_TYPE}/{FOOTBALL_CANONICAL_SCHEMA_VERSION}/"
+        f"eng-premier-league/2023-2024/{snapshot_id}/manifest.json"
+    )
+    assert result["snapshot_relative_path"] == expected_relative_path
+    snapshot_directory = runtime.paths.snapshots_directory / Path(expected_relative_path).parent
+    assert snapshot_directory.is_dir()
+    assert {path.name for path in snapshot_directory.iterdir()} == EXPECTED_DIRECTORY_FILES
+    assert [path.name for path in runtime.paths.snapshots_directory.iterdir()] == [
+        FOOTBALL_INGESTION_SNAPSHOT_TYPE
+    ]
 
 
 def test_ingest_handler_reuses_cached_raw_sha_without_http(tmp_path: Path) -> None:
@@ -145,6 +207,7 @@ def test_ingest_handler_reuses_cached_raw_sha_without_http(tmp_path: Path) -> No
 
     assert result["snapshot_status"] == "ready"
     assert result["source_file_sha256"] == raw_sha
+    assert result["events_count"] == 1
     assert transport.calls == []
 
 
@@ -162,7 +225,59 @@ def test_ingest_handler_reuses_existing_ready_snapshot(tmp_path: Path) -> None:
     assert first["snapshot_reused"] is False
     assert second["snapshot_reused"] is True
     assert second["snapshot_id"] == first["snapshot_id"]
+    assert second["snapshot_relative_path"] == first["snapshot_relative_path"]
+    assert second["events_count"] == first["events_count"]
+    assert second["market_quotes_count"] == first["market_quotes_count"]
     assert len(_snapshot_records(runtime)) == 1
+
+
+def test_ingest_handler_stops_before_acquisition_when_shutdown_requested(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    context = _context(runtime)
+    transport = FakeHttpTransport([SYNTHETIC_CSV_WITH_ODDS])
+    context.bind_test_dependencies(
+        transport=transport,
+        sleeper=lambda _seconds: None,
+        monotonic_clock=lambda: 0.0,
+        clock=lambda: OBSERVED_AT,
+    )
+    context.request_stop()
+
+    with pytest.raises(WorkerShutdownError, match="worker shutdown requested"):
+        ingest_football_data_csv_handler(context, _payload())
+
+    assert transport.calls == []
+    assert _snapshot_records(runtime) == []
+
+
+def test_ingest_handler_fences_lost_lease_and_leaves_no_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    raw_sha = _stored_raw(runtime)
+    context = _context(runtime)
+    context.bind_test_dependencies(clock=lambda: OBSERVED_AT)
+    original_checkpoint = JobExecutionContext.checkpoint
+    checkpoints: list[int] = []
+    # The fifth checkpoint runs after the prepared snapshot directory exists but
+    # before publication, so fencing must discard the prepared tree.
+    lease_lost_at_checkpoint = 5
+
+    def counting_checkpoint(self: JobExecutionContext) -> None:
+        checkpoints.append(len(checkpoints) + 1)
+        if len(checkpoints) == lease_lost_at_checkpoint:
+            self.report_lease_lost()
+        original_checkpoint(self)
+
+    monkeypatch.setattr(JobExecutionContext, "checkpoint", counting_checkpoint)
+
+    with pytest.raises(JobLeaseError, match="job lease lost"):
+        ingest_football_data_csv_handler(context, _payload(raw_sha))
+
+    assert len(checkpoints) == lease_lost_at_checkpoint
+    assert _snapshot_records(runtime) == []
+    assert list(runtime.paths.snapshots_directory.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -200,7 +315,7 @@ def test_ingest_handler_requires_runtime_binding() -> None:
         maximum_attempts=3,
         claimed_at=OBSERVED_AT,
         lease_expires_at=OBSERVED_AT + timedelta(minutes=5),
-        logger=__import__("logging").getLogger("test"),
+        logger=logging.getLogger("test"),
     )
 
     with pytest.raises(PermanentJobError, match="runtime context binding"):
@@ -219,6 +334,24 @@ def test_ingest_handler_maps_retryable_source_errors_to_retryable_job(tmp_path: 
 
     with pytest.raises(RetryableJobError, match="temporary source HTTP failure"):
         ingest_football_data_csv_handler(context, _payload())
+
+    assert _snapshot_records(runtime) == []
+
+
+def test_ingest_handler_maps_missing_source_resource_to_permanent_job(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    context = _context(runtime)
+    context.bind_test_dependencies(
+        transport=FakeHttpTransport([(404, b"missing", "text/plain")]),
+        sleeper=lambda _seconds: None,
+        monotonic_clock=lambda: 0.0,
+        clock=lambda: OBSERVED_AT,
+    )
+
+    with pytest.raises(PermanentJobError, match="not found"):
+        ingest_football_data_csv_handler(context, _payload())
+
+    assert _snapshot_records(runtime) == []
 
 
 def test_default_registry_contains_ingestion_handler() -> None:

@@ -3,15 +3,35 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 from sports_analytics.data.database import connect_database
+from sports_analytics.data.migrations import ensure_database_ready
 from sports_analytics.data.repositories.jobs import JobRepository
 from sports_analytics.data.types import JobStatus
 from sports_analytics.ingestion.types import INGEST_FOOTBALL_DATA_CSV_JOB_TYPE
+from sports_analytics.sources.catalog import FOOTBALL_DATA_ADAPTER_VERSION
+from sports_analytics.sources.contracts import SourceCapability, SourceRole
+from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
+from sports_analytics.sports.football.contracts import (
+    FOOTBALL_CANONICAL_SCHEMA_VERSION,
+    FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+)
 from tests.helpers import repository_root, scrubbed_subprocess_environ
+from tests.helpers_snapshots import SYNTHETIC_CSV_WITH_ODDS, prepare, publication_service
+
+EXPECTED_SOURCE_LINE = (
+    "football-data-co-uk\tFootball-Data.co.uk\thistorical-data\t"
+    "football-data-co-uk-adapter-v1\t"
+    "historical-odds,historical-results,historical-statistics\tfootball"
+)
+EXPECTED_VERIFY_ROW_COUNTS = (
+    "competitions=1 seasons=1 participants=2 source_participants=2 "
+    "events=1 event_reconciliations=1 market_quotes=3 post_match_statistics=1"
+)
 
 
 def _write_scraping_config(base: Path) -> None:
@@ -54,13 +74,57 @@ def _run_scraper(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]
     )
 
 
+def _publish_snapshot(tmp_path: Path) -> str:
+    """Publish one READY football snapshot into the CLI storage layout."""
+    storage = tmp_path / "storage"
+    storage.mkdir(parents=True, exist_ok=True)
+    database = storage / "operational.sqlite3"
+    ensure_database_ready(database)
+    snapshots_directory = storage / "snapshots"
+    prepared = prepare(
+        tmp_path / "build",
+        snapshot_id="11111111-1111-4111-8111-111111111111",
+        snapshots_directory=snapshots_directory,
+        content=SYNTHETIC_CSV_WITH_ODDS,
+    )
+    published = publication_service(database, snapshots_directory).publish_or_reuse(
+        prepared,
+        actor="test",
+    )
+    return published.snapshot_id
+
+
 def test_scraper_lists_sources_without_bootstrapping_database(tmp_path: Path) -> None:
     result = _run_scraper(tmp_path, "--list-sources")
 
     assert result.returncode == 0
     assert result.stderr == ""
-    assert result.stdout.splitlines() == ["football-data-co-uk"]
+    lines = result.stdout.splitlines()
+    assert lines == [EXPECTED_SOURCE_LINE]
+    source_id, display_name, role, adapter_version, capabilities, sports = lines[0].split("\t")
+    assert source_id == SOURCE_FOOTBALL_DATA_CO_UK
+    assert display_name == "Football-Data.co.uk"
+    assert role == SourceRole.HISTORICAL_DATA.value
+    assert adapter_version == FOOTBALL_DATA_ADAPTER_VERSION
+    assert capabilities.split(",") == [
+        SourceCapability.HISTORICAL_ODDS.value,
+        SourceCapability.HISTORICAL_RESULTS.value,
+        SourceCapability.HISTORICAL_STATISTICS.value,
+    ]
+    assert sports == "football"
     assert not (tmp_path / "storage" / "operational.sqlite3").exists()
+
+
+def test_scraper_list_sources_omits_unimplemented_bookmaker_sources(tmp_path: Path) -> None:
+    result = _run_scraper(tmp_path, "--list-sources")
+
+    assert result.returncode == 0
+    lowered = result.stdout.lower()
+    assert "betclic" not in lowered
+    assert "betano" not in lowered
+    assert SourceCapability.CURRENT_ODDS.value not in lowered
+    assert SourceCapability.CURRENT_FIXTURES.value not in lowered
+    assert SourceCapability.SETTLEMENT_RESULTS.value not in lowered
 
 
 def test_scraper_lists_competitions_without_bootstrapping_database(tmp_path: Path) -> None:
@@ -145,6 +209,48 @@ def test_scraper_enqueue_requires_scraping_enabled(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "scraping.enabled" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_scraper_verify_snapshot_reports_dataset_row_counts(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    snapshot_id = _publish_snapshot(tmp_path)
+
+    result = _run_scraper(tmp_path, "--verify-snapshot", snapshot_id)
+
+    assert result.returncode == 0
+    assert "error:" not in result.stderr.lower()
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1
+    prefix = (
+        f"verified snapshot_id={snapshot_id} "
+        f"type={FOOTBALL_INGESTION_SNAPSHOT_TYPE} "
+        f"schema={FOOTBALL_CANONICAL_SCHEMA_VERSION} "
+        f"files=8 rows[{EXPECTED_VERIFY_ROW_COUNTS}] manifest_sha256="
+    )
+    assert lines[0].startswith(prefix)
+    assert re.fullmatch(r"[0-9a-f]{64}", lines[0].removeprefix(prefix)) is not None
+
+
+def test_scraper_verify_snapshot_rejects_unknown_snapshot(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    _publish_snapshot(tmp_path)
+
+    result = _run_scraper(tmp_path, "--verify-snapshot", "22222222-2222-4222-8222-222222222222")
+
+    assert result.returncode == 2
+    assert "snapshot not found" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+
+
+def test_scraper_verify_snapshot_rejects_invalid_snapshot_id(tmp_path: Path) -> None:
+    _write_scraping_config(tmp_path)
+    _publish_snapshot(tmp_path)
+
+    result = _run_scraper(tmp_path, "--verify-snapshot", "not-a-uuid")
+
+    assert result.returncode == 2
+    assert "invalid snapshot id" in result.stderr.lower()
     assert "Traceback" not in result.stderr
 
 
@@ -264,5 +370,5 @@ def test_scraper_list_sources_validates_config_without_side_effects(tmp_path: Pa
     _write_scraping_config(tmp_path)
     result = _run_scraper(tmp_path, "--list-sources")
     assert result.returncode == 0
-    assert result.stdout.splitlines() == ["football-data-co-uk"]
+    assert result.stdout.splitlines() == [EXPECTED_SOURCE_LINE]
     assert not (tmp_path / "storage").exists()
