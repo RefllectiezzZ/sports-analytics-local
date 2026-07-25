@@ -191,7 +191,10 @@ def test_prediction_probability_outside_unit_interval_rejected() -> None:
 
 
 def test_orphan_decisions_rejected_by_cross_dataset_integrity() -> None:
-    with pytest.raises(ArtifactError, match="opportunity decisions must cover every opportunity"):
+    with pytest.raises(
+        ArtifactError,
+        match="must match opportunity count exactly|must cover every opportunity",
+    ):
         validate_cross_dataset_integrity(
             {
                 "predictions": ({"prediction_id": "prediction-1"},),

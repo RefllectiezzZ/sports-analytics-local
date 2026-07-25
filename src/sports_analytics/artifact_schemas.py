@@ -387,15 +387,27 @@ def _validate_cross_dataset_integrity(
         require_str(row.get("prediction_id"), field="prediction_id"): row
         for row in datasets.get("predictions", ())
     }
-    opportunities = {row["opportunity_id"] for row in datasets.get("opportunities", ())}
     opportunities_by_id: dict[str, dict[str, JsonValue]] = {
         require_str(row["opportunity_id"], field="opportunity_id"): row
         for row in datasets.get("opportunities", ())
     }
     decisions = datasets.get("opportunity_decisions", ())
-    decision_ids = {row["opportunity_id"] for row in decisions}
-    if decision_ids != opportunities:
+    opportunity_rows = datasets.get("opportunities", ())
+    if len(decisions) != len(opportunity_rows):
+        raise ArtifactError("opportunity decisions must match opportunity count exactly")
+    decision_ids = [
+        require_str(row.get("opportunity_id"), field="opportunity_id") for row in decisions
+    ]
+    if len(decision_ids) != len(set(decision_ids)):
+        raise ArtifactError("every opportunity_id must appear exactly once in decisions")
+    opportunities = {row["opportunity_id"] for row in opportunity_rows}
+    if set(decision_ids) != opportunities:
         raise ArtifactError("opportunity decisions must cover every opportunity exactly once")
+    filter_config_ids = {
+        require_str(row.get("filter_config_id"), field="filter_config_id") for row in decisions
+    }
+    if len(filter_config_ids) != 1:
+        raise ArtifactError("opportunity decisions must use the same filter_config_id")
     eligible_opportunity_ids = {
         row["opportunity_id"] for row in decisions if row.get("eligible") is True
     }
@@ -799,6 +811,8 @@ def _validate_opportunity_row(row: dict[str, JsonValue]) -> None:
         expected_ev = model_probability * odds_f - 1.0
         if abs(expected_value - expected_ev) > VALUE_CALCULATION_TOLERANCE:
             raise ArtifactError("expected_value is inconsistent")
+        require_str(row.get("evaluation_version"), field="evaluation_version")
+        _validate_opportunity_timing_semantics(row)
     except (
         KeyError,
         TypeError,
@@ -1150,6 +1164,7 @@ def _validate_opportunity_semantic_linkage(
     prediction_row: dict[str, JsonValue],
     evaluation_row: dict[str, JsonValue],
 ) -> None:
+    _validate_opportunity_timing_semantics(opportunity_row)
     selection = require_canonical_selection_identity(
         opportunity_row.get("selection"),
         field="selection",
@@ -1297,6 +1312,82 @@ def _validate_opportunity_semantic_linkage(
     )
     if abs(complete_total - (1.0 + evaluation_overround)) > VALUE_CALCULATION_TOLERANCE:
         raise ArtifactError("market evaluation complete_market_raw_total is inconsistent")
+    expected_quality = _prediction_quality_passed_from_row(prediction_row)
+    actual_quality = require_bool(
+        opportunity_row.get("prediction_quality_passed"),
+        field="prediction_quality_passed",
+    )
+    if actual_quality != expected_quality:
+        raise ArtifactError("prediction_quality_passed does not match prediction quality")
+    _require_matching_field(
+        opportunity_row,
+        evaluation_row,
+        field="evaluation_version",
+        label="evaluation_version",
+    )
+
+
+def _prediction_quality_passed_from_row(prediction_row: dict[str, JsonValue]) -> bool:
+    quality = require_dict(prediction_row.get("quality"), field="quality")
+    return all(
+        (
+            require_bool(quality.get("calibrated"), field="quality.calibrated"),
+            require_bool(
+                quality.get("model_artifact_verified"),
+                field="quality.model_artifact_verified",
+            ),
+            require_bool(
+                quality.get("feature_artifact_verified"),
+                field="quality.feature_artifact_verified",
+            ),
+            require_bool(quality.get("sufficient_history"), field="quality.sufficient_history"),
+            require_bool(quality.get("data_quality_passed"), field="quality.data_quality_passed"),
+        )
+    )
+
+
+def _validate_opportunity_timing_semantics(row: dict[str, JsonValue]) -> None:
+    from sports_analytics.data.codec import format_utc_timestamp
+
+    evaluation_mode = require_str(row.get("evaluation_mode"), field="evaluation_mode")
+    event_start = format_utc_timestamp(
+        require_canonical_utc_timestamp_string(
+            row.get("event_start_utc"),
+            field="event_start_utc",
+        )
+    )
+    predicted_at = require_canonical_utc_timestamp_string(
+        row.get("predicted_at_utc"),
+        field="predicted_at_utc",
+    )
+    source_observed_at = require_canonical_utc_timestamp_string(
+        row.get("source_observed_at_utc"),
+        field="source_observed_at_utc",
+    )
+    decision_as_of = format_utc_timestamp(
+        require_canonical_utc_timestamp_string(
+            row.get("decision_as_of_utc"),
+            field="decision_as_of_utc",
+        )
+    )
+    if evaluation_mode == "live-safe":
+        quoted_at_raw = row.get("quoted_at_utc")
+        if quoted_at_raw is None:
+            raise ArtifactError("live-safe opportunity requires quoted_at_utc")
+        quoted_at = require_canonical_utc_timestamp_string(
+            quoted_at_raw,
+            field="quoted_at_utc",
+        )
+        expected_decision = format_utc_timestamp(max(predicted_at, quoted_at, source_observed_at))
+        if decision_as_of != expected_decision:
+            raise ArtifactError("decision_as_of_utc does not match derived live-safe timing")
+        if decision_as_of >= event_start:
+            raise ArtifactError("decision_as_of_utc must be strictly before event_start_utc")
+    elif evaluation_mode == "closing-line-historical-benchmark":
+        if decision_as_of != event_start:
+            raise ArtifactError("closing benchmark decision_as_of_utc must equal event_start_utc")
+    else:
+        raise ArtifactError("evaluation_mode is unsupported")
 
 
 def _prediction_probability_for_selection(

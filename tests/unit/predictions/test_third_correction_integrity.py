@@ -570,7 +570,9 @@ def test_missing_opportunity_decision_rejected() -> None:
     datasets = _typed_datasets()
     dataset_map = {name: tuple(rows) for name, rows in datasets.items()}
     dataset_map["opportunity_decisions"] = ()
-    with pytest.raises(ArtifactError, match="must cover every opportunity"):
+    with pytest.raises(
+        ArtifactError, match="must match opportunity count exactly|must cover every opportunity"
+    ):
         validate_cross_dataset_integrity(dataset_map)
 
 
