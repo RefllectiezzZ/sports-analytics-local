@@ -13,6 +13,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final, cast
 
+from sports_analytics.artifact_schemas import (
+    DATASET_SCHEMA_VERSIONS,
+    validate_cross_dataset_integrity,
+    validate_dataset_row_schema,
+)
 from sports_analytics.core.exceptions import ArtifactError, RepositoryError
 from sports_analytics.data.codec import dumps_canonical_json, ensure_json_value
 from sports_analytics.data.types import JsonValue, validate_sha256_checksum
@@ -230,7 +235,7 @@ def write_typed_analytical_artifact(
         raise ArtifactError("typed artifact datasets do not exactly match its layout")
     if type(schema_version) is not str or not schema_version:
         raise ArtifactError("typed artifact schema_version must be non-empty")
-    schemas = dataset_schema_versions or {}
+    schemas = dataset_schema_versions or DATASET_SCHEMA_VERSIONS
     normalized: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     dataset_entries: list[dict[str, JsonValue]] = []
     file_bytes: dict[str, bytes] = {}
@@ -462,6 +467,8 @@ def _verify_typed_directory(
         raise ArtifactError("typed artifact id does not match dataset content")
     if expected_artifact_id is not None and expected_artifact_id != artifact_id:
         raise ArtifactError("typed artifact id does not match expected id")
+    dataset_map = {item.name: item.rows for item in verified}
+    validate_cross_dataset_integrity(dataset_map)
     return TypedAnalyticalArtifact(
         relative_directory=relative_directory,
         artifact_id=artifact_id,
@@ -501,70 +508,28 @@ def _canonical_dataset_rows(
         if identifier in identifiers:
             raise ArtifactError(f"{name} contains duplicate {id_field}")
         identifiers.add(identifier)
+        if "schema_version" not in row:
+            row = {**row, "schema_version": DATASET_SCHEMA_VERSIONS.get(name, f"{name}-v1")}
         _validate_typed_row(name, row)
         canonical.append(cast(dict[str, JsonValue], json.loads(dumps_canonical_json(row))))
     return tuple(sorted(canonical, key=lambda row: cast(str, row[id_field])))
 
 
 def _validate_typed_row(name: str, row: dict[str, JsonValue]) -> None:
-    if name == "predictions":
-        probabilities = row.get("probabilities")
-        ordered = row.get("ordered_selection_ids")
-        if not isinstance(probabilities, list) or not 2 <= len(probabilities) <= 4:
-            raise ArtifactError("prediction row requires 2, 3, or 4 probabilities")
-        if not isinstance(ordered, list) or len(ordered) != len(probabilities):
-            raise ArtifactError("prediction ordered selection space is malformed")
-        values: list[float] = []
-        probability_ids: list[str] = []
-        for item in probabilities:
-            if not isinstance(item, dict):
-                raise ArtifactError("prediction probability entry is malformed")
-            selection_id = item.get("selection_id")
-            probability = item.get("probability")
-            if type(selection_id) is not str or not _finite_number(probability):
-                raise ArtifactError("prediction probability entry is malformed")
-            probability_ids.append(selection_id)
-            values.append(float(cast(float | int, probability)))
-        if probability_ids != ordered or abs(math.fsum(values) - 1.0) > 1e-9:
-            raise ArtifactError("prediction probability space is incomplete or unordered")
-    if name in {"market_evaluations", "opportunities", "combinations"}:
-        if not _finite_number(row.get("expected_value")):
-            raise ArtifactError(f"{name} row expected_value must be finite")
+    version = DATASET_SCHEMA_VERSIONS.get(name, f"{name}-v1")
+    row_schema_version = row.get("schema_version")
+    if row_schema_version is not None:
+        version = str(row_schema_version)
+    validate_dataset_row_schema(name, row, version=version)
     if name == "opportunities":
-        required_lineage = (
-            "model_artifact_id",
-            "model_checksum_sha256",
-            "model_specification_version",
-            "feature_artifact_id",
-            "feature_manifest_checksum_sha256",
-            "feature_specification_version",
-            "feature_row_id",
-        )
-        if any(type(row.get(field)) is not str or not row.get(field) for field in required_lineage):
-            raise ArtifactError("opportunity row lineage is incomplete")
         _validate_decision_timing(row)
     if name == "combinations":
-        probability = row.get("joint_probability")
-        odds = row.get("total_decimal_odds")
-        expected_value = row.get("expected_value")
-        if (
-            not _finite_number(probability)
-            or not 0 <= float(cast(float | int, probability)) <= 1
-            or not _finite_number(odds)
-            or float(cast(float | int, odds)) <= 1
-        ):
-            raise ArtifactError("combination probability or odds is invalid")
-        calculated = float(cast(float | int, probability)) * float(cast(float | int, odds)) - 1
-        if abs(calculated - float(cast(float | int, expected_value))) > 1e-9:
-            raise ArtifactError("combination expected_value is inconsistent")
         _validate_decision_timing(
             row,
             decision_field="common_decision_time_utc",
             start_field="earliest_event_start_utc",
             strict=True,
         )
-    if name == "settlements" and row.get("result") not in {"win", "loss"}:
-        raise ArtifactError("v1 settlement rows may only contain win or loss")
 
 
 def _validate_decision_timing(

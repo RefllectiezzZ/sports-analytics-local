@@ -303,25 +303,9 @@ def _validate_quote_timing(
         raise ValueEvaluationError("live-safe evaluation requires a provider quote timestamp")
     if quote.quoted_at_utc is None:
         raise ValueEvaluationError("live-safe evaluation requires quoted_at_utc")
-    common_information_time = max(
-        prediction.predicted_at_utc,
-        quote.quoted_at_utc,
-        quote.source_observed_at_utc,
-    )
-    if common_information_time >= prediction.event_start_utc:
-        raise ValueEvaluationError(
-            "max(prediction time, quote time, observation time) must be strictly before event start"
-        )
-    if (
-        quote.quote_valid_from_utc is not None
-        and prediction.predicted_at_utc < quote.quote_valid_from_utc
-    ):
-        raise ValueEvaluationError("quote was not yet valid at prediction time")
-    if (
-        quote.quote_valid_to_utc is not None
-        and prediction.predicted_at_utc > quote.quote_valid_to_utc
-    ):
-        raise ValueEvaluationError("quote had expired before prediction time")
+    from sports_analytics.value.timing import validate_live_decision_timing
+
+    validate_live_decision_timing(prediction=prediction, quote=quote, mode=mode)
 
 
 def _utc(value: datetime, field_name: str) -> datetime:

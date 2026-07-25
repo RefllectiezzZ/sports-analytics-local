@@ -144,10 +144,15 @@ def _model_input_snapshots(
         if type(snapshot_id) is not str or type(checksum) is not str:
             raise PredictionError("model input snapshot lineage is incomplete")
         raw_path = raw.get("relative_manifest_path")
+        source = raw.get("source_name")
         source_name = (
-            PurePosixPath(raw_path).parts[0]
-            if type(raw_path) is str and PurePosixPath(raw_path).parts
-            else "unknown-source"
+            source
+            if type(source) is str and source
+            else (
+                PurePosixPath(raw_path).parts[0]
+                if type(raw_path) is str and PurePosixPath(raw_path).parts
+                else "unknown-source"
+            )
         )
         raw_schema = raw.get("schema_version")
         schema_version = raw_schema if type(raw_schema) is str else "snapshot-manifest-v1"

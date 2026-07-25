@@ -28,6 +28,7 @@ from sports_analytics.opportunities.contracts import (
 from sports_analytics.predictions.contracts import (
     CanonicalSelectionIdentity,
     PredictionLineage,
+    PredictionQualityFlags,
     SelectionProbability,
     build_market_prediction,
 )
@@ -89,6 +90,13 @@ def _prediction(
             SelectionProbability(_selection("player-a"), probabilities[0]),
             SelectionProbability(_selection("player-b"), probabilities[1]),
         ),
+        quality=PredictionQualityFlags(
+            calibrated=True,
+            model_artifact_verified=True,
+            feature_artifact_verified=True,
+            sufficient_history=True,
+            data_quality_passed=True,
+        ),
     )
 
 
@@ -127,6 +135,7 @@ def test_prediction_identity_is_order_independent_and_complete() -> None:
         feature_available_at_utc=first.feature_available_at_utc,
         lineage=first.lineage,
         probabilities=tuple(reversed(first.probabilities)),
+        quality=first.quality,
     )
     assert first.prediction_id == reversed_prediction.prediction_id
     assert len(first.probabilities) == 2
@@ -184,6 +193,13 @@ def test_production_feature_input_rejects_target_or_post_event_fields() -> None:
 
 def test_prediction_rejects_future_features_and_same_day_model_history() -> None:
     prediction = _prediction()
+    production_quality = PredictionQualityFlags(
+        calibrated=True,
+        model_artifact_verified=True,
+        feature_artifact_verified=True,
+        sufficient_history=True,
+        data_quality_passed=True,
+    )
     with pytest.raises(PredictionError, match="not available"):
         build_market_prediction(
             canonical_event_id=prediction.canonical_event_id,
@@ -192,6 +208,7 @@ def test_prediction_rejects_future_features_and_same_day_model_history() -> None
             feature_available_at_utc=prediction.predicted_at_utc + timedelta(seconds=1),
             lineage=prediction.lineage,
             probabilities=prediction.probabilities,
+            quality=production_quality,
         )
     bad_lineage = PredictionLineage(
         model_artifact_id="model-id",
@@ -212,6 +229,7 @@ def test_prediction_rejects_future_features_and_same_day_model_history() -> None
             feature_available_at_utc=PREDICTED,
             lineage=bad_lineage,
             probabilities=prediction.probabilities,
+            quality=production_quality,
         )
 
 

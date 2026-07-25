@@ -147,6 +147,17 @@ class CombinationRules:
 
 
 @dataclass(frozen=True, slots=True)
+class CombinationValidationResult:
+    """Auditable manual validation outcome that may be ineligible."""
+
+    legs: tuple[Opportunity, ...]
+    dependencies: tuple[LegDependency, ...]
+    combination: Combination | None
+    eligible: bool
+    rejection_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Combination:
     """A validated multi-sport/multi-market/multi-date combination."""
 
@@ -206,6 +217,50 @@ def classify_dependency(left: Opportunity, right: Opportunity) -> LegDependency:
     )
 
 
+def validate_combination_manual(
+    legs: tuple[Opportunity, ...],
+    *,
+    rules: CombinationRules,
+) -> CombinationValidationResult:
+    """Validate exact legs and return an auditable result without trusting unknown dependencies."""
+    ordered = tuple(sorted(legs, key=lambda item: item.opportunity_id))
+    dependencies: list[LegDependency] = []
+    rejection_reasons: list[str] = []
+    for left_index, left in enumerate(ordered):
+        for right in ordered[left_index + 1 :]:
+            relation = classify_dependency(left, right)
+            dependencies.append(relation)
+            if relation.classification is DependencyClass.CONFLICT:
+                rejection_reasons.append(f"conflicting legs: {relation.reason}")
+            elif relation.classification is DependencyClass.UNKNOWN:
+                rejection_reasons.append(f"unknown dependency rejected: {relation.reason}")
+    if rejection_reasons:
+        return CombinationValidationResult(
+            legs=ordered,
+            dependencies=tuple(dependencies),
+            combination=None,
+            eligible=False,
+            rejection_reasons=tuple(rejection_reasons),
+        )
+    try:
+        combination = validate_combination(ordered, rules=rules, automatic=False)
+    except CombinationError as exc:
+        return CombinationValidationResult(
+            legs=ordered,
+            dependencies=tuple(dependencies),
+            combination=None,
+            eligible=False,
+            rejection_reasons=(str(exc),),
+        )
+    return CombinationValidationResult(
+        legs=ordered,
+        dependencies=tuple(dependencies),
+        combination=combination,
+        eligible=True,
+        rejection_reasons=(),
+    )
+
+
 def validate_combination(
     legs: tuple[Opportunity, ...],
     *,
@@ -238,9 +293,7 @@ def validate_combination(
             dependencies.append(relation)
             if relation.classification is DependencyClass.CONFLICT:
                 raise CombinationError(f"conflicting legs: {relation.reason}")
-            if relation.classification is DependencyClass.UNKNOWN and (
-                automatic or not rules.allow_unknown_dependencies
-            ):
+            if relation.classification is DependencyClass.UNKNOWN:
                 raise CombinationError(f"unknown dependency rejected: {relation.reason}")
     earliest_start = min(item.event_start_utc for item in ordered)
     latest_start = max(item.event_start_utc for item in ordered)

@@ -46,7 +46,9 @@ from sports_analytics.opportunities.contracts import (
 )
 from sports_analytics.predictions.contracts import (
     CanonicalSelectionIdentity,
+    PredictionInputSnapshot,
     PredictionLineage,
+    PredictionQualityFlags,
     SelectionProbability,
     build_market_prediction,
 )
@@ -78,6 +80,7 @@ def run_football_1x2_closing_benchmark(
     feature_manifest_checksum_sha256: str,
     filters: OpportunityFilter,
     random_seed: int,
+    input_snapshots: tuple[PredictionInputSnapshot, ...] = (),
 ) -> FootballClosingBenchmark:
     """Fit each fold in-origin and evaluate singles against closing market average."""
     quote_by_event = {item.canonical_event_id: item for item in quotes}
@@ -155,6 +158,7 @@ def run_football_1x2_closing_benchmark(
                 feature_row_id=vector.metadata.canonical_event_id,
                 trained_through_date=fold.train.end_date,
                 calibrated_through_date=fold.calibration.end_date,
+                input_snapshots=input_snapshots,
             )
             selection_probabilities = tuple(
                 SelectionProbability(
@@ -172,6 +176,13 @@ def run_football_1x2_closing_benchmark(
                 feature_available_at_utc=simulated_prediction_time,
                 lineage=lineage,
                 probabilities=selection_probabilities,
+                quality=PredictionQualityFlags(
+                    calibrated=True,
+                    model_artifact_verified=True,
+                    feature_artifact_verified=bool(input_snapshots),
+                    sufficient_history=True,
+                    data_quality_passed=True,
+                ),
             )
             complete_quote = _complete_quote(quote)
             evaluation = evaluate_complete_market(

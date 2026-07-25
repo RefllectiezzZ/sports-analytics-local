@@ -132,11 +132,11 @@ class PredictionInputSnapshot:
 class PredictionQualityFlags:
     """Explicit production-readiness claims attached to one prediction."""
 
-    calibrated: bool = True
-    model_artifact_verified: bool = True
-    feature_artifact_verified: bool = True
-    sufficient_history: bool = True
-    data_quality_passed: bool = True
+    calibrated: bool = False
+    model_artifact_verified: bool = False
+    feature_artifact_verified: bool = False
+    sufficient_history: bool = False
+    data_quality_passed: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -261,7 +261,8 @@ class MarketPrediction:
             "feature_available_at_utc",
             _utc(self.feature_available_at_utc, field_name="feature_available_at_utc"),
         )
-        validate_live_prediction_timing(self)
+        if self.quality.production_eligible:
+            validate_live_prediction_timing(self)
         if not 2 <= len(self.probabilities) <= 4:
             raise PredictionError("prediction requires a declared 2, 3, or 4 outcome space")
         selection_ids = tuple(item.selection.selection_id for item in self.probabilities)
@@ -293,6 +294,10 @@ class MarketPrediction:
         )
         if self.prediction_id != expected_id:
             raise PredictionError("prediction_id does not match content-addressed identity")
+
+    @property
+    def production_eligible(self) -> bool:
+        return self.quality.production_eligible
 
     @property
     def sport_code(self) -> str:

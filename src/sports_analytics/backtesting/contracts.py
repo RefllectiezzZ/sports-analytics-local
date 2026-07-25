@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from sports_analytics.combinations.contracts import CombinationRules
 from sports_analytics.core.exceptions import BacktestError
@@ -18,6 +18,9 @@ from sports_analytics.opportunities.contracts import (
     OpportunityFilter,
     OpportunityRejection,
 )
+
+if TYPE_CHECKING:
+    from sports_analytics.combinations.builder import CombinationRejection
 
 
 class BacktestMode(StrEnum):
@@ -130,6 +133,20 @@ class StrategyConfiguration:
                 "combined_minimum_odds": format(rules.combined_minimum_odds, "f"),
                 "combined_maximum_odds": format(rules.combined_maximum_odds, "f"),
                 "allow_unknown_dependencies": rules.allow_unknown_dependencies,
+                "allowed_sport_codes": cast(list[JsonValue], sorted(rules.allowed_sport_codes)),
+                "allowed_market_keys": cast(list[JsonValue], sorted(rules.allowed_market_keys)),
+                "minimum_joint_probability": rules.minimum_joint_probability,
+                "minimum_expected_value": rules.minimum_expected_value,
+                "maximum_candidates": rules.maximum_candidates,
+                "maximum_evaluated_combinations": rules.maximum_evaluated_combinations,
+                "maximum_outputs": rules.maximum_outputs,
+                "maximum_event_horizon_microseconds": (
+                    rules.maximum_event_horizon.days * 86_400_000_000
+                    + rules.maximum_event_horizon.seconds * 1_000_000
+                    + rules.maximum_event_horizon.microseconds
+                ),
+                "allow_multiple_sports": rules.allow_multiple_sports,
+                "allow_multiple_dates": rules.allow_multiple_dates,
             }
         return content_addressed_id(
             identity_type="backtest-strategy-v1",
@@ -229,6 +246,7 @@ class BacktestMetrics:
     selected_log_loss: float | None = None
     selected_multiclass_brier_score: float | None = None
     aggregations: tuple[BacktestMetricAggregation, ...] = ()
+    rejection_counts_by_reason: tuple[tuple[str, int, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +254,8 @@ class BacktestResult:
     """Deterministic folds, settled bets, and aggregate metrics."""
 
     backtest_id: str
+    decision_run_id: str
+    backtest_result_id: str
     mode: BacktestMode
     strategy_id: str
     folds: tuple[BacktestFold, ...]
@@ -245,3 +265,4 @@ class BacktestResult:
     candidates: tuple[SettledOpportunity, ...] = ()
     opportunity_decisions: tuple[OpportunityDecision, ...] = ()
     opportunity_rejections: tuple[OpportunityRejection, ...] = ()
+    combination_rejections: tuple[CombinationRejection, ...] = ()

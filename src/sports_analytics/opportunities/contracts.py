@@ -145,13 +145,18 @@ class Opportunity:
             expected_decision_time = self.event_start_utc
         if self.decision_as_of_utc is not None:
             try:
-                require_utc(
+                supplied = require_utc(
                     self.decision_as_of_utc,
                     field_name="decision_as_of_utc",
                 )
             except Exception as exc:
                 raise OpportunityError(str(exc)) from exc
+            if supplied != expected_decision_time:
+                raise OpportunityError("decision_as_of_utc must equal the derived decision time")
         object.__setattr__(self, "decision_as_of_utc", expected_decision_time)
+        from sports_analytics.opportunities.identity import verify_opportunity_identity
+
+        verify_opportunity_identity(self)
         if (
             type(self.model_trained_through_date) is not date
             or type(self.model_calibrated_through_date) is not date
@@ -342,69 +347,18 @@ class OpportunityDecision:
 def opportunities_from_evaluation(
     evaluation: MarketValueEvaluation,
 ) -> tuple[Opportunity, ...]:
-    """Project every complete-market value row into an immutable opportunity."""
+    """Project every complete-market value row into a verified immutable opportunity."""
+    from sports_analytics.opportunities.identity import build_opportunity_from_evaluation
+
     priced = {item.selection.selection_id: item for item in evaluation.quote.selections}
     opportunities: list[Opportunity] = []
     for value in evaluation.selections:
         quote_selection = priced[value.selection.selection_id]
-        payload: dict[str, JsonValue] = {
-            "evaluation_version": evaluation.evaluation_version,
-            "mode": evaluation.mode.value,
-            "prediction_id": evaluation.prediction.prediction_id,
-            "quote_observation_id": quote_selection.quote_observation_id,
-            "selection_id": value.selection.selection_id,
-            "decimal_odds": format(value.decimal_odds, "f"),
-        }
         opportunities.append(
-            Opportunity(
-                opportunity_id=content_addressed_id(
-                    identity_type="opportunity-v1",
-                    payload=payload,
-                ),
-                canonical_event_id=evaluation.prediction.canonical_event_id,
-                event_start_utc=evaluation.prediction.event_start_utc,
-                selection=value.selection,
-                prediction_id=evaluation.prediction.prediction_id,
-                predicted_at_utc=evaluation.prediction.predicted_at_utc,
-                model_trained_through_date=(evaluation.prediction.lineage.trained_through_date),
-                model_calibrated_through_date=(
-                    evaluation.prediction.lineage.calibrated_through_date
-                ),
+            build_opportunity_from_evaluation(
+                evaluation,
+                value,
                 quote_observation_id=quote_selection.quote_observation_id,
-                quoted_at_utc=evaluation.quote.quoted_at_utc,
-                source_observed_at_utc=evaluation.quote.source_observed_at_utc,
-                source_name=evaluation.quote.source_name,
-                provider_type=evaluation.quote.provider_type,
-                provider_id=evaluation.quote.provider_id,
-                evaluation_mode=evaluation.mode,
-                decimal_odds=value.decimal_odds,
-                model_probability=value.model_probability,
-                raw_implied_probability=value.raw_implied_probability,
-                normalized_implied_probability=value.normalized_implied_probability,
-                overround=evaluation.overround,
-                edge=value.edge,
-                expected_value=value.expected_value,
-                model_artifact_id=evaluation.prediction.lineage.model_artifact_id,
-                model_checksum_sha256=evaluation.prediction.lineage.model_checksum_sha256,
-                model_specification_version=(
-                    evaluation.prediction.lineage.model_specification_version
-                ),
-                feature_artifact_id=evaluation.prediction.lineage.feature_artifact_id,
-                feature_manifest_checksum_sha256=(
-                    evaluation.prediction.lineage.feature_manifest_checksum_sha256
-                ),
-                feature_specification_version=(
-                    evaluation.prediction.lineage.feature_specification_version
-                ),
-                feature_row_id=evaluation.prediction.lineage.feature_row_id,
-                dependency_keys=frozenset(
-                    {
-                        f"sport:{value.selection.sport_code}",
-                        f"event:{evaluation.prediction.canonical_event_id}",
-                    }
-                ),
-                dependency_metadata_complete=False,
-                prediction_quality_passed=(evaluation.prediction.quality.production_eligible),
             )
         )
     return tuple(opportunities)
@@ -520,5 +474,9 @@ def _rejection_codes(
     ):
         codes.append(RejectionCode.SELECTION_ODDS)
     if not opportunity.prediction_quality_passed:
-        codes.append(RejectionCode.PREDICTION_QUALITY)
+        if not (
+            opportunity.evaluation_mode is QuoteEvaluationMode.CLOSING_LINE_HISTORICAL_BENCHMARK
+            and filters.include_historical_benchmarks
+        ):
+            codes.append(RejectionCode.PREDICTION_QUALITY)
     return tuple(codes)

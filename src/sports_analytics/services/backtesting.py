@@ -23,6 +23,7 @@ from sports_analytics.data.types import JsonValue
 from sports_analytics.features.football.datasets import load_feature_artifact
 from sports_analytics.models.identity import content_addressed_id
 from sports_analytics.opportunities.contracts import Opportunity, OpportunityFilter
+from sports_analytics.predictions.contracts import PredictionInputSnapshot
 
 FOOTBALL_CLOSING_BACKTEST_SCHEMA: str = "football-1x2-closing-backtest-v1"
 
@@ -88,6 +89,7 @@ def run_and_publish_football_closing_backtest(
         feature_manifest_checksum_sha256=manifest_checksum,
         filters=filters,
         random_seed=request.random_seed,
+        input_snapshots=_input_snapshots(manifest.get("input_snapshots")),
     )
     datasets = _benchmark_datasets(
         benchmark,
@@ -274,6 +276,30 @@ def _benchmark_datasets(
         "fold_metrics": fold_rows,
         "aggregate_metrics": (summary,),
     }
+
+
+def _input_snapshots(raw: object) -> tuple[PredictionInputSnapshot, ...]:
+    if not isinstance(raw, list):
+        return ()
+    snapshots: list[PredictionInputSnapshot] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        snapshot_id = item.get("snapshot_id")
+        checksum = item.get("manifest_checksum_sha256")
+        if type(snapshot_id) is not str or type(checksum) is not str:
+            continue
+        schema = item.get("schema_version")
+        source = item.get("source_name")
+        snapshots.append(
+            PredictionInputSnapshot(
+                snapshot_id=snapshot_id,
+                manifest_checksum_sha256=checksum,
+                schema_version=schema if type(schema) is str else "snapshot-manifest-v1",
+                source_name=source if type(source) is str else "unknown-source",
+            )
+        )
+    return tuple(sorted(snapshots, key=lambda value: value.snapshot_id))
 
 
 def _opportunity_row(opportunity: Opportunity) -> dict[str, JsonValue]:

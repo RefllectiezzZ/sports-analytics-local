@@ -24,6 +24,7 @@ from sports_analytics.core.exceptions import (
     EvaluationError,
     FeatureError,
     ModelError,
+    PredictionError,
     RepositoryError,
     RuntimeBootstrapError,
     SportsAnalyticsError,
@@ -41,10 +42,16 @@ from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
     FOOTBALL_1X2_PREMATCH_FEATURES_V1,
 )
+from sports_analytics.predictions.service import (
+    VerifiedPredictionRequest,
+    generate_verified_football_1x2_prediction,
+)
 from sports_analytics.services.analysis_json import (
     build_combinations_from_json,
     evaluate_opportunities_from_json,
     generate_predictions_from_json,
+    prediction_to_json,
+    publish_analysis_with_paths,
     run_backtest_from_json,
     validate_combination_from_json,
 )
@@ -117,7 +124,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--generate-predictions",
         metavar="JSON_PATH",
         default=None,
-        help="Generate a complete generic prediction from an explicit JSON request.",
+        help=(
+            "Synthetic/contract-validation prediction from explicit JSON "
+            "(never production-eligible)."
+        ),
+    )
+    mode.add_argument(
+        "--generate-verified-predictions",
+        metavar="JSON_PATH",
+        default=None,
+        help="Trusted football 1X2 prediction from explicit model and feature artifacts.",
     )
     mode.add_argument(
         "--evaluate-opportunities",
@@ -142,6 +158,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         metavar="JSON_PATH",
         default=None,
         help="Run a fixed rolling-origin strategy from explicit JSON folds.",
+    )
+    mode.add_argument(
+        "--publish-analysis",
+        metavar="JSON_PATH",
+        default=None,
+        help="Publish a verified analysis artifact from explicit JSON inputs.",
     )
     parser.add_argument(
         "--snapshot",
@@ -283,6 +305,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _summarize_typed_artifact(args)
         if args.generate_predictions is not None:
             return _run_json_mode(args.generate_predictions, generate_predictions_from_json)
+        if args.generate_verified_predictions is not None:
+            return _generate_verified_predictions(args)
         if args.evaluate_opportunities is not None:
             return _run_json_mode(
                 args.evaluate_opportunities,
@@ -297,6 +321,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.run_backtest is not None:
             return _run_json_mode(args.run_backtest, run_backtest_from_json)
+        if args.publish_analysis is not None:
+            return _publish_analysis(args)
 
         parser.error(
             "select an engine mode such as --build-football-1x2-features or --train-football-1x2"
@@ -310,6 +336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         FeatureError,
         ModelError,
         EvaluationError,
+        PredictionError,
         TrainingError,
         BacktestError,
         ArtifactError,
@@ -330,10 +357,12 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.verify_backtest_artifact is not None,
         args.artifact_summary is not None,
         args.generate_predictions is not None,
+        args.generate_verified_predictions is not None,
         args.evaluate_opportunities is not None,
         args.build_combinations is not None,
         args.validate_combination is not None,
         args.run_backtest is not None,
+        args.publish_analysis is not None,
     ]
     if sum(1 for enabled in engine_modes if enabled) > 1:
         parser.error("engine modes are mutually exclusive")
@@ -391,6 +420,10 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         parser.error("--backtest-football-1x2 requires --features")
     if args.infer_football_1x2 and (args.model is None or args.feature_row_json is None):
         parser.error("--infer-football-1x2 requires --model and --feature-row-json")
+    if args.generate_verified_predictions is not None and (
+        args.model is None or args.features is None
+    ):
+        parser.error("--generate-verified-predictions requires --model and --features")
     if artifact_mode and args.artifact_schema is None:
         parser.error("artifact verification and summary require --artifact-schema")
 
@@ -692,6 +725,76 @@ def _run_json_mode(
         ) from exc
     result = operation(payload)
     print(dumps_canonical_json(ensure_json_value(result)))
+    return SUCCESS_EXIT
+
+
+def _publish_analysis(args: argparse.Namespace) -> int:
+    runtime = bootstrap_runtime(
+        "engine",
+        config_path=args.config,
+        env_file=args.env_file,
+    )
+    normalized = args.publish_analysis.replace("\\", "/")
+    path = Path(normalized)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigurationError(f"cannot read JSON input: {normalized}") from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            f"JSON input is malformed at line {exc.lineno}, column {exc.colno}"
+        ) from exc
+    result = publish_analysis_with_paths(payload, paths=runtime.paths)
+    print(dumps_canonical_json(ensure_json_value(result)))
+    return SUCCESS_EXIT
+
+
+def _generate_verified_predictions(args: argparse.Namespace) -> int:
+    runtime = bootstrap_runtime(
+        "engine",
+        config_path=args.config,
+        env_file=args.env_file,
+    )
+    normalized = args.generate_verified_predictions.replace("\\", "/")
+    path = Path(normalized)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigurationError(f"cannot read JSON input: {normalized}") from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            f"JSON input is malformed at line {exc.lineno}, column {exc.colno}"
+        ) from exc
+    if not isinstance(document, dict):
+        raise ConfigurationError("verified prediction request must be a JSON object")
+    from datetime import datetime
+
+    try:
+        event_start = datetime.fromisoformat(
+            str(document["event_start_utc"]).replace("Z", "+00:00")
+        )
+        predicted_at = datetime.fromisoformat(
+            str(document["predicted_at_utc"]).replace("Z", "+00:00")
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConfigurationError("verified prediction request timestamps are malformed") from exc
+    provenance = document.get("provenance", "historical")
+    if type(provenance) is not str:
+        raise ConfigurationError("provenance must be a string")
+    prediction = generate_verified_football_1x2_prediction(
+        paths=runtime.paths,
+        request=VerifiedPredictionRequest(
+            model_relative_path=args.model,
+            model_checksum_sha256=args.checksum,
+            feature_relative_directory=args.features,
+            feature_manifest_checksum_sha256=None,
+            canonical_event_id=str(document["canonical_event_id"]),
+            event_start_utc=event_start,
+            predicted_at_utc=predicted_at,
+            provenance=provenance,
+        ),
+    )
+    print(dumps_canonical_json(ensure_json_value(prediction_to_json(prediction))))
     return SUCCESS_EXIT
 
 

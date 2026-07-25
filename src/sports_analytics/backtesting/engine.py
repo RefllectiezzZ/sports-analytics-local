@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from decimal import Decimal
+from typing import cast
 
 from sports_analytics.backtesting.contracts import (
     BacktestMetricAggregation,
@@ -18,8 +19,13 @@ from sports_analytics.backtesting.contracts import (
     SettlementResult,
     StrategyConfiguration,
 )
-from sports_analytics.combinations.builder import BuilderBounds, build_combinations
+from sports_analytics.combinations.builder import (
+    BuilderBounds,
+    CombinationRejection,
+    build_combinations,
+)
 from sports_analytics.core.exceptions import BacktestError
+from sports_analytics.data.types import JsonValue
 from sports_analytics.models.identity import content_addressed_id
 from sports_analytics.opportunities.contracts import (
     Opportunity,
@@ -94,6 +100,7 @@ def run_backtest(
             <= ordered_inputs[index - 1].fold.test_start_date
         ):
             raise BacktestError("backtest folds must advance chronologically")
+    _validate_non_overlapping_test_events(ordered_inputs)
 
     seen_opportunities: set[str] = set()
     bets: list[SettledBet] = []
@@ -102,6 +109,7 @@ def run_backtest(
     rejection_count = 0
     opportunity_decisions: list[OpportunityDecision] = []
     opportunity_rejections: list[OpportunityRejection] = []
+    combination_rejections: list[CombinationRejection] = []
     for fold_input in ordered_inputs:
         fold = fold_input.fold
         settlements: dict[str, SettlementResult] = {}
@@ -179,6 +187,7 @@ def run_backtest(
                 rules=rules,
                 bounds=builder_bounds,
             )
+            combination_rejections.extend(build.rejections)
             for combination in build.combinations:
                 result, effective_odds, _returned, profit = settle_combination_flat_unit(
                     legs=tuple(
@@ -229,26 +238,27 @@ def run_backtest(
         candidates=tuple(all_candidates),
         selected_opportunity_ids=frozenset(accepted_opportunities),
         rejection_count=rejection_count,
+        opportunity_rejections=tuple(opportunity_rejections),
+        combination_rejections=tuple(combination_rejections),
     )
-    backtest_id = content_addressed_id(
-        identity_type="rolling-origin-backtest-v1",
-        payload={
-            "mode": strategy.mode.value,
-            "strategy_id": strategy.strategy_id,
-            "folds": [
-                {
-                    "fold_id": item.fold.fold_id,
-                    "train_start_date": item.fold.train_start_date.isoformat(),
-                    "train_end_date": item.fold.train_end_date.isoformat(),
-                    "calibration_start_date": item.fold.calibration_start_date.isoformat(),
-                    "calibration_end_date": item.fold.calibration_end_date.isoformat(),
-                    "test_start_date": item.fold.test_start_date.isoformat(),
-                    "test_end_date": item.fold.test_end_date.isoformat(),
-                }
-                for item in ordered_inputs
-            ],
-            "bet_ids": [item.bet_id for item in bets],
-        },
+    decision_run_id = _derive_decision_run_id(
+        strategy=strategy,
+        ordered_inputs=ordered_inputs,
+        candidates=tuple(all_candidates),
+        opportunity_decisions=tuple(opportunity_decisions),
+        opportunity_rejections=tuple(opportunity_rejections),
+        combination_rejections=tuple(combination_rejections),
+    )
+    backtest_result_id = _derive_backtest_result_id(
+        decision_run_id=decision_run_id,
+        strategy=strategy,
+        ordered_inputs=ordered_inputs,
+        candidates=tuple(all_candidates),
+        opportunity_decisions=tuple(opportunity_decisions),
+        opportunity_rejections=tuple(opportunity_rejections),
+        combination_rejections=tuple(combination_rejections),
+        bets=tuple(bets),
+        metrics=metrics,
     )
     disclaimer = (
         "Historical closing-line benchmark only; no pre-kickoff quote availability "
@@ -257,7 +267,9 @@ def run_backtest(
         else "Timestamped synthetic evaluation only; not operational settlement."
     )
     return BacktestResult(
-        backtest_id=backtest_id,
+        backtest_id=backtest_result_id,
+        decision_run_id=decision_run_id,
+        backtest_result_id=backtest_result_id,
         mode=strategy.mode,
         strategy_id=strategy.strategy_id,
         folds=tuple(item.fold for item in ordered_inputs),
@@ -267,6 +279,7 @@ def run_backtest(
         candidates=tuple(all_candidates),
         opportunity_decisions=tuple(opportunity_decisions),
         opportunity_rejections=tuple(opportunity_rejections),
+        combination_rejections=tuple(combination_rejections),
     )
 
 
@@ -276,6 +289,8 @@ def calculate_backtest_metrics(
     candidates: tuple[SettledOpportunity, ...] = (),
     selected_opportunity_ids: frozenset[str] = frozenset(),
     rejection_count: int = 0,
+    opportunity_rejections: tuple[OpportunityRejection, ...] = (),
+    combination_rejections: tuple[CombinationRejection, ...] = (),
 ) -> BacktestMetrics:
     """Compute deterministic required metrics from immutable settled bets."""
     wins = sum(item.result is SettlementResult.WIN for item in bets)
@@ -347,6 +362,10 @@ def calculate_backtest_metrics(
         selected_log_loss=score_selected[1],
         selected_multiclass_brier_score=score_selected[2],
         aggregations=_metric_aggregations(chronological_bets),
+        rejection_counts_by_reason=_rejection_counts_by_reason(
+            opportunity_rejections,
+            combination_rejections,
+        ),
     )
 
 
@@ -444,6 +463,197 @@ def _ev_bucket(value: float) -> str:
 def _single_or_multiple(values: tuple[str, ...]) -> str:
     unique = set(values)
     return next(iter(unique)) if len(unique) == 1 else "multiple"
+
+
+def _validate_non_overlapping_test_events(
+    fold_inputs: tuple[FoldBacktestInput, ...],
+) -> None:
+    """Reject ambiguous overlapping test events used for aggregate betting metrics."""
+    events_by_fold: dict[str, frozenset[str]] = {}
+    for fold_input in fold_inputs:
+        fold_events = frozenset(
+            settled.opportunity.canonical_event_id for settled in fold_input.candidates
+        )
+        for other_events in events_by_fold.values():
+            overlap = fold_events & other_events
+            if overlap:
+                raise BacktestError(f"overlapping test event across folds: {sorted(overlap)[0]}")
+        events_by_fold[fold_input.fold.fold_id] = fold_events
+
+
+def _fold_payload(fold_inputs: tuple[FoldBacktestInput, ...]) -> list[JsonValue]:
+    return cast(
+        list[JsonValue],
+        [
+            {
+                "fold_id": item.fold.fold_id,
+                "train_start_date": item.fold.train_start_date.isoformat(),
+                "train_end_date": item.fold.train_end_date.isoformat(),
+                "calibration_start_date": item.fold.calibration_start_date.isoformat(),
+                "calibration_end_date": item.fold.calibration_end_date.isoformat(),
+                "test_start_date": item.fold.test_start_date.isoformat(),
+                "test_end_date": item.fold.test_end_date.isoformat(),
+            }
+            for item in fold_inputs
+        ],
+    )
+
+
+def _derive_decision_run_id(
+    *,
+    strategy: StrategyConfiguration,
+    ordered_inputs: tuple[FoldBacktestInput, ...],
+    candidates: tuple[SettledOpportunity, ...],
+    opportunity_decisions: tuple[OpportunityDecision, ...],
+    opportunity_rejections: tuple[OpportunityRejection, ...],
+    combination_rejections: tuple[CombinationRejection, ...],
+) -> str:
+    return content_addressed_id(
+        identity_type="rolling-origin-backtest-decision-v1",
+        payload={
+            "mode": strategy.mode.value,
+            "strategy_id": strategy.strategy_id,
+            "folds": _fold_payload(ordered_inputs),
+            "candidate_opportunity_ids": cast(
+                list[JsonValue],
+                sorted(item.opportunity.opportunity_id for item in candidates),
+            ),
+            "decisions": [
+                {
+                    "opportunity_id": item.opportunity_id,
+                    "filter_config_id": item.filter_config_id,
+                    "eligible": item.eligible,
+                    "rejection_codes": [code.value for code in item.rejection_codes],
+                    "accepted_rank": item.accepted_rank,
+                }
+                for item in sorted(opportunity_decisions, key=lambda row: row.opportunity_id)
+            ],
+            "opportunity_rejections": [
+                {
+                    "opportunity_id": item.opportunity.opportunity_id,
+                    "codes": [code.value for code in item.codes],
+                }
+                for item in sorted(
+                    opportunity_rejections,
+                    key=lambda row: row.opportunity.opportunity_id,
+                )
+            ],
+            "combination_rejections": [
+                {
+                    "opportunity_ids": list(item.opportunity_ids),
+                    "reason": item.reason,
+                }
+                for item in combination_rejections
+            ],
+        },
+    )
+
+
+def _derive_backtest_result_id(
+    *,
+    decision_run_id: str,
+    strategy: StrategyConfiguration,
+    ordered_inputs: tuple[FoldBacktestInput, ...],
+    candidates: tuple[SettledOpportunity, ...],
+    opportunity_decisions: tuple[OpportunityDecision, ...],
+    opportunity_rejections: tuple[OpportunityRejection, ...],
+    combination_rejections: tuple[CombinationRejection, ...],
+    bets: tuple[SettledBet, ...],
+    metrics: BacktestMetrics,
+) -> str:
+    return content_addressed_id(
+        identity_type="rolling-origin-backtest-result-v1",
+        payload={
+            "decision_run_id": decision_run_id,
+            "mode": strategy.mode.value,
+            "strategy_id": strategy.strategy_id,
+            "folds": _fold_payload(ordered_inputs),
+            "candidate_opportunity_ids": cast(
+                list[JsonValue],
+                sorted(item.opportunity.opportunity_id for item in candidates),
+            ),
+            "settlements": [
+                {
+                    "bet_id": item.bet_id,
+                    "fold_id": item.fold_id,
+                    "kind": item.kind.value,
+                    "opportunity_ids": list(item.opportunity_ids),
+                    "result": item.result.value,
+                    "stake_units": format(item.stake_units, "f"),
+                    "profit_units": format(item.profit_units, "f"),
+                    "decimal_odds": format(item.decimal_odds, "f"),
+                }
+                for item in bets
+            ],
+            "decisions": [
+                {
+                    "opportunity_id": item.opportunity_id,
+                    "filter_config_id": item.filter_config_id,
+                    "eligible": item.eligible,
+                    "rejection_codes": [code.value for code in item.rejection_codes],
+                    "accepted_rank": item.accepted_rank,
+                }
+                for item in sorted(opportunity_decisions, key=lambda row: row.opportunity_id)
+            ],
+            "opportunity_rejections": [
+                {
+                    "opportunity_id": item.opportunity.opportunity_id,
+                    "codes": [code.value for code in item.codes],
+                }
+                for item in sorted(
+                    opportunity_rejections,
+                    key=lambda row: row.opportunity.opportunity_id,
+                )
+            ],
+            "combination_rejections": [
+                {
+                    "opportunity_ids": list(item.opportunity_ids),
+                    "reason": item.reason,
+                }
+                for item in combination_rejections
+            ],
+            "metrics": {
+                "bet_count": metrics.bet_count,
+                "net_profit_units": format(metrics.net_profit_units, "f"),
+                "gross_return_units": format(metrics.gross_return_units, "f"),
+                "roi": metrics.roi,
+                "rejection_count": metrics.rejection_count,
+                "rejection_counts_by_reason": [
+                    [reason, count, sample_size]
+                    for reason, count, sample_size in metrics.rejection_counts_by_reason
+                ],
+            },
+        },
+    )
+
+
+def _rejection_counts_by_reason(
+    opportunity_rejections: tuple[OpportunityRejection, ...],
+    combination_rejections: tuple[CombinationRejection, ...],
+) -> tuple[tuple[str, int, int], ...]:
+    counts: dict[str, int] = defaultdict(int)
+    for opp_rejection in opportunity_rejections:
+        for code in opp_rejection.codes:
+            counts[code.value] += 1
+    for combo_rejection in combination_rejections:
+        key = _combination_rejection_code(combo_rejection.reason)
+        counts[key] += 1
+    return tuple((reason, count, count) for reason, count in sorted(counts.items()))
+
+
+def _combination_rejection_code(reason: str) -> str:
+    lowered = reason.casefold()
+    if "unknown dependency" in lowered:
+        return "unknown-dependency"
+    if "conflicting legs" in lowered:
+        return "combination-conflict"
+    if "selection_odds_range" in lowered or "combined_odds_range" in lowered:
+        return "combination-odds-rules"
+    if "maximum_event_horizon" in lowered:
+        return "combination-timing"
+    if "closing-line" in lowered:
+        return "combination-timing"
+    return "combination-rules"
 
 
 def _validate_mode(opportunity: Opportunity, mode: BacktestMode) -> None:

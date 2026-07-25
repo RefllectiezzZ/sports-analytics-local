@@ -20,9 +20,10 @@ from sports_analytics.combinations.builder import build_combinations
 from sports_analytics.combinations.contracts import (
     Combination,
     CombinationRules,
-    validate_combination,
+    validate_combination_manual,
 )
 from sports_analytics.core.exceptions import ConfigurationError
+from sports_analytics.core.paths import RuntimePaths
 from sports_analytics.data.codec import format_utc_timestamp
 from sports_analytics.data.types import JsonValue
 from sports_analytics.opportunities.contracts import (
@@ -32,6 +33,10 @@ from sports_analytics.opportunities.contracts import (
     filter_and_rank_opportunities,
     opportunities_from_evaluation,
 )
+from sports_analytics.opportunities.identity import (
+    derive_opportunity_id,
+    verify_opportunity_identity,
+)
 from sports_analytics.predictions.contracts import (
     CanonicalSelectionIdentity,
     MarketPrediction,
@@ -39,7 +44,12 @@ from sports_analytics.predictions.contracts import (
     PredictionLineage,
     PredictionQualityFlags,
     SelectionProbability,
-    build_market_prediction,
+)
+from sports_analytics.predictions.synthetic import build_synthetic_market_prediction
+from sports_analytics.services.analysis import (
+    ANALYSIS_ARTIFACT_SCHEMA,
+    AnalysisPublicationRequest,
+    publish_analysis_artifact,
 )
 from sports_analytics.value.contracts import (
     CompleteMarketQuote,
@@ -50,15 +60,15 @@ from sports_analytics.value.contracts import (
 
 
 def generate_predictions_from_json(payload: object) -> dict[str, JsonValue]:
-    """Build and validate one generic complete-market prediction."""
-    prediction = _prediction(_mapping(payload, "prediction request"))
+    """Validate one synthetic complete-market prediction (never production-eligible by default)."""
+    prediction = _synthetic_prediction(_mapping(payload, "prediction request"))
     return _prediction_json(prediction)
 
 
 def evaluate_opportunities_from_json(payload: object) -> dict[str, JsonValue]:
     """Evaluate one complete quote and persist deterministic filter decisions."""
     document = _mapping(payload, "evaluation request")
-    prediction = _prediction(_mapping(document.get("prediction"), "prediction"))
+    prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
     quote_payload = _mapping(document.get("quote"), "quote")
     quote = CompleteMarketQuote(
         canonical_event_id=_string(quote_payload, "canonical_event_id"),
@@ -111,11 +121,75 @@ def evaluate_opportunities_from_json(payload: object) -> dict[str, JsonValue]:
     }
 
 
+def publish_analysis_with_paths(
+    payload: object,
+    *,
+    paths: RuntimePaths,
+) -> dict[str, JsonValue]:
+    """Build, filter, combine, atomically publish, and reload one verified analysis artifact."""
+    document = _mapping(payload, "analysis publication request")
+    prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
+    quote_payload = _mapping(document.get("quote"), "quote")
+    quote = CompleteMarketQuote(
+        canonical_event_id=_string(quote_payload, "canonical_event_id"),
+        source_name=_string(quote_payload, "source_name"),
+        provider_type=_string(quote_payload, "provider_type"),
+        provider_id=_string(quote_payload, "provider_id"),
+        quote_phase=_string(quote_payload, "quote_phase"),
+        source_observed_at_utc=_datetime(quote_payload, "source_observed_at_utc"),
+        quoted_at_utc=_optional_datetime(quote_payload.get("quoted_at_utc")),
+        quote_timestamp_precision=_string(quote_payload, "quote_timestamp_precision"),
+        quote_valid_from_utc=_optional_datetime(quote_payload.get("quote_valid_from_utc")),
+        quote_valid_to_utc=_optional_datetime(quote_payload.get("quote_valid_to_utc")),
+        selections=tuple(
+            PricedSelection(
+                selection=_selection(_mapping(item, "priced selection")),
+                decimal_odds=_decimal(_mapping(item, "priced selection"), "decimal_odds"),
+                quote_series_id=_string(_mapping(item, "priced selection"), "quote_series_id"),
+                quote_observation_id=_string(
+                    _mapping(item, "priced selection"),
+                    "quote_observation_id",
+                ),
+            )
+            for item in _array(quote_payload, "selections")
+        ),
+    )
+    mode = _enum(
+        QuoteEvaluationMode,
+        document.get("mode", QuoteEvaluationMode.LIVE_SAFE.value),
+        "mode",
+    )
+    filters = _filters(_mapping(document.get("filters", {}), "filters"))
+    rules_payload = document.get("combination_rules")
+    combination_rules = (
+        None if rules_payload is None else _rules(_mapping(rules_payload, "combination_rules"))
+    )
+    relative_directory = _optional_string(document.get("relative_directory"))
+    published = publish_analysis_artifact(
+        paths=paths,
+        request=AnalysisPublicationRequest(
+            prediction=prediction,
+            quote=quote,
+            mode=mode,
+            filters=filters,
+            combination_rules=combination_rules,
+            relative_directory=relative_directory,
+        ),
+    )
+    return {
+        "artifact_id": published.artifact_id,
+        "checksum_sha256": published.checksum_sha256,
+        "relative_directory": published.relative_directory,
+        "schema_version": ANALYSIS_ARTIFACT_SCHEMA,
+    }
+
+
 def build_combinations_from_json(payload: object) -> dict[str, JsonValue]:
     """Build bounded combinations from explicit serialized opportunities."""
     document = _mapping(payload, "combination build request")
     opportunities = tuple(
-        _opportunity(_mapping(item, "opportunity")) for item in _array(document, "opportunities")
+        _verified_opportunity(_mapping(item, "opportunity"))
+        for item in _array(document, "opportunities")
     )
     rules = _rules(_mapping(document.get("rules", {}), "rules"))
     result = build_combinations(opportunities, rules=rules)
@@ -134,14 +208,28 @@ def build_combinations_from_json(payload: object) -> dict[str, JsonValue]:
 def validate_combination_from_json(payload: object) -> dict[str, JsonValue]:
     """Validate one exact manually selected leg set."""
     document = _mapping(payload, "manual combination request")
-    combination = validate_combination(
+    result = validate_combination_manual(
         tuple(
-            _opportunity(_mapping(item, "opportunity"))
+            _verified_opportunity(_mapping(item, "opportunity"))
             for item in _array(document, "opportunities")
         ),
         rules=_rules(_mapping(document.get("rules", {}), "rules")),
     )
-    return _combination_json(combination)
+    if result.combination is None:
+        return {
+            "eligible": False,
+            "rejection_reasons": list(result.rejection_reasons),
+            "dependencies": [
+                {
+                    "left_opportunity_id": relation.left_opportunity_id,
+                    "right_opportunity_id": relation.right_opportunity_id,
+                    "classification": relation.classification.value,
+                    "reason": relation.reason,
+                }
+                for relation in result.dependencies
+            ],
+        }
+    return _combination_json(result.combination)
 
 
 def run_backtest_from_json(payload: object) -> dict[str, JsonValue]:
@@ -179,7 +267,7 @@ def run_backtest_from_json(payload: object) -> dict[str, JsonValue]:
         )
         candidates = tuple(
             SettledOpportunity(
-                opportunity=_opportunity(
+                opportunity=_verified_opportunity(
                     _mapping(_mapping(item, "settled candidate").get("opportunity"), "opportunity")
                 ),
                 result=_enum(
@@ -213,7 +301,7 @@ def run_backtest_from_json(payload: object) -> dict[str, JsonValue]:
     }
 
 
-def _prediction(document: dict[str, object]) -> MarketPrediction:
+def _synthetic_prediction(document: dict[str, object]) -> MarketPrediction:
     lineage_payload = _mapping(document.get("lineage"), "lineage")
     quality_payload = _mapping(document.get("quality", {}), "quality")
     raw_probabilities = _array(document, "probabilities")
@@ -224,7 +312,7 @@ def _prediction(document: dict[str, object]) -> MarketPrediction:
         )
         for item in raw_probabilities
     )
-    return build_market_prediction(
+    return build_synthetic_market_prediction(
         canonical_event_id=_string(document, "canonical_event_id"),
         event_start_utc=_datetime(document, "event_start_utc"),
         predicted_at_utc=_datetime(document, "predicted_at_utc"),
@@ -267,25 +355,31 @@ def _prediction(document: dict[str, object]) -> MarketPrediction:
         probabilities=probabilities,
         ordered_selection_space=tuple(item.selection for item in probabilities),
         quality=PredictionQualityFlags(
-            calibrated=_boolean(quality_payload.get("calibrated", True), "calibrated"),
+            calibrated=_boolean(quality_payload.get("calibrated", False), "calibrated"),
             model_artifact_verified=_boolean(
-                quality_payload.get("model_artifact_verified", True),
+                quality_payload.get("model_artifact_verified", False),
                 "model_artifact_verified",
             ),
             feature_artifact_verified=_boolean(
-                quality_payload.get("feature_artifact_verified", True),
+                quality_payload.get("feature_artifact_verified", False),
                 "feature_artifact_verified",
             ),
             sufficient_history=_boolean(
-                quality_payload.get("sufficient_history", True),
+                quality_payload.get("sufficient_history", False),
                 "sufficient_history",
             ),
             data_quality_passed=_boolean(
-                quality_payload.get("data_quality_passed", True),
+                quality_payload.get("data_quality_passed", False),
                 "data_quality_passed",
             ),
         ),
     )
+
+
+def _verified_opportunity(document: dict[str, object]) -> Opportunity:
+    opportunity = _opportunity(document)
+    verify_opportunity_identity(opportunity)
+    return opportunity
 
 
 def _selection(document: dict[str, object]) -> CanonicalSelectionIdentity:
@@ -304,8 +398,39 @@ def _selection(document: dict[str, object]) -> CanonicalSelectionIdentity:
 
 
 def _opportunity(document: dict[str, object]) -> Opportunity:
+    evaluation_mode = _enum(
+        QuoteEvaluationMode,
+        document.get("evaluation_mode"),
+        "evaluation_mode",
+    )
+    predicted_at = _datetime(document, "predicted_at_utc")
+    quoted_at = _optional_datetime(document.get("quoted_at_utc"))
+    source_observed_at = _datetime(document, "source_observed_at_utc")
+    event_start = _datetime(document, "event_start_utc")
+    if evaluation_mode is QuoteEvaluationMode.LIVE_SAFE:
+        if quoted_at is None:
+            raise ConfigurationError("live-safe opportunity requires quoted_at_utc")
+        decision_as_of = max(predicted_at, quoted_at, source_observed_at)
+    else:
+        decision_as_of = event_start
+    decimal_odds = _decimal(document, "decimal_odds")
+    opportunity_id = derive_opportunity_id(
+        evaluation_version="complete-market-value-v1",
+        mode=evaluation_mode,
+        prediction_id=_string(document, "prediction_id"),
+        quote_observation_id=_string(document, "quote_observation_id"),
+        selection_id=_selection(_mapping(document.get("selection"), "selection")).selection_id,
+        source_name=_string(document, "source_name"),
+        provider_type=_string(document, "provider_type"),
+        provider_id=_string(document, "provider_id"),
+        decimal_odds=decimal_odds,
+        decision_as_of_utc=decision_as_of,
+    )
+    supplied_id = document.get("opportunity_id")
+    if type(supplied_id) is str and supplied_id != opportunity_id:
+        raise ConfigurationError("opportunity_id does not match canonical identity")
     return Opportunity(
-        opportunity_id=_string(document, "opportunity_id"),
+        opportunity_id=opportunity_id,
         canonical_event_id=_string(document, "canonical_event_id"),
         event_start_utc=_datetime(document, "event_start_utc"),
         selection=_selection(_mapping(document.get("selection"), "selection")),
@@ -334,6 +459,7 @@ def _opportunity(document: dict[str, object]) -> Opportunity:
         overround=_number(document, "overround"),
         edge=_number(document, "edge"),
         expected_value=_number(document, "expected_value"),
+        decision_as_of_utc=decision_as_of,
         model_artifact_id=_optional_string(document.get("model_artifact_id")) or "",
         model_checksum_sha256=_optional_string(document.get("model_checksum_sha256")) or "",
         model_specification_version=(
@@ -354,7 +480,7 @@ def _opportunity(document: dict[str, object]) -> Opportunity:
             "dependency_metadata_complete",
         ),
         prediction_quality_passed=_boolean(
-            document.get("prediction_quality_passed", True),
+            document.get("prediction_quality_passed", False),
             "prediction_quality_passed",
         ),
     )
@@ -450,6 +576,11 @@ def _rules(document: dict[str, object]) -> CombinationRules:
             "allow_multiple_dates",
         ),
     )
+
+
+def prediction_to_json(item: MarketPrediction) -> dict[str, JsonValue]:
+    """Serialize one complete market prediction for CLI output."""
+    return _prediction_json(item)
 
 
 def _prediction_json(item: MarketPrediction) -> dict[str, JsonValue]:

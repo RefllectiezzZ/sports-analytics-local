@@ -32,6 +32,9 @@ def _write(root: Path, relative: str = "backtests/example/id-1"):
 def _typed_datasets():
     prediction = {
         "prediction_id": "prediction-1",
+        "canonical_event_id": "event-1",
+        "event_start_utc": "2024-02-10T15:00:00Z",
+        "predicted_at_utc": "2024-02-10T12:00:00Z",
         "ordered_selection_ids": ["selection-a", "selection-b", "selection-c"],
         "probabilities": [
             {"selection_id": "selection-a", "probability": 0.5},
@@ -41,21 +44,48 @@ def _typed_datasets():
     }
     opportunity = {
         "opportunity_id": "opportunity-1",
+        "canonical_event_id": "event-1",
         "event_start_utc": "2024-02-10T15:00:00Z",
         "decision_as_of_utc": "2024-02-10T14:00:00Z",
+        "prediction_id": "prediction-1",
+        "quote_observation_id": "quote-1",
+        "provider_id": "provider-a",
+        "decimal_odds": "2.0",
+        "model_probability": 0.6,
+        "edge": 0.1,
         "expected_value": 0.2,
+        "raw_implied_probability": 0.5,
+        "normalized_implied_probability": 0.47619047619047616,
         "model_artifact_id": "model-1",
         "model_checksum_sha256": "a" * 64,
-        "model_specification_version": "model-v1",
         "feature_artifact_id": "feature-1",
         "feature_manifest_checksum_sha256": "b" * 64,
-        "feature_specification_version": "feature-v1",
         "feature_row_id": "event-1",
     }
     return {
         "predictions": (prediction,),
-        "market_evaluations": ({"evaluation_id": "evaluation-1", "expected_value": 0.2},),
-        "opportunity_decisions": ({"opportunity_id": "opportunity-1", "eligible": True},),
+        "market_evaluations": (
+            {
+                "evaluation_id": "evaluation-1",
+                "prediction_id": "prediction-1",
+                "quote_observation_id": "quote-1",
+                "selection_id": "selection-a",
+                "expected_value": 0.2,
+                "edge": 0.1,
+                "raw_implied_probability": 0.5,
+                "normalized_implied_probability": 0.47619047619047616,
+                "overround": 0.05,
+            },
+        ),
+        "opportunity_decisions": (
+            {
+                "opportunity_id": "opportunity-1",
+                "filter_config_id": "filter-1",
+                "decision_as_of_utc": "2024-02-10T14:00:00Z",
+                "eligible": True,
+                "rejection_codes": [],
+            },
+        ),
         "opportunities": (opportunity,),
         "combinations": (),
         "rejections": (),
@@ -214,9 +244,20 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
     datasets = _typed_datasets()
     datasets.update(
         {
-            "settlements": ({"bet_id": "bet-1", "result": "win"},),
+            "settlements": (
+                {
+                    "bet_id": "bet-1",
+                    "fold_id": "fold-1",
+                    "kind": "single",
+                    "opportunity_ids": ["opportunity-1"],
+                    "decimal_odds": "2.0",
+                    "result": "win",
+                    "stake_units": "1",
+                    "profit_units": "1.0",
+                },
+            ),
             "fold_metrics": ({"fold_id": "fold-1", "sample_size": 1},),
-            "aggregate_metrics": ({"metric_id": "aggregate", "bet_count": 1},),
+            "aggregate_metrics": ({"metric_id": "aggregate", "backtest_id": "backtest-1"},),
         }
     )
     artifact = write_typed_analytical_artifact(
@@ -347,4 +388,4 @@ def test_generate_predictions_command_uses_declared_order(
     assert engine_main(["--generate-predictions", str(path)]) == 0
     output = json.loads(capsys.readouterr().out)
     assert [item["probability"] for item in output["probabilities"]] == [0.6, 0.4]
-    assert output["production_eligible"] is True
+    assert output["production_eligible"] is False
