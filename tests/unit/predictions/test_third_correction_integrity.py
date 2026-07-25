@@ -492,32 +492,19 @@ def test_forged_market_evaluation_formula_rejected() -> None:
 
 
 def test_forged_combination_id_rejected() -> None:
-    datasets = _typed_datasets()
-    if not datasets.get("combinations"):
-        pytest.skip("typed fixture has no combinations")
-    row = dict(datasets["combinations"][0])
+    from tests.unit.predictions.test_surgical_final_integrity import _combination_fixture_rows
+
+    row = _combination_fixture_rows()
+    row = dict(row)
     row["combination_id"] = "forged-combination-id"
-    with pytest.raises(ArtifactError, match="does not match|unknown fields"):
+    with pytest.raises(ArtifactError, match="does not match"):
         validate_dataset_row_schema("combinations", row, version="combinations-v2")
 
 
 def test_dependency_pairs_outside_leg_set_rejected() -> None:
-    datasets = _typed_datasets()
-    if not datasets.get("combinations"):
-        opportunity = build_test_opportunity("1", event_id="event-1", start=START)
-        second = build_test_opportunity("2", event_id="event-2", start=START + timedelta(days=1))
-        build = build_combinations(
-            (opportunity, second),
-            rules=CombinationRules(minimum_legs=2, maximum_legs=2),
-            evidence_mode=CombinationEvidenceMode.SYNTHETIC_CONTRACT,
-        )
-        if not build.combinations:
-            pytest.skip("fixture could not build a combination")
-        from sports_analytics.artifact_serializers import serialize_combination_row
+    from tests.unit.predictions.test_surgical_final_integrity import _combination_fixture_rows
 
-        row = serialize_combination_row(build.combinations[0])
-    else:
-        row = dict(datasets["combinations"][0])
+    row = dict(_combination_fixture_rows())
     dependencies = list(row["dependencies"])
     dependencies[0] = {
         **dependencies[0],

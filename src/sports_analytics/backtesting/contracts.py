@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 
-from sports_analytics.combinations.contracts import CombinationRules
+from sports_analytics.combinations.contracts import Combination, CombinationRules
 from sports_analytics.core.exceptions import BacktestError
 from sports_analytics.data.types import JsonValue
 from sports_analytics.models.identity import content_addressed_id
@@ -281,3 +281,4 @@ class BacktestResult:
     opportunity_decisions: tuple[OpportunityDecision, ...] = ()
     opportunity_rejections: tuple[OpportunityRejection, ...] = ()
     combination_rejections: tuple[CombinationRejection, ...] = ()
+    combinations: tuple[Combination, ...] = ()

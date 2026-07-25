@@ -4,19 +4,26 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Final, cast
 
 from sports_analytics.artifact_strict import (
     require_bool,
+    require_canonical_selection_identity,
+    require_canonical_utc_timestamp_string,
+    require_date_string,
     require_decimal_string,
+    require_dict,
     require_finite_number,
+    require_list,
+    require_probability,
+    require_sha256_checksum,
     require_str,
-    require_utc_timestamp_string,
 )
+from sports_analytics.combinations.contracts import derive_combination_id
 from sports_analytics.core.exceptions import ArtifactError
-from sports_analytics.data.types import JsonValue, validate_sha256_checksum
+from sports_analytics.data.types import JsonValue
 from sports_analytics.models.identity import content_addressed_id
 from sports_analytics.opportunities.identity import (
     OPPORTUNITY_IDENTITY_VERSION,
@@ -353,16 +360,69 @@ def validate_dataset_row_schema(name: str, row: dict[str, JsonValue], *, version
 
 
 def validate_cross_dataset_integrity(datasets: dict[str, tuple[dict[str, JsonValue], ...]]) -> None:
-    """Validate foreign-key relationships between typed datasets."""
+    """Validate foreign-key relationships and recomputed identities between typed datasets."""
+    try:
+        _validate_cross_dataset_integrity(datasets)
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        InvalidOperation,
+        ZeroDivisionError,
+    ) as exc:
+        raise ArtifactError("cross-dataset integrity validation failed") from exc
+
+
+def _validate_cross_dataset_integrity(
+    datasets: dict[str, tuple[dict[str, JsonValue], ...]],
+) -> None:
     predictions = {row["prediction_id"] for row in datasets.get("predictions", ())}
     opportunities = {row["opportunity_id"] for row in datasets.get("opportunities", ())}
+    opportunities_by_id: dict[str, dict[str, JsonValue]] = {
+        require_str(row["opportunity_id"], field="opportunity_id"): row
+        for row in datasets.get("opportunities", ())
+    }
     decisions = datasets.get("opportunity_decisions", ())
     decision_ids = {row["opportunity_id"] for row in decisions}
     if decision_ids != opportunities:
         raise ArtifactError("opportunity decisions must cover every opportunity exactly once")
+    eligible_opportunity_ids = {
+        row["opportunity_id"] for row in decisions if row.get("eligible") is True
+    }
     for row in datasets.get("market_evaluations", ()):
         if row["prediction_id"] not in predictions:
             raise ArtifactError("orphan market evaluation references missing prediction")
+    evaluation_by_key: dict[tuple[str, str, str, str], dict[str, JsonValue]] = {}
+    for row in datasets.get("market_evaluations", ()):
+        key = (
+            require_str(row.get("prediction_id"), field="prediction_id"),
+            require_str(row.get("quote_observation_id"), field="quote_observation_id"),
+            require_str(row.get("quote_series_id"), field="quote_series_id"),
+            require_str(row.get("selection_id"), field="selection_id"),
+        )
+        if key in evaluation_by_key:
+            raise ArtifactError("duplicate market evaluation identity")
+        evaluation_by_key[key] = row
+    for _opportunity_id, opportunity_row in opportunities_by_id.items():
+        prediction_id = require_str(
+            opportunity_row.get("prediction_id"),
+            field="prediction_id",
+        )
+        if prediction_id not in predictions:
+            raise ArtifactError("orphan opportunity references missing prediction")
+        selection = require_canonical_selection_identity(
+            opportunity_row.get("selection"),
+            field="selection",
+        )
+        evaluation_key = (
+            prediction_id,
+            require_str(opportunity_row.get("quote_observation_id"), field="quote_observation_id"),
+            require_str(opportunity_row.get("quote_series_id"), field="quote_series_id"),
+            selection.selection_id,
+        )
+        if evaluation_key not in evaluation_by_key:
+            raise ArtifactError("opportunity has no matching market evaluation")
     for row in datasets.get("opportunity_decisions", ()):
         if row["opportunity_id"] not in opportunities:
             raise ArtifactError("orphan opportunity decision references missing opportunity")
@@ -377,23 +437,33 @@ def validate_cross_dataset_integrity(datasets: dict[str, tuple[dict[str, JsonVal
         if eligible is False and row.get("accepted_rank") is not None:
             raise ArtifactError("rejected decision cannot include accepted_rank")
     _validate_decision_ranks(datasets.get("opportunity_decisions", ()))
+    combinations_by_id = {row["combination_id"]: row for row in datasets.get("combinations", ())}
     for row in datasets.get("combinations", ()):
-        opportunity_ids = row.get("opportunity_ids", [])
-        if not isinstance(opportunity_ids, list):
-            raise ArtifactError("combination opportunity_ids must be a list")
-        for opportunity_id in opportunity_ids:
+        opportunity_ids = require_list(row.get("opportunity_ids"), field="opportunity_ids")
+        ordered_ids = [require_str(item, field="opportunity_id") for item in opportunity_ids]
+        if ordered_ids != sorted(set(ordered_ids)):
+            raise ArtifactError("combination opportunity_ids must be ordered and unique")
+        for opportunity_id in ordered_ids:
             if opportunity_id not in opportunities:
                 raise ArtifactError("orphan combination references missing opportunity")
+            if opportunity_id not in eligible_opportunity_ids:
+                raise ArtifactError("combination references ineligible opportunity")
+        _validate_combination_against_opportunities(
+            row,
+            opportunity_ids=ordered_ids,
+            opportunities_by_id=opportunities_by_id,
+        )
     for row in datasets.get("rejections", ()):
         kind = row.get("rejection_kind")
         if kind == REJECTION_KIND_OPPORTUNITY_FILTER:
             if row.get("opportunity_id") not in opportunities:
                 raise ArtifactError("orphan rejection references missing opportunity")
         elif kind == REJECTION_KIND_COMBINATION_BUILDER:
-            opportunity_ids = row.get("opportunity_ids", [])
-            if not isinstance(opportunity_ids, list):
+            opportunity_ids_raw = row.get("opportunity_ids", [])
+            if not isinstance(opportunity_ids_raw, list):
                 raise ArtifactError("combination rejection opportunity_ids must be a list")
-            for opportunity_id in opportunity_ids:
+            for raw_opportunity_id in opportunity_ids_raw:
+                opportunity_id = require_str(raw_opportunity_id, field="opportunity_id")
                 if opportunity_id not in opportunities:
                     raise ArtifactError(
                         "orphan combination rejection references missing opportunity"
@@ -401,62 +471,125 @@ def validate_cross_dataset_integrity(datasets: dict[str, tuple[dict[str, JsonVal
         else:
             raise ArtifactError("rejection_kind is unsupported")
     for row in datasets.get("settlements", ()):
-        opportunity_ids = row.get("opportunity_ids", [])
-        if not isinstance(opportunity_ids, list):
-            raise ArtifactError("settlement opportunity_ids must be a list")
-        for opportunity_id in opportunity_ids:
+        opportunity_ids = require_list(row.get("opportunity_ids"), field="opportunity_ids")
+        settlement_opportunity_ids = [
+            require_str(item, field="opportunity_id") for item in opportunity_ids
+        ]
+        for opportunity_id in settlement_opportunity_ids:
             if opportunity_id not in opportunities:
                 raise ArtifactError("orphan settlement references missing opportunity")
+        kind = require_str(row.get("kind"), field="kind")
+        if kind == "single":
+            if len(settlement_opportunity_ids) != 1:
+                raise ArtifactError("single settlement must reference exactly one opportunity")
+            if settlement_opportunity_ids[0] not in eligible_opportunity_ids:
+                raise ArtifactError("single settlement references ineligible opportunity")
+        elif kind == "combination":
+            combination_id = require_str(row.get("combination_id"), field="combination_id")
+            if combination_id not in combinations_by_id:
+                raise ArtifactError("combination settlement references missing combination")
+            combination_row = combinations_by_id[combination_id]
+            combination_opportunity_ids = require_list(
+                combination_row.get("opportunity_ids"),
+                field="opportunity_ids",
+            )
+            declared_ids = [
+                require_str(item, field="opportunity_id") for item in combination_opportunity_ids
+            ]
+            if settlement_opportunity_ids != declared_ids:
+                raise ArtifactError(
+                    "combination settlement legs do not match persisted combination"
+                )
+        else:
+            raise ArtifactError("settlement kind is unsupported")
 
 
 def _validate_prediction_row(row: dict[str, JsonValue]) -> None:
-    probabilities = row.get("probabilities")
-    ordered = row.get("ordered_selection_ids")
-    if not isinstance(probabilities, list) or not isinstance(ordered, list):
-        raise ArtifactError("prediction probabilities are malformed")
-    values: list[float] = []
-    ids: list[str] = []
-    for item in probabilities:
-        if not isinstance(item, dict):
-            raise ArtifactError("prediction probability entry is malformed")
-        selection_id = item.get("selection_id")
-        probability = item.get("probability")
-        if type(selection_id) is not str:
-            raise ArtifactError("prediction selection_id is malformed")
-        _validate_probability(probability, "probability")
-        ids.append(selection_id)
-        values.append(float(probability))  # type: ignore[arg-type]
-    if ids != ordered:
-        raise ArtifactError("prediction ordered selection ids mismatch")
-    if abs(math.fsum(values) - 1.0) > 1e-9:
-        raise ArtifactError("prediction probabilities must sum to one")
-    provenance = row.get("provenance")
-    if type(provenance) is not str or provenance not in {"historical-replay", "synthetic-contract"}:
-        raise ArtifactError("prediction provenance is unsupported")
-    lineage = row.get("lineage")
-    if not isinstance(lineage, dict):
-        raise ArtifactError("prediction lineage is malformed")
-    for field in (
-        "model_artifact_id",
-        "model_checksum_sha256",
-        "model_specification_version",
-        "feature_artifact_id",
-        "feature_manifest_checksum_sha256",
-        "feature_specification_version",
-        "feature_row_id",
-    ):
-        if type(lineage.get(field)) is not str or not lineage.get(field):
-            raise ArtifactError(f"prediction lineage field {field} is incomplete")
     try:
-        validate_sha256_checksum(str(lineage["model_checksum_sha256"]))
-        validate_sha256_checksum(str(lineage["feature_manifest_checksum_sha256"]))
-    except Exception as exc:
-        raise ArtifactError("prediction lineage checksum is malformed") from exc
-    if lineage["feature_row_id"] != row["canonical_event_id"]:
-        raise ArtifactError("prediction feature_row_id must match canonical_event_id")
-    expected_id = _recompute_prediction_id(row)
-    if row["prediction_id"] != expected_id:
-        raise ArtifactError("prediction_id does not match canonical identity")
+        probabilities = require_list(row.get("probabilities"), field="probabilities")
+        ordered = require_list(row.get("ordered_selection_ids"), field="ordered_selection_ids")
+        values: list[float] = []
+        ids: list[str] = []
+        for index, item in enumerate(probabilities):
+            probability_item = require_dict(item, field=f"probabilities[{index}]")
+            selection_id = require_str(
+                probability_item.get("selection_id"),
+                field=f"probabilities[{index}].selection_id",
+            )
+            selection = require_canonical_selection_identity(
+                probability_item.get("selection"),
+                field=f"probabilities[{index}].selection",
+            )
+            if selection_id != selection.selection_id:
+                raise ArtifactError("prediction selection_id does not match selection payload")
+            probability = require_probability(
+                probability_item.get("probability"),
+                field=f"probabilities[{index}].probability",
+            )
+            ids.append(selection_id)
+            values.append(probability)
+        ordered_ids = [require_str(item, field="ordered_selection_ids[]") for item in ordered]
+        if ids != ordered_ids:
+            raise ArtifactError("prediction ordered selection ids mismatch")
+        if abs(math.fsum(values) - 1.0) > 1e-9:
+            raise ArtifactError("prediction probabilities must sum to one")
+        provenance = require_str(row.get("provenance"), field="provenance")
+        if provenance not in {"historical-replay", "synthetic-contract"}:
+            raise ArtifactError("prediction provenance is unsupported")
+        lineage = require_dict(row.get("lineage"), field="lineage")
+        for field in (
+            "model_artifact_id",
+            "model_checksum_sha256",
+            "model_specification_version",
+            "feature_artifact_id",
+            "feature_manifest_checksum_sha256",
+            "feature_specification_version",
+            "feature_row_id",
+        ):
+            require_str(lineage.get(field), field=f"lineage.{field}")
+        require_sha256_checksum(
+            lineage.get("model_checksum_sha256"),
+            field="lineage.model_checksum_sha256",
+        )
+        require_sha256_checksum(
+            lineage.get("feature_manifest_checksum_sha256"),
+            field="lineage.feature_manifest_checksum_sha256",
+        )
+        if lineage["feature_row_id"] != row["canonical_event_id"]:
+            raise ArtifactError("prediction feature_row_id must match canonical_event_id")
+        require_canonical_utc_timestamp_string(
+            row.get("event_start_utc"),
+            field="event_start_utc",
+        )
+        require_canonical_utc_timestamp_string(
+            row.get("predicted_at_utc"),
+            field="predicted_at_utc",
+        )
+        require_canonical_utc_timestamp_string(
+            row.get("feature_available_at_utc"),
+            field="feature_available_at_utc",
+        )
+        quality = require_dict(row.get("quality"), field="quality")
+        for quality_field in (
+            "calibrated",
+            "model_artifact_verified",
+            "feature_artifact_verified",
+            "sufficient_history",
+            "data_quality_passed",
+        ):
+            require_bool(quality.get(quality_field), field=f"quality.{quality_field}")
+        expected_id = _recompute_prediction_id(row)
+        if row["prediction_id"] != expected_id:
+            raise ArtifactError("prediction_id does not match canonical identity")
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        InvalidOperation,
+        ZeroDivisionError,
+    ) as exc:
+        raise ArtifactError("prediction row validation failed") from exc
 
 
 def _validate_market_evaluation_row(row: dict[str, JsonValue]) -> None:
@@ -497,107 +630,168 @@ def _validate_market_evaluation_row(row: dict[str, JsonValue]) -> None:
     if row["evaluation_id"] != expected_id:
         raise ArtifactError("evaluation_id does not match canonical identity")
     overround = require_finite_number(row.get("overround"), field="overround")
-    if isinstance(overround, bool) or not isinstance(overround, int | float):
-        raise ArtifactError("overround must be numeric")
-    if not math.isfinite(float(overround)) or float(overround) < 0.0:
+    if overround < 0.0:
         raise ArtifactError("overround must be finite and non-negative")
-    complete_total = row.get("complete_market_raw_total")
-    if isinstance(complete_total, bool) or not isinstance(complete_total, int | float):
-        raise ArtifactError("complete_market_raw_total must be numeric")
-    complete_total_f = float(complete_total)
-    if not math.isfinite(complete_total_f) or complete_total_f <= 0.0:
+    complete_total = require_finite_number(
+        row.get("complete_market_raw_total"),
+        field="complete_market_raw_total",
+    )
+    if complete_total <= 0.0:
         raise ArtifactError("complete_market_raw_total must be positive")
-    if abs(complete_total_f - (1.0 + float(overround))) > VALUE_CALCULATION_TOLERANCE:
+    if abs(complete_total - (1.0 + overround)) > VALUE_CALCULATION_TOLERANCE:
         raise ArtifactError("complete_market_raw_total is inconsistent with overround")
-    odds = row.get("decimal_odds")
-    if type(odds) is not str:
-        raise ArtifactError("decimal_odds must be a string")
+    odds = require_decimal_string(row.get("decimal_odds"), field="decimal_odds")
     odds_f = float(odds)
     if not math.isfinite(odds_f) or odds_f <= 1.0:
         raise ArtifactError("decimal_odds must be finite and >1")
-    raw = row.get("raw_implied_probability")
-    normalized = row.get("normalized_implied_probability")
-    model_prob = row.get("model_probability")
-    edge = row.get("edge")
-    expected_value = row.get("expected_value")
-    for field_name, value in (
-        ("raw_implied_probability", raw),
-        ("normalized_implied_probability", normalized),
-        ("model_probability", model_prob),
-        ("edge", edge),
-        ("expected_value", expected_value),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            raise ArtifactError(f"{field_name} must be numeric")
-        if not math.isfinite(float(value)):
-            raise ArtifactError(f"{field_name} must be finite")
-    normalized_f = float(cast(int | float, normalized))
-    raw_f = float(cast(int | float, raw))
-    model_prob_f = float(cast(int | float, model_prob))
-    edge_f = float(cast(int | float, edge))
-    expected_value_f = float(cast(int | float, expected_value))
-    if normalized_f <= 0.0 or normalized_f > 1.0:
+    raw = require_finite_number(
+        row.get("raw_implied_probability"),
+        field="raw_implied_probability",
+    )
+    normalized = require_finite_number(
+        row.get("normalized_implied_probability"),
+        field="normalized_implied_probability",
+    )
+    model_prob = require_probability(row.get("model_probability"), field="model_probability")
+    edge = require_finite_number(row.get("edge"), field="edge")
+    expected_value = require_finite_number(row.get("expected_value"), field="expected_value")
+    if normalized <= 0.0 or normalized > 1.0:
         raise ArtifactError("normalized implied probability must be in (0, 1]")
     expected_raw = 1.0 / odds_f
-    if abs(raw_f - expected_raw) > VALUE_CALCULATION_TOLERANCE:
+    if abs(raw - expected_raw) > VALUE_CALCULATION_TOLERANCE:
         raise ArtifactError("raw implied probability does not match decimal odds")
-    expected_normalized = expected_raw / complete_total_f
-    if abs(normalized_f - expected_normalized) > VALUE_CALCULATION_TOLERANCE:
+    expected_normalized = expected_raw / complete_total
+    if abs(normalized - expected_normalized) > VALUE_CALCULATION_TOLERANCE:
         raise ArtifactError("normalized implied probability is inconsistent")
-    expected_edge = model_prob_f - expected_normalized
-    if abs(edge_f - expected_edge) > VALUE_CALCULATION_TOLERANCE:
+    expected_edge = model_prob - expected_normalized
+    if abs(edge - expected_edge) > VALUE_CALCULATION_TOLERANCE:
         raise ArtifactError("edge is inconsistent")
-    expected_ev = model_prob_f * odds_f - 1.0
-    if abs(expected_value_f - expected_ev) > VALUE_CALCULATION_TOLERANCE:
+    expected_ev = model_prob * odds_f - 1.0
+    if abs(expected_value - expected_ev) > VALUE_CALCULATION_TOLERANCE:
         raise ArtifactError("expected_value is inconsistent")
 
 
 def _validate_opportunity_row(row: dict[str, JsonValue]) -> None:
-    if row.get("identity_version") != OPPORTUNITY_IDENTITY_VERSION:
-        raise ArtifactError("opportunity identity_version is unsupported")
-    non_identity_fields = {
-        "opportunity_id",
-        "schema_version",
-        "model_trained_through_date",
-        "model_calibrated_through_date",
-    }
-    payload = {key: row[key] for key in row if key not in non_identity_fields}
-    expected_id = derive_opportunity_id(payload=payload)
-    if row["opportunity_id"] != expected_id:
-        raise ArtifactError("opportunity_id does not match canonical identity")
-    for field in (
-        "model_artifact_id",
-        "model_checksum_sha256",
-        "model_specification_version",
-        "feature_artifact_id",
-        "feature_manifest_checksum_sha256",
-        "feature_specification_version",
-        "feature_row_id",
-    ):
-        if type(row.get(field)) is not str or not row.get(field):
-            raise ArtifactError(f"opportunity lineage field {field} is incomplete")
-    if row["feature_row_id"] != row["canonical_event_id"]:
-        raise ArtifactError("opportunity feature_row_id must match canonical_event_id")
-    if type(row.get("prediction_quality_passed")) is not bool:
-        raise ArtifactError("prediction_quality_passed must be boolean")
-    overround = row.get("overround")
-    if isinstance(overround, bool) or not isinstance(overround, int | float):
-        raise ArtifactError("overround must be numeric")
-    if float(overround) < 0.0:
-        raise ArtifactError("overround must be non-negative")
-    odds = row.get("decimal_odds")
-    if type(odds) is not str:
-        raise ArtifactError("decimal_odds must be a string")
-    complete_total = 1.0 + float(overround)
-    odds_f = float(odds)
-    raw = float(row["raw_implied_probability"])  # type: ignore[arg-type]
-    normalized = float(row["normalized_implied_probability"])  # type: ignore[arg-type]
-    if normalized <= 0.0:
-        raise ArtifactError("normalized implied probability must be positive")
-    if abs(raw - 1.0 / odds_f) > VALUE_CALCULATION_TOLERANCE:
-        raise ArtifactError("opportunity raw implied probability is inconsistent")
-    if abs(normalized - raw / complete_total) > VALUE_CALCULATION_TOLERANCE:
-        raise ArtifactError("opportunity normalized implied probability is inconsistent")
+    try:
+        if row.get("identity_version") != OPPORTUNITY_IDENTITY_VERSION:
+            raise ArtifactError("opportunity identity_version is unsupported")
+        non_identity_fields = {
+            "opportunity_id",
+            "schema_version",
+            "model_trained_through_date",
+            "model_calibrated_through_date",
+        }
+        payload = {key: row[key] for key in row if key not in non_identity_fields}
+        expected_id = derive_opportunity_id(payload=payload)
+        if row["opportunity_id"] != expected_id:
+            raise ArtifactError("opportunity_id does not match canonical identity")
+        for field in (
+            "model_artifact_id",
+            "model_checksum_sha256",
+            "model_specification_version",
+            "feature_artifact_id",
+            "feature_manifest_checksum_sha256",
+            "feature_specification_version",
+            "feature_row_id",
+        ):
+            require_str(row.get(field), field=field)
+        require_sha256_checksum(row.get("model_checksum_sha256"), field="model_checksum_sha256")
+        require_sha256_checksum(
+            row.get("feature_manifest_checksum_sha256"),
+            field="feature_manifest_checksum_sha256",
+        )
+        if row["feature_row_id"] != row["canonical_event_id"]:
+            raise ArtifactError("opportunity feature_row_id must match canonical_event_id")
+        require_bool(row.get("prediction_quality_passed"), field="prediction_quality_passed")
+        require_bool(
+            row.get("dependency_metadata_complete"),
+            field="dependency_metadata_complete",
+        )
+        provenance = row.get("dependency_metadata_provenance")
+        if provenance not in {None, ""}:
+            require_str(provenance, field="dependency_metadata_provenance")
+            if provenance not in {"synthetic-contract"}:
+                raise ArtifactError("dependency_metadata_provenance is unsupported")
+        if row.get("model_trained_through_date") is not None:
+            require_date_string(
+                row.get("model_trained_through_date"),
+                field="model_trained_through_date",
+            )
+        if row.get("model_calibrated_through_date") is not None:
+            require_date_string(
+                row.get("model_calibrated_through_date"),
+                field="model_calibrated_through_date",
+            )
+        require_canonical_utc_timestamp_string(
+            row.get("event_start_utc"),
+            field="event_start_utc",
+        )
+        require_canonical_utc_timestamp_string(
+            row.get("predicted_at_utc"),
+            field="predicted_at_utc",
+        )
+        require_canonical_utc_timestamp_string(
+            row.get("source_observed_at_utc"),
+            field="source_observed_at_utc",
+        )
+        require_canonical_utc_timestamp_string(
+            row.get("decision_as_of_utc"),
+            field="decision_as_of_utc",
+        )
+        quoted_at = row.get("quoted_at_utc")
+        if quoted_at is not None:
+            require_canonical_utc_timestamp_string(quoted_at, field="quoted_at_utc")
+        require_canonical_selection_identity(row.get("selection"), field="selection")
+        dependency_keys = require_list(row.get("dependency_keys"), field="dependency_keys")
+        participant_ids = require_list(row.get("participant_ids"), field="participant_ids")
+        for index, item in enumerate(dependency_keys):
+            require_str(item, field=f"dependency_keys[{index}]")
+        for index, item in enumerate(participant_ids):
+            require_str(item, field=f"participant_ids[{index}]")
+        overround = require_finite_number(row.get("overround"), field="overround")
+        if overround < 0.0:
+            raise ArtifactError("overround must be non-negative")
+        odds = require_decimal_string(row.get("decimal_odds"), field="decimal_odds")
+        odds_f = float(odds)
+        if not math.isfinite(odds_f) or odds_f <= 1.0:
+            raise ArtifactError("decimal_odds must be finite and >1")
+        complete_total = 1.0 + overround
+        raw = require_finite_number(
+            row.get("raw_implied_probability"),
+            field="raw_implied_probability",
+        )
+        normalized = require_finite_number(
+            row.get("normalized_implied_probability"),
+            field="normalized_implied_probability",
+        )
+        model_probability = require_probability(
+            row.get("model_probability"),
+            field="model_probability",
+        )
+        edge = require_finite_number(row.get("edge"), field="edge")
+        expected_value = require_finite_number(row.get("expected_value"), field="expected_value")
+        if normalized <= 0.0 or normalized > 1.0:
+            raise ArtifactError("normalized implied probability must be in (0, 1]")
+        expected_raw = 1.0 / odds_f
+        if abs(raw - expected_raw) > VALUE_CALCULATION_TOLERANCE:
+            raise ArtifactError("opportunity raw implied probability is inconsistent")
+        if abs(normalized - raw / complete_total) > VALUE_CALCULATION_TOLERANCE:
+            raise ArtifactError("opportunity normalized implied probability is inconsistent")
+        expected_edge = model_probability - normalized
+        if abs(edge - expected_edge) > VALUE_CALCULATION_TOLERANCE:
+            raise ArtifactError("edge is inconsistent")
+        expected_ev = model_probability * odds_f - 1.0
+        if abs(expected_value - expected_ev) > VALUE_CALCULATION_TOLERANCE:
+            raise ArtifactError("expected_value is inconsistent")
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        InvalidOperation,
+        ZeroDivisionError,
+    ) as exc:
+        raise ArtifactError("opportunity row validation failed") from exc
 
 
 def _validate_opportunity_decision_row(row: dict[str, JsonValue]) -> None:
@@ -614,46 +808,82 @@ def _validate_opportunity_decision_row(row: dict[str, JsonValue]) -> None:
 
 
 def _validate_combination_row(row: dict[str, JsonValue]) -> None:
-    _validate_finite(row.get("expected_value"), "expected_value")
-    _validate_finite(row.get("edge", 0.0), "edge") if "edge" in row else None
-    _validate_probability(row.get("joint_probability"), "joint_probability")
-    odds = row.get("total_decimal_odds")
-    if type(odds) is not str or float(odds) <= 1:
-        raise ArtifactError("combination total_decimal_odds must be >1")
-    joint = row["joint_probability"]
-    expected_value = row["expected_value"]
-    if not isinstance(joint, int | float) or not isinstance(expected_value, int | float):
-        raise ArtifactError("combination probability or expected_value is invalid")
-    calculated = float(joint) * float(odds) - 1
-    if abs(calculated - float(expected_value)) > 1e-9:
-        raise ArtifactError("combination expected_value is inconsistent")
-    dependencies = row.get("dependencies")
-    if not isinstance(dependencies, list):
-        raise ArtifactError("combination dependencies must be a list")
-    opportunity_ids = row.get("opportunity_ids", [])
-    if not isinstance(opportunity_ids, list):
-        raise ArtifactError("combination opportunity_ids must be a list")
-    pairs_seen: set[tuple[str, str]] = set()
-    for item in dependencies:
-        if not isinstance(item, dict):
-            raise ArtifactError("combination dependency entry is malformed")
-        left = item.get("left_opportunity_id")
-        right = item.get("right_opportunity_id")
-        if type(left) is not str or type(right) is not str:
-            raise ArtifactError("combination dependency ids are malformed")
-        if item.get("classification") != "structurally_separate":
-            raise ArtifactError(
-                "combination dependency classification must be structurally_separate"
+    try:
+        joint = require_probability(row.get("joint_probability"), field="joint_probability")
+        expected_value = require_finite_number(row.get("expected_value"), field="expected_value")
+        odds = require_decimal_string(row.get("total_decimal_odds"), field="total_decimal_odds")
+        odds_f = float(odds)
+        if not math.isfinite(odds_f) or odds_f <= 1.0:
+            raise ArtifactError("combination total_decimal_odds must be >1")
+        calculated = joint * odds_f - 1.0
+        if abs(calculated - expected_value) > 1e-9:
+            raise ArtifactError("combination expected_value is inconsistent")
+        dependencies = require_list(row.get("dependencies"), field="dependencies")
+        opportunity_ids = require_list(row.get("opportunity_ids"), field="opportunity_ids")
+        ordered_ids = [require_str(item, field="opportunity_id") for item in opportunity_ids]
+        if ordered_ids != sorted(set(ordered_ids)):
+            raise ArtifactError("combination opportunity_ids must be ordered and unique")
+        pairs_seen: set[tuple[str, str]] = set()
+        for index, item in enumerate(dependencies):
+            dependency = require_dict(item, field=f"dependencies[{index}]")
+            left = require_str(
+                dependency.get("left_opportunity_id"),
+                field="left_opportunity_id",
             )
-        pair = cast(tuple[str, str], tuple(sorted((left, right))))
-        if pair in pairs_seen:
-            raise ArtifactError("combination dependency pair is duplicated")
-        if pair[0] not in opportunity_ids or pair[1] not in opportunity_ids:
-            raise ArtifactError("combination dependency pair references undeclared leg")
-        pairs_seen.add(pair)
-    expected_pairs = len(opportunity_ids) * (len(opportunity_ids) - 1) // 2
-    if len(pairs_seen) != expected_pairs:
-        raise ArtifactError("combination must contain every dependency pair exactly once")
+            right = require_str(
+                dependency.get("right_opportunity_id"),
+                field="right_opportunity_id",
+            )
+            if dependency.get("classification") != "structurally_separate":
+                raise ArtifactError(
+                    "combination dependency classification must be structurally_separate"
+                )
+            pair = cast(tuple[str, str], tuple(sorted((left, right))))
+            if pair in pairs_seen:
+                raise ArtifactError("combination dependency pair is duplicated")
+            if pair[0] not in ordered_ids or pair[1] not in ordered_ids:
+                raise ArtifactError("combination dependency pair references undeclared leg")
+            pairs_seen.add(pair)
+        expected_pairs = len(ordered_ids) * (len(ordered_ids) - 1) // 2
+        if len(pairs_seen) != expected_pairs:
+            raise ArtifactError("combination must contain every dependency pair exactly once")
+        common_decision_time = require_canonical_utc_timestamp_string(
+            row.get("common_decision_time_utc"),
+            field="common_decision_time_utc",
+        )
+        earliest_start = require_canonical_utc_timestamp_string(
+            row.get("earliest_event_start_utc"),
+            field="earliest_event_start_utc",
+        )
+        require_canonical_utc_timestamp_string(
+            row.get("latest_event_start_utc"),
+            field="latest_event_start_utc",
+        )
+        if common_decision_time >= earliest_start:
+            raise ArtifactError("common decision time must be strictly before earliest event start")
+        policy_id = require_str(row.get("policy_id"), field="policy_id")
+        expected_id = derive_combination_id(
+            opportunity_ids=ordered_ids,
+            combined_decimal_odds=format(odds, "f"),
+            joint_probability=joint,
+            expected_value=expected_value,
+            common_information_time_utc=require_str(
+                row.get("common_decision_time_utc"),
+                field="common_decision_time_utc",
+            ),
+            policy_id=policy_id,
+        )
+        if row["combination_id"] != expected_id:
+            raise ArtifactError("combination_id does not match canonical identity")
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        InvalidOperation,
+        ZeroDivisionError,
+    ) as exc:
+        raise ArtifactError("combination row validation failed") from exc
 
 
 def _validate_rejection_row(row: dict[str, JsonValue]) -> None:
@@ -759,7 +989,9 @@ def _validate_decision_ranks(rows: tuple[dict[str, JsonValue], ...]) -> None:
             raise ArtifactError("filter_config_id must be a string")
         by_filter.setdefault(filter_id, []).append(row)
     for filter_rows in by_filter.values():
-        opportunity_ids = [str(row["opportunity_id"]) for row in filter_rows]
+        opportunity_ids = [
+            require_str(row.get("opportunity_id"), field="opportunity_id") for row in filter_rows
+        ]
         if len(opportunity_ids) != len(set(opportunity_ids)):
             raise ArtifactError("duplicate opportunity decision under one filter configuration")
         ranks = []
@@ -774,9 +1006,93 @@ def _validate_decision_ranks(rows: tuple[dict[str, JsonValue], ...]) -> None:
             raise ArtifactError("accepted ranks must be unique and contiguous")
 
 
+def _validate_combination_against_opportunities(
+    row: dict[str, JsonValue],
+    *,
+    opportunity_ids: list[str],
+    opportunities_by_id: dict[str, dict[str, JsonValue]],
+) -> None:
+    legs = [opportunities_by_id[opportunity_id] for opportunity_id in opportunity_ids]
+    combined_odds = Decimal("1")
+    joint_probability = 1.0
+    earliest_start = None
+    latest_start = None
+    common_decision_time = None
+    for leg in legs:
+        odds = require_decimal_string(leg.get("decimal_odds"), field="decimal_odds")
+        combined_odds *= odds
+        joint_probability *= require_probability(
+            leg.get("model_probability"),
+            field="model_probability",
+        )
+        event_start = require_canonical_utc_timestamp_string(
+            leg.get("event_start_utc"),
+            field="event_start_utc",
+        )
+        decision_time = require_canonical_utc_timestamp_string(
+            leg.get("decision_as_of_utc"),
+            field="decision_as_of_utc",
+        )
+        earliest_start = event_start if earliest_start is None else min(earliest_start, event_start)
+        latest_start = event_start if latest_start is None else max(latest_start, event_start)
+        common_decision_time = (
+            decision_time
+            if common_decision_time is None
+            else max(common_decision_time, decision_time)
+        )
+    assert earliest_start is not None
+    assert latest_start is not None
+    assert common_decision_time is not None
+    if common_decision_time >= earliest_start:
+        raise ArtifactError("common decision time must be strictly before earliest event start")
+    declared_odds = require_decimal_string(
+        row.get("total_decimal_odds"),
+        field="total_decimal_odds",
+    )
+    if format(declared_odds, "f") != format(combined_odds, "f"):
+        raise ArtifactError("combination total_decimal_odds is inconsistent with leg odds")
+    declared_joint = require_probability(row.get("joint_probability"), field="joint_probability")
+    if abs(declared_joint - joint_probability) > 1e-9:
+        raise ArtifactError("combination joint_probability is inconsistent with leg probabilities")
+    declared_expected_value = require_finite_number(
+        row.get("expected_value"),
+        field="expected_value",
+    )
+    expected_value = joint_probability * float(combined_odds) - 1.0
+    if abs(declared_expected_value - expected_value) > 1e-9:
+        raise ArtifactError("combination expected_value is inconsistent with leg values")
+    from sports_analytics.data.codec import format_utc_timestamp
+
+    if require_str(
+        row.get("earliest_event_start_utc"),
+        field="earliest_event_start_utc",
+    ) != format_utc_timestamp(earliest_start):
+        raise ArtifactError("combination earliest_event_start_utc is inconsistent")
+    if require_str(
+        row.get("latest_event_start_utc"),
+        field="latest_event_start_utc",
+    ) != format_utc_timestamp(latest_start):
+        raise ArtifactError("combination latest_event_start_utc is inconsistent")
+    if require_str(
+        row.get("common_decision_time_utc"),
+        field="common_decision_time_utc",
+    ) != format_utc_timestamp(common_decision_time):
+        raise ArtifactError("combination common_decision_time_utc is inconsistent")
+    expected_id = derive_combination_id(
+        opportunity_ids=opportunity_ids,
+        combined_decimal_odds=format(combined_odds, "f"),
+        joint_probability=joint_probability,
+        expected_value=expected_value,
+        common_information_time_utc=format_utc_timestamp(common_decision_time),
+        policy_id=require_str(row.get("policy_id"), field="policy_id"),
+    )
+    if row["combination_id"] != expected_id:
+        raise ArtifactError("combination_id does not match recomputed leg values")
+
+
 def _recompute_prediction_id(row: dict[str, JsonValue]) -> str:
     from sports_analytics.predictions.contracts import (
-        CanonicalSelectionIdentity,
+        PredictionInputSnapshot,
         PredictionLineage,
         PredictionQualityFlags,
         SelectionProbability,
@@ -784,97 +1100,122 @@ def _recompute_prediction_id(row: dict[str, JsonValue]) -> str:
     )
     from sports_analytics.predictions.provenance import parse_prediction_provenance
 
-    lineage_raw = row["lineage"]
-    if not isinstance(lineage_raw, dict):
-        raise ArtifactError("prediction lineage is malformed")
-    quality_raw = row.get("quality")
-    if not isinstance(quality_raw, dict):
-        raise ArtifactError("prediction quality is malformed")
+    lineage_raw = require_dict(row.get("lineage"), field="lineage")
+    quality_raw = require_dict(row.get("quality"), field="quality")
     probabilities: list[SelectionProbability] = []
-    probabilities_raw = row.get("probabilities")
-    if not isinstance(probabilities_raw, list):
-        raise ArtifactError("prediction probabilities are malformed")
-    for item in probabilities_raw:
-        if not isinstance(item, dict):
-            raise ArtifactError("prediction probability entry is malformed")
-        selection_raw = item.get("selection")
-        if not isinstance(selection_raw, dict):
-            raise ArtifactError("prediction selection is malformed")
-        line_value = selection_raw.get("line_value")
-        participant = selection_raw.get("canonical_participant_id")
-        selection = CanonicalSelectionIdentity(
-            sport_code=str(selection_raw["sport_code"]),
-            market_family=str(selection_raw["market_family"]),
-            market_key=str(selection_raw["market_key"]),
-            market_period=str(selection_raw["market_period"]),
-            participant_scope=str(selection_raw["participant_scope"]),
-            canonical_participant_id=(None if participant is None else str(participant)),
-            line_type=str(selection_raw["line_type"]),
-            line_value=None if line_value is None else Decimal(str(line_value)),
-            outcome_key=str(selection_raw["outcome_key"]),
+    probabilities_raw = require_list(row.get("probabilities"), field="probabilities")
+    for index, item in enumerate(probabilities_raw):
+        probability_item = require_dict(item, field=f"probabilities[{index}]")
+        selection_id = require_str(
+            probability_item.get("selection_id"),
+            field=f"probabilities[{index}].selection_id",
         )
+        selection = require_canonical_selection_identity(
+            probability_item.get("selection"),
+            field=f"probabilities[{index}].selection",
+        )
+        if selection_id != selection.selection_id:
+            raise ArtifactError("prediction selection_id does not match selection payload")
         probabilities.append(
-            SelectionProbability(selection=selection, probability=float(item["probability"]))  # type: ignore[arg-type]
+            SelectionProbability(
+                selection=selection,
+                probability=require_probability(
+                    probability_item.get("probability"),
+                    field=f"probabilities[{index}].probability",
+                ),
+            )
         )
     input_snapshots_raw = lineage_raw.get("input_snapshots", [])
-    if not isinstance(input_snapshots_raw, list):
-        raise ArtifactError("prediction input snapshots are malformed")
-    from sports_analytics.predictions.contracts import PredictionInputSnapshot
-
+    input_snapshots_list = require_list(input_snapshots_raw, field="lineage.input_snapshots")
     input_snapshots = tuple(
         PredictionInputSnapshot(
-            snapshot_id=str(snapshot["snapshot_id"]),
-            manifest_checksum_sha256=str(snapshot["manifest_checksum_sha256"]),
-            schema_version=str(snapshot.get("schema_version", "snapshot-manifest-v1")),
-            source_name=str(snapshot.get("source_name", "unknown-source")),
+            snapshot_id=require_str(
+                require_dict(snapshot, field="input_snapshot").get("snapshot_id"),
+                field="snapshot_id",
+            ),
+            manifest_checksum_sha256=require_sha256_checksum(
+                require_dict(snapshot, field="input_snapshot").get("manifest_checksum_sha256"),
+                field="manifest_checksum_sha256",
+            ),
+            schema_version=require_str(
+                require_dict(snapshot, field="input_snapshot").get("schema_version"),
+                field="schema_version",
+            ),
+            source_name=require_str(
+                require_dict(snapshot, field="input_snapshot").get("source_name"),
+                field="source_name",
+            ),
         )
-        for snapshot in input_snapshots_raw
-        if isinstance(snapshot, dict)
+        for snapshot in input_snapshots_list
     )
     lineage = PredictionLineage(
-        model_artifact_id=str(lineage_raw["model_artifact_id"]),
-        model_checksum_sha256=str(lineage_raw["model_checksum_sha256"]),
-        model_specification_version=str(lineage_raw["model_specification_version"]),
-        feature_artifact_id=str(lineage_raw["feature_artifact_id"]),
-        feature_manifest_checksum_sha256=str(lineage_raw["feature_manifest_checksum_sha256"]),
-        feature_specification_version=str(lineage_raw["feature_specification_version"]),
-        feature_row_id=str(lineage_raw["feature_row_id"]),
-        trained_through_date=date.fromisoformat(str(lineage_raw["trained_through_date"])),
-        calibrated_through_date=date.fromisoformat(str(lineage_raw["calibrated_through_date"])),
+        model_artifact_id=require_str(
+            lineage_raw.get("model_artifact_id"),
+            field="model_artifact_id",
+        ),
+        model_checksum_sha256=require_sha256_checksum(
+            lineage_raw.get("model_checksum_sha256"),
+            field="model_checksum_sha256",
+        ),
+        model_specification_version=require_str(
+            lineage_raw.get("model_specification_version"),
+            field="model_specification_version",
+        ),
+        feature_artifact_id=require_str(
+            lineage_raw.get("feature_artifact_id"),
+            field="feature_artifact_id",
+        ),
+        feature_manifest_checksum_sha256=require_sha256_checksum(
+            lineage_raw.get("feature_manifest_checksum_sha256"),
+            field="feature_manifest_checksum_sha256",
+        ),
+        feature_specification_version=require_str(
+            lineage_raw.get("feature_specification_version"),
+            field="feature_specification_version",
+        ),
+        feature_row_id=require_str(lineage_raw.get("feature_row_id"), field="feature_row_id"),
+        trained_through_date=require_date_string(
+            lineage_raw.get("trained_through_date"),
+            field="trained_through_date",
+        ),
+        calibrated_through_date=require_date_string(
+            lineage_raw.get("calibrated_through_date"),
+            field="calibrated_through_date",
+        ),
         input_snapshots=input_snapshots,
     )
     quality = PredictionQualityFlags(
-        calibrated=require_bool(quality_raw.get("calibrated", False), field="calibrated"),
+        calibrated=require_bool(quality_raw.get("calibrated"), field="quality.calibrated"),
         model_artifact_verified=require_bool(
-            quality_raw.get("model_artifact_verified", False),
-            field="model_artifact_verified",
+            quality_raw.get("model_artifact_verified"),
+            field="quality.model_artifact_verified",
         ),
         feature_artifact_verified=require_bool(
-            quality_raw.get("feature_artifact_verified", False),
-            field="feature_artifact_verified",
+            quality_raw.get("feature_artifact_verified"),
+            field="quality.feature_artifact_verified",
         ),
         sufficient_history=require_bool(
-            quality_raw.get("sufficient_history", False),
-            field="sufficient_history",
+            quality_raw.get("sufficient_history"),
+            field="quality.sufficient_history",
         ),
         data_quality_passed=require_bool(
-            quality_raw.get("data_quality_passed", False),
-            field="data_quality_passed",
+            quality_raw.get("data_quality_passed"),
+            field="quality.data_quality_passed",
         ),
     )
-    ordered = row.get("ordered_selection_ids")
-    ordered_ids = tuple(str(item) for item in ordered) if isinstance(ordered, list) else None
+    ordered = require_list(row.get("ordered_selection_ids"), field="ordered_selection_ids")
+    ordered_ids = tuple(require_str(item, field="ordered_selection_ids[]") for item in ordered)
     return derive_prediction_id(
         canonical_event_id=require_str(row["canonical_event_id"], field="canonical_event_id"),
-        event_start_utc=require_utc_timestamp_string(
+        event_start_utc=require_canonical_utc_timestamp_string(
             row["event_start_utc"],
             field="event_start_utc",
         ),
-        predicted_at_utc=require_utc_timestamp_string(
+        predicted_at_utc=require_canonical_utc_timestamp_string(
             row["predicted_at_utc"],
             field="predicted_at_utc",
         ),
-        feature_available_at_utc=require_utc_timestamp_string(
+        feature_available_at_utc=require_canonical_utc_timestamp_string(
             row["feature_available_at_utc"],
             field="feature_available_at_utc",
         ),

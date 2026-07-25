@@ -283,6 +283,10 @@ def test_typed_artifact_declares_and_verifies_authoritative_datasets(
 def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
     tmp_path: Path,
 ) -> None:
+    from tests.unit.predictions.test_second_correction_regressions import (
+        _prediction_from_opportunity,
+        _quote_from_opportunity,
+    )
     from tests.unit.support.verified_opportunities import build_test_opportunity
 
     from sports_analytics.artifact_serializers import build_backtest_datasets
@@ -298,6 +302,7 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
     )
     from sports_analytics.models.identity import content_addressed_id
     from sports_analytics.opportunities.contracts import OpportunityDecision, OpportunityFilter
+    from sports_analytics.value.contracts import QuoteEvaluationMode, evaluate_complete_market
 
     opportunity = build_test_opportunity(
         "1",
@@ -374,10 +379,16 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
             ),
         ),
     )
+    prediction = _prediction_from_opportunity(opportunity)
+    evaluation = evaluate_complete_market(
+        prediction=prediction,
+        quote=_quote_from_opportunity(opportunity),
+        mode=QuoteEvaluationMode.LIVE_SAFE,
+    )
     datasets = build_backtest_datasets(
         result=result,
-        predictions=(),
-        evaluations=(),
+        predictions=(prediction,),
+        evaluations=(evaluation,),
         feature_artifact_id="feature-1",
         feature_manifest_checksum_sha256="b" * 64,
         input_snapshots=(),
@@ -385,6 +396,7 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
         test_event_count=1,
         complete_quote_event_count=1,
         quote_coverage=1.0,
+        provenance="synthetic-contract",
     )
     artifact = write_typed_analytical_artifact(
         root=tmp_path,

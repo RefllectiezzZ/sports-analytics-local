@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TypeVar
 
 from sports_analytics.core.exceptions import ArtifactError
 from sports_analytics.data.types import JsonValue, validate_sha256_checksum
+from sports_analytics.predictions.contracts import CanonicalSelectionIdentity
 
 T = TypeVar("T")
 
@@ -82,6 +83,57 @@ def require_utc_timestamp_string(value: object, *, field: str) -> datetime:
     if parsed.tzinfo is None:
         raise ArtifactError(f"{field} must include an explicit UTC offset")
     return parsed
+
+
+def require_canonical_utc_timestamp_string(value: object, *, field: str) -> datetime:
+    """Require an explicit canonical UTC timestamp (``Z`` or ``+00:00`` suffix only)."""
+    text = require_str(value, field=field)
+    if not (text.endswith("Z") or text.endswith("+00:00")):
+        raise ArtifactError(f"{field} must use canonical UTC (Z or +00:00)")
+    parsed = require_utc_timestamp_string(value, field=field)
+    if parsed.utcoffset() != timedelta(0):
+        raise ArtifactError(f"{field} must be UTC")
+    return parsed
+
+
+def require_canonical_selection_identity(
+    value: object,
+    *,
+    field: str,
+) -> CanonicalSelectionIdentity:
+    """Parse one canonical selection identity without coercing malformed JSON types."""
+    selection_raw = require_dict(value, field=field)
+    participant = selection_raw.get("canonical_participant_id")
+    canonical_participant_id = None
+    if participant is not None:
+        canonical_participant_id = require_str(
+            participant,
+            field=f"{field}.canonical_participant_id",
+        )
+    line_value_raw = selection_raw.get("line_value")
+    line_value = None
+    if line_value_raw is not None:
+        line_value = require_decimal_string(line_value_raw, field=f"{field}.line_value")
+    return CanonicalSelectionIdentity(
+        sport_code=require_str(selection_raw.get("sport_code"), field=f"{field}.sport_code"),
+        market_family=require_str(
+            selection_raw.get("market_family"),
+            field=f"{field}.market_family",
+        ),
+        market_key=require_str(selection_raw.get("market_key"), field=f"{field}.market_key"),
+        market_period=require_str(
+            selection_raw.get("market_period"),
+            field=f"{field}.market_period",
+        ),
+        participant_scope=require_str(
+            selection_raw.get("participant_scope"),
+            field=f"{field}.participant_scope",
+        ),
+        canonical_participant_id=canonical_participant_id,
+        line_type=require_str(selection_raw.get("line_type"), field=f"{field}.line_type"),
+        line_value=line_value,
+        outcome_key=require_str(selection_raw.get("outcome_key"), field=f"{field}.outcome_key"),
+    )
 
 
 def require_sha256_checksum(value: object, *, field: str) -> str:

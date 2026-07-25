@@ -180,39 +180,12 @@ def test_changing_settlement_changes_backtest_result_id() -> None:
 
 
 def test_prediction_probability_outside_unit_interval_rejected() -> None:
-    row = {
-        "prediction_id": "prediction-1",
-        "schema_version": "predictions-v2",
-        "canonical_event_id": "event-1",
-        "event_start_utc": "2024-02-10T15:00:00Z",
-        "predicted_at_utc": "2024-02-10T12:00:00Z",
-        "feature_available_at_utc": "2024-02-10T11:00:00Z",
-        "provenance": "synthetic-contract",
-        "ordered_selection_ids": ["a", "b"],
-        "probabilities": [
-            {"selection_id": "a", "probability": 1.2},
-            {"selection_id": "b", "probability": -0.2},
-        ],
-        "quality": {
-            "calibrated": False,
-            "model_artifact_verified": False,
-            "feature_artifact_verified": False,
-            "sufficient_history": False,
-            "data_quality_passed": False,
-        },
-        "lineage": {
-            "model_artifact_id": "model-1",
-            "model_checksum_sha256": "a" * 64,
-            "model_specification_version": "model-v1",
-            "feature_artifact_id": "feature-1",
-            "feature_manifest_checksum_sha256": "b" * 64,
-            "feature_specification_version": "feature-v1",
-            "feature_row_id": "event-1",
-            "trained_through_date": "2024-02-01",
-            "calibrated_through_date": "2024-02-02",
-            "input_snapshots": [],
-        },
-    }
+    from tests.unit.artifacts.test_analytical_artifacts import _typed_datasets
+
+    row = dict(_typed_datasets()["predictions"][0])
+    probabilities = [dict(item) for item in row["probabilities"]]
+    probabilities[0]["probability"] = 1.2
+    row["probabilities"] = probabilities
     with pytest.raises(ArtifactError, match="\\[0, 1\\]"):
         validate_dataset_row_schema("predictions", row, version="predictions-v2")
 

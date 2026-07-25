@@ -25,6 +25,7 @@ from sports_analytics.combinations.builder import (
     CombinationRejection,
     build_combinations,
 )
+from sports_analytics.combinations.contracts import Combination
 from sports_analytics.combinations.evidence import CombinationEvidenceMode
 from sports_analytics.core.exceptions import BacktestError
 from sports_analytics.data.types import JsonValue
@@ -114,6 +115,7 @@ def run_backtest(
     opportunity_decisions: list[OpportunityDecision] = []
     opportunity_rejections: list[OpportunityRejection] = []
     combination_rejections: list[CombinationRejection] = []
+    combinations: list[Combination] = []
     for fold_input in ordered_inputs:
         fold = fold_input.fold
         settlements: dict[str, SettlementResult] = {}
@@ -193,6 +195,7 @@ def run_backtest(
                 evidence_mode=CombinationEvidenceMode.SYNTHETIC_CONTRACT,
             )
             combination_rejections.extend(build.rejections)
+            combinations.extend(build.combinations)
             for combination in build.combinations:
                 result, effective_odds, _returned, profit = settle_combination_flat_unit(
                     legs=tuple(
@@ -287,6 +290,7 @@ def run_backtest(
         opportunity_decisions=tuple(opportunity_decisions),
         opportunity_rejections=tuple(opportunity_rejections),
         combination_rejections=tuple(combination_rejections),
+        combinations=tuple(combinations),
     )
 
 

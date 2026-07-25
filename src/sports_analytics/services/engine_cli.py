@@ -62,6 +62,7 @@ from sports_analytics.services.backtesting import (
 from sports_analytics.services.combinations_trusted import (
     build_combinations_from_analysis_artifact,
 )
+from sports_analytics.services.historical_analysis import publish_historical_analysis_with_paths
 from sports_analytics.services.training import (
     FeatureBuildRequest,
     TrainRequest,
@@ -175,7 +176,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--publish-analysis",
         metavar="JSON_PATH",
         default=None,
-        help="Publish a verified analysis artifact from explicit JSON inputs.",
+        help="Publish a synthetic-contract analysis artifact from explicit JSON inputs.",
+    )
+    mode.add_argument(
+        "--publish-historical-analysis",
+        metavar="JSON_PATH",
+        default=None,
+        help=(
+            "Publish a historical-replay analysis artifact from verified model and "
+            "feature artifacts plus quote inputs."
+        ),
     )
     parser.add_argument(
         "--snapshot",
@@ -349,6 +359,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_json_mode(args.run_backtest, run_backtest_from_json)
         if args.publish_analysis is not None:
             return _publish_analysis(args)
+        if args.publish_historical_analysis is not None:
+            return _publish_historical_analysis(args)
 
         parser.error(
             "select an engine mode such as --build-football-1x2-features or --train-football-1x2"
@@ -390,6 +402,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.validate_combination is not None,
         args.run_backtest is not None,
         args.publish_analysis is not None,
+        args.publish_historical_analysis is not None,
     ]
     if sum(1 for enabled in engine_modes if enabled) > 1:
         parser.error("engine modes are mutually exclusive")
@@ -780,6 +793,44 @@ def _publish_analysis(args: argparse.Namespace) -> int:
             f"JSON input is malformed at line {exc.lineno}, column {exc.colno}"
         ) from exc
     result = publish_analysis_with_paths(payload, paths=runtime.paths)
+    print(dumps_canonical_json(ensure_json_value(result)))
+    return SUCCESS_EXIT
+
+
+def _publish_historical_analysis(args: argparse.Namespace) -> int:
+    runtime = bootstrap_runtime(
+        "engine",
+        config_path=args.config,
+        env_file=args.env_file,
+    )
+    if type(args.model) is not str or not args.model:
+        raise ConfigurationError("--model is required for historical analysis publication")
+    if type(args.features) is not str or not args.features:
+        raise ConfigurationError("--features is required for historical analysis publication")
+    if type(args.model_checksum) is not str or not args.model_checksum:
+        raise ConfigurationError("--model-checksum is required for historical analysis publication")
+    if type(args.feature_checksum) is not str or not args.feature_checksum:
+        raise ConfigurationError(
+            "--feature-checksum is required for historical analysis publication"
+        )
+    normalized = args.publish_historical_analysis.replace("\\", "/")
+    path = Path(normalized)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigurationError(f"cannot read JSON input: {normalized}") from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            f"JSON input is malformed at line {exc.lineno}, column {exc.colno}"
+        ) from exc
+    result = publish_historical_analysis_with_paths(
+        payload,
+        paths=runtime.paths,
+        model_relative_path=args.model,
+        model_checksum_sha256=args.model_checksum,
+        feature_relative_directory=args.features,
+        feature_manifest_checksum_sha256=args.feature_checksum,
+    )
     print(dumps_canonical_json(ensure_json_value(result)))
     return SUCCESS_EXIT
 

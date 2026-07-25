@@ -570,7 +570,7 @@ def build_backtest_datasets(
         "opportunity_decisions": tuple(
             serialize_opportunity_decision_row(item) for item in result.opportunity_decisions
         ),
-        "combinations": (),
+        "combinations": tuple(serialize_combination_row(item) for item in result.combinations),
         "rejections": tuple(
             serialize_opportunity_filter_rejection_row(
                 item,

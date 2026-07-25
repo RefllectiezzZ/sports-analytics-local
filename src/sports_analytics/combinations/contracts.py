@@ -179,6 +179,29 @@ class Combination:
     structural_independence_warning: str
 
 
+def derive_combination_id(
+    *,
+    opportunity_ids: list[str],
+    combined_decimal_odds: str,
+    joint_probability: float,
+    expected_value: float,
+    common_information_time_utc: str,
+    policy_id: str,
+) -> str:
+    """Derive one canonical combination identity from material leg and policy content."""
+    return content_addressed_id(
+        identity_type="combination-v1",
+        payload={
+            "opportunity_ids": cast(list[JsonValue], opportunity_ids),
+            "combined_decimal_odds": combined_decimal_odds,
+            "joint_probability": joint_probability,
+            "expected_value": expected_value,
+            "common_information_time_utc": common_information_time_utc,
+            "policy_id": policy_id,
+        },
+    )
+
+
 def classify_dependency(left: Opportunity, right: Opportunity) -> LegDependency:
     """Classify a pair conservatively without estimating correlation."""
     ordered = sorted((left.opportunity_id, right.opportunity_id))
@@ -321,16 +344,13 @@ def validate_combination(
         raise CombinationError("combination is below minimum_joint_probability")
     if expected_value < rules.minimum_expected_value:
         raise CombinationError("combination is below minimum_expected_value")
-    identity = content_addressed_id(
-        identity_type="combination-v1",
-        payload={
-            "opportunity_ids": [item.opportunity_id for item in ordered],
-            "combined_decimal_odds": format(combined_odds, "f"),
-            "joint_probability": joint_probability,
-            "expected_value": expected_value,
-            "common_information_time_utc": format_utc_timestamp(information_time),
-            "policy_id": rules.policy_id,
-        },
+    identity = derive_combination_id(
+        opportunity_ids=[item.opportunity_id for item in ordered],
+        combined_decimal_odds=format(combined_odds, "f"),
+        joint_probability=joint_probability,
+        expected_value=expected_value,
+        common_information_time_utc=format_utc_timestamp(information_time),
+        policy_id=rules.policy_id,
     )
     return Combination(
         combination_id=identity,
