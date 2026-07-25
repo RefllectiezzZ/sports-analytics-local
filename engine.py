@@ -1,17 +1,13 @@
-"""Analytics engine entry point (placeholder)."""
+"""Analytics engine entry point."""
 
 from collections.abc import Sequence
 
-from sports_analytics.core.cli import run_component
+from sports_analytics.services.engine_cli import main as engine_main
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Bootstrap the engine component and report that analytics is not implemented."""
-    return run_component(
-        "engine",
-        "Analytics engine entry point (placeholder).",
-        argv=argv,
-    )
+    """Bootstrap the analytics engine CLI."""
+    return engine_main(argv)
 
 
 if __name__ == "__main__":

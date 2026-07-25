@@ -103,3 +103,19 @@ class SnapshotIntegrityError(SnapshotError):
 
 class SnapshotVerificationError(SnapshotError):
     """Raised when a READY snapshot fails read-only integrity verification."""
+
+
+class FeatureError(SportsAnalyticsError):
+    """Raised when feature engineering or feature-artifact handling fails."""
+
+
+class ModelError(SportsAnalyticsError):
+    """Raised when model training, calibration, or artifact handling fails."""
+
+
+class EvaluationError(SportsAnalyticsError):
+    """Raised when temporal validation or metric computation fails."""
+
+
+class TrainingError(SportsAnalyticsError):
+    """Raised when the training service rejects inputs or cannot produce artifacts."""

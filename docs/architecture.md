@@ -6,8 +6,10 @@ The repository currently provides packaging, typed configuration, local runtime
 bootstrap, SQLite operational persistence, migrations, durable local job worker
 infrastructure, a worker-only local supervisor, one Football-Data.co.uk ingestion
 adapter that publishes immutable Parquet snapshots, sport-agnostic canonical data
-contracts, documentation, and quality tooling. Modelling, predictions,
-recommendations, combinations, and Streamlit pages are **not** implemented yet.
+contracts, a leakage-safe football full-match 1X2 modelling pipeline (features,
+rolling-origin validation, temperature calibration, and pickle-free artifacts),
+documentation, and quality tooling. Predictions for live betting, recommendations,
+combinations, and Streamlit pages are **not** implemented yet.
 
 ## Entry points
 
@@ -27,9 +29,10 @@ modes.
 `scraper.py` is implemented: it lists source descriptors (`--list-sources`) and
 competitions (`--list-competitions`), enqueues football ingestion jobs
 (`--enqueue-football-data`), lists snapshot metadata (`--list-snapshots`), and
-verifies READY snapshots read-only (`--verify-snapshot`). `app.py` and `engine.py`
-remain business-function placeholders and still report that their functionality is
-not implemented.
+verifies READY snapshots read-only (`--verify-snapshot`). `engine.py` builds
+football 1X2 feature artifacts, trains/calibrates/evaluates the logistic baseline,
+verifies model artifacts, and runs explicit-parameter inference. `app.py` remains
+a business-function placeholder.
 
 ## Domain boundaries
 
@@ -283,11 +286,11 @@ Application code lives under `src/sports_analytics/` with focused subpackages:
   verification
 - `ingestion` — ingestion service, job handler, snapshot specs, scraper CLI
 - `scrapers` — reserved for future browser-free scraping helpers (empty)
-- `features` — feature engineering (empty)
-- `models` — local statistical / ML components (empty)
+- `features` — football pre-match feature contracts and leakage-safe builders
+- `models` — logistic baseline, temperature calibration, pickle-free artifacts
 - `combinations` — combination generation helpers (empty)
-- `services` — workflow orchestration (empty)
-- `evaluation` — evaluation utilities (empty)
+- `services` — training orchestration and engine CLI
+- `evaluation` — temporal folds and probability metrics
 
 ## Current implementation status
 
@@ -304,6 +307,9 @@ Implemented:
 - database status / migrate CLI modes;
 - durable worker claiming, lease heartbeats, recovery, and static handler
   registry;
+- football ingestion adapter and snapshot publication;
+- football 1X2 feature artifacts, rolling-origin training, calibration, and
+  explicit model artifacts via `engine.py`;
 - worker-only `run_local.py` supervisor;
 - one Football-Data.co.uk ingestion adapter with allowlisted HTTPS retrieval,
   content-addressed raw storage, and strict CSV parsing;
