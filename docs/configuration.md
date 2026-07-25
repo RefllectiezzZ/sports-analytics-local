@@ -266,6 +266,21 @@ generator during normal bootstrap only.
 - Do not use pickle for configuration.
 - Do not follow network URLs during configuration loading.
 
+## Scraping settings
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `enabled` | `false` | Must be true to enqueue football-data ingestion |
+| `request_timeout_seconds` | `30` | Positive, at most 5 minutes |
+| `maximum_retries` | `3` | Integer 0..10 |
+| `browser_headless` | `true` | Retained for compatibility; unused by this adapter |
+| `retry_backoff_base_seconds` | `2` | Deterministic exponential backoff base |
+| `retry_backoff_max_seconds` | `30` | Must be >= base; at most 5 minutes |
+| `minimum_request_interval_seconds` | `2` | Non-negative pacing between requests |
+| `maximum_download_bytes` | `26214400` | Strict positive integer, at most 100 MiB |
+
+This source requires no API key. Do not place credentials in configuration examples.
+
 ## Representative example
 
 ```toml
@@ -283,6 +298,16 @@ retry_backoff_max_seconds = 300
 shutdown_grace_seconds = 30
 recovery_batch_size = 100
 
+[scraping]
+enabled = false
+request_timeout_seconds = 30
+maximum_retries = 3
+browser_headless = true
+retry_backoff_base_seconds = 2
+retry_backoff_max_seconds = 30
+minimum_request_interval_seconds = 2
+maximum_download_bytes = 26214400
+
 [logging]
 level = "INFO"
 file_enabled = true
@@ -294,4 +319,6 @@ SPORTS_ANALYTICS_APPLICATION__ENVIRONMENT=production
 SPORTS_ANALYTICS_LOGGING__LEVEL=WARNING
 SPORTS_ANALYTICS_WORKER__HEARTBEAT_INTERVAL_SECONDS=10
 SPORTS_ANALYTICS_WORKER__STALE_JOB_TIMEOUT_SECONDS=120
+SPORTS_ANALYTICS_SCRAPING__ENABLED=false
+SPORTS_ANALYTICS_SCRAPING__MAXIMUM_DOWNLOAD_BYTES=26214400
 ```
