@@ -27,6 +27,7 @@ from sports_analytics.features.football.specification import (
 from sports_analytics.models.artifacts import (
     FeatureArtifactLineage,
     build_model_document,
+    derive_model_artifact_id,
     infer_calibrated_probabilities,
     load_model_artifact,
     write_model_artifact,
@@ -300,8 +301,19 @@ def test_windows_safe_relative_model_paths(tmp_path: Path) -> None:
         configuration=config,
     )
     specification = football_1x2_logistic_specification(FOOTBALL_1X2_PREMATCH_FEATURES_V1)
+    evaluation_summary: dict = {}
+    artifact_id = derive_model_artifact_id(
+        specification=specification,
+        parameters=parameters,
+        temperature=1.0,
+        trained_through_date=train[-1].metadata.event_date,
+        calibrated_through_date=train[-1].metadata.event_date,
+        feature_lineage=_lineage(),
+        evaluation_summary=evaluation_summary,
+        random_seed=1,
+    )
     document = build_model_document(
-        artifact_id="artifact-1",
+        artifact_id=artifact_id,
         specification=specification,
         parameters=parameters,
         temperature=1.0,
@@ -311,12 +323,12 @@ def test_windows_safe_relative_model_paths(tmp_path: Path) -> None:
         feature_lineage=_lineage(),
         configuration={},
         validation_metrics={},
-        evaluation_summary={},
+        evaluation_summary=evaluation_summary,
         random_seed=1,
     )
     models_root = tmp_path / "models"
     models_root.mkdir()
-    relative = "football/football-1x2-logistic-v1/eng-premier-league/artifact-1"
+    relative = f"football/football-1x2-logistic-v1/eng-premier-league/{artifact_id}"
     path, checksum = write_model_artifact(
         models_root=models_root,
         relative_directory=relative,
@@ -392,3 +404,26 @@ def test_most_recent_folds_retained_with_long_history() -> None:
     assert len(retained) == 3
     assert retained[-1].test.end_date == all_folds[-1].test.end_date
     assert retained[-1].test.end_date > all_folds[0].test.end_date
+    latest_event_date = max(item.metadata.event_date for item in vectors)
+    assert retained[-1].test.end_date == latest_event_date
+
+
+def test_final_fold_reaches_latest_date_when_trailing_rows_below_step() -> None:
+    vectors = generate_prematch_features(
+        synthetic_finished_events(
+            matches_per_season=80,
+            season_ids=("eng-premier-league:2023-2024",),
+        )
+    )
+    folds = build_rolling_origin_folds(
+        vectors,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        config=TemporalSplitConfig(
+            min_train_rows=20,
+            min_calibration_rows=8,
+            min_test_rows=8,
+            step_rows=25,
+            maximum_folds=4,
+        ),
+    )
+    assert folds[-1].test.end_date == max(item.event_date for item in vectors)

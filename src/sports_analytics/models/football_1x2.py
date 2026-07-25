@@ -28,13 +28,14 @@ from sports_analytics.models.artifacts import (
     FeatureArtifactLineage,
     ModelArtifact,
     build_model_document,
+    derive_model_artifact_id,
     infer_calibrated_probabilities,
     load_model_artifact,
     write_model_artifact,
 )
 from sports_analytics.models.calibration import fit_temperature, softmax
 from sports_analytics.models.contracts import ModelSpecification
-from sports_analytics.models.identity import content_addressed_id, validate_artifact_id_override
+from sports_analytics.models.identity import validate_artifact_id_override
 from sports_analytics.models.logistic import (
     LogisticConfiguration,
     fit_multinomial_logistic,
@@ -62,6 +63,7 @@ def football_1x2_logistic_specification(
         algorithm="multinomial-logistic-regression",
         outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
         feature_specification_version=feature_specification_version,
+        ordered_feature_names=FOOTBALL_1X2_FEATURE_NAMES_V1,
         description="Team-level multinomial logistic baseline for football full-match 1X2.",
     )
 
@@ -293,37 +295,6 @@ def train_final_artifact(
         raise TrainingError(msg)
 
     specification = football_1x2_logistic_specification(FOOTBALL_1X2_PREMATCH_FEATURES_V1)
-    identity_payload: dict[str, JsonValue] = {
-        "feature_artifact_id": feature_lineage.feature_artifact_id,
-        "feature_manifest_checksum_sha256": feature_lineage.feature_manifest_checksum_sha256,
-        "folds_file_checksum_sha256": feature_lineage.folds_file_checksum_sha256,
-        "model_specification_version": specification.model_specification_version,
-        "feature_specification_version": specification.feature_specification_version,
-        "fold_configuration": feature_lineage.fold_configuration,
-        "random_seed": random_seed,
-        "logistic_configuration": {
-            "configuration_version": config.configuration_version,
-            "solver": config.solver,
-            "penalty": config.penalty,
-            "regularization_strength": config.regularization_strength,
-            "tolerance": config.tolerance,
-            "maximum_iterations": config.maximum_iterations,
-            "fit_intercept": config.fit_intercept,
-            "feature_scaler_policy": config.feature_scaler_policy,
-        },
-    }
-    derived_id = content_addressed_id(
-        identity_type="football-1x2-model-artifact",
-        payload=identity_payload,
-    )
-    resolved_id = validate_artifact_id_override(
-        override=artifact_id,
-        derived=derived_id,
-        artifact_kind="model",
-    )
-    relative_directory = (
-        f"football/{specification.model_specification_version}/{competition_id}/{resolved_id}"
-    )
     validation_metrics: dict[str, JsonValue] = {
         "folds": [_fold_evaluation_json(item) for item in fold_evaluations],
     }
@@ -343,6 +314,24 @@ def train_final_artifact(
         ),
     }
     trained_through_date = max(item.metadata.event_date for item in history)
+    derived_id = derive_model_artifact_id(
+        specification=specification,
+        parameters=parameters,
+        temperature=temperature_result.temperature,
+        trained_through_date=trained_through_date,
+        calibrated_through_date=calibrated_through,
+        feature_lineage=feature_lineage,
+        evaluation_summary=evaluation_summary,
+        random_seed=random_seed,
+    )
+    resolved_id = validate_artifact_id_override(
+        override=artifact_id,
+        derived=derived_id,
+        artifact_kind="model",
+    )
+    relative_directory = (
+        f"football/{specification.model_specification_version}/{competition_id}/{resolved_id}"
+    )
     document = build_model_document(
         artifact_id=resolved_id,
         specification=specification,

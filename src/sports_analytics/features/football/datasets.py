@@ -32,6 +32,7 @@ from sports_analytics.features.contracts import (
     FEATURE_CHECKSUM_SIDECAR,
     FEATURE_MANIFEST_VERSION,
     FeatureRowMetadata,
+    OutcomeSpace,
     SnapshotIdentity,
 )
 from sports_analytics.features.football.prematch import (
@@ -495,9 +496,15 @@ def load_feature_artifact(
 
     features_rows = features_table.to_pylist()
     targets_rows = targets_table.to_pylist()
-    targets_by_id = {
-        str(row["canonical_event_id"]): str(row["result_code"]) for row in targets_rows
-    }
+    allowed_labels = set(FOOTBALL_1X2_OUTCOME_SPACE.ordered_labels)
+    targets_by_id: dict[str, str] = {}
+    for row in targets_rows:
+        event_id = str(row["canonical_event_id"])
+        result_code = str(row["result_code"])
+        if result_code not in allowed_labels:
+            msg = f"invalid target label: {result_code}"
+            raise FeatureError(msg)
+        targets_by_id[event_id] = result_code
     feature_ids = [str(row["canonical_event_id"]) for row in features_rows]
     target_ids = [str(row["canonical_event_id"]) for row in targets_rows]
     if len(feature_ids) != len(set(feature_ids)):
@@ -541,7 +548,32 @@ def load_feature_artifact(
             ),
         )
     )
-    folds = _folds_from_table(folds_table, known_event_ids=set(feature_ids))
+    event_date_by_id = {
+        item.metadata.canonical_event_id: item.metadata.event_date for item in vectors_sorted
+    }
+    try:
+        fold_config_payload = manifest["fold_configuration"]
+        if not isinstance(fold_config_payload, dict):
+            raise TypeError
+        split_config = TemporalSplitConfig(
+            min_train_rows=int(fold_config_payload["min_train_rows"]),
+            min_calibration_rows=int(fold_config_payload["min_calibration_rows"]),
+            min_test_rows=int(fold_config_payload["min_test_rows"]),
+            step_rows=int(fold_config_payload["step_rows"]),
+            maximum_folds=int(fold_config_payload["maximum_folds"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        msg = "feature artifact fold_configuration is malformed"
+        raise FeatureError(msg) from exc
+    folds = reconstruct_folds_from_table(
+        folds_table,
+        event_date_by_id=event_date_by_id,
+        target_label_by_id=targets_by_id,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        split_config=split_config,
+        declared_summaries=manifest.get("fold_summaries"),
+        latest_feature_date=max(event_date_by_id.values()),
+    )
     quotes = tuple(
         ClosingMarketQuoteTriple(
             canonical_event_id=str(item["canonical_event_id"]),
@@ -639,35 +671,61 @@ def _verify_feature_directory(
         raise FeatureError(msg)
 
 
-def _folds_from_table(
+def reconstruct_folds_from_table(
     folds_table: pa.Table,
     *,
-    known_event_ids: set[str],
+    event_date_by_id: dict[str, date],
+    target_label_by_id: dict[str, str],
+    outcome_space: OutcomeSpace,
+    split_config: TemporalSplitConfig,
+    declared_summaries: object,
+    latest_feature_date: date,
 ) -> tuple[TemporalFold, ...]:
-    rows = folds_table.to_pylist()
+    """Reconstruct and validate temporal folds from persisted fold rows."""
+    from sports_analytics.evaluation.temporal import FoldRegion, TemporalFold, fold_summaries
+
+    ordered_labels = outcome_space.ordered_labels
+    try:
+        rows = folds_table.to_pylist()
+    except Exception as exc:  # noqa: BLE001
+        msg = "failed to read folds parquet rows"
+        raise FeatureError(msg) from exc
+
     grouped: dict[str, dict[str, list[dict[str, object]]]] = {}
     for row in rows:
-        fold_id = str(row["fold_id"])
-        region = str(row["region"])
-        event_id = str(row["canonical_event_id"])
+        try:
+            fold_id = str(row["fold_id"])
+            region = str(row["region"])
+            event_id = str(row["canonical_event_id"])
+            row_date = _as_date(row["event_date"])
+        except (KeyError, TypeError, ValueError) as exc:
+            msg = "fold row is malformed"
+            raise FeatureError(msg) from exc
         if region not in VALID_FOLD_REGIONS:
             msg = f"invalid fold region: {region}"
             raise FeatureError(msg)
-        if event_id not in known_event_ids:
+        if event_id not in event_date_by_id:
             msg = f"fold references unknown event id: {event_id}"
             raise FeatureError(msg)
+        if event_id not in target_label_by_id:
+            msg = f"fold references event without target label: {event_id}"
+            raise FeatureError(msg)
+        if row_date != event_date_by_id[event_id]:
+            msg = f"fold event date does not match feature event date for {event_id}"
+            raise FeatureError(msg)
+        label = target_label_by_id[event_id]
+        if label not in ordered_labels:
+            msg = f"invalid target label in fold reconstruction: {label}"
+            raise FeatureError(msg)
         grouped.setdefault(fold_id, {}).setdefault(region, []).append(row)
+
     folds: list[TemporalFold] = []
     for fold_id in sorted(grouped):
         regions = grouped[fold_id]
         if set(regions) != VALID_FOLD_REGIONS:
             msg = f"fold {fold_id} is missing one or more required regions"
             raise FeatureError(msg)
-        from sports_analytics.evaluation.temporal import FoldRegion, TemporalFold
-
-        train_region: FoldRegion | None = None
-        calibration_region: FoldRegion | None = None
-        test_region: FoldRegion | None = None
+        built: dict[str, FoldRegion] = {}
         for region_name in ("train", "calibration", "test"):
             region_rows = sorted(
                 regions[region_name],
@@ -676,33 +734,62 @@ def _folds_from_table(
                     str(row["canonical_event_id"]),
                 ),
             )
-            dates = [_as_date(row["event_date"]) for row in region_rows]
+            event_ids = tuple(str(row["canonical_event_id"]) for row in region_rows)
+            if len(event_ids) != len(set(event_ids)):
+                msg = f"fold {fold_id} region {region_name} contains duplicate events"
+                raise FeatureError(msg)
+            dates = [event_date_by_id[event_id] for event_id in event_ids]
             if dates != sorted(dates):
                 msg = f"fold {fold_id} region {region_name} is not chronological"
                 raise FeatureError(msg)
-            event_ids = tuple(str(row["canonical_event_id"]) for row in region_rows)
-            class_counts = {label: 0 for label in FOOTBALL_1X2_OUTCOME_SPACE.ordered_labels}
-            fold_region = FoldRegion(
+            class_counts = {label: 0 for label in ordered_labels}
+            for event_id in event_ids:
+                class_counts[target_label_by_id[event_id]] += 1
+            built[region_name] = FoldRegion(
                 name=region_name,
                 start_date=dates[0],
                 end_date=dates[-1],
                 event_ids=event_ids,
                 class_counts=class_counts,
             )
-            if region_name == "train":
-                train_region = fold_region
-            elif region_name == "calibration":
-                calibration_region = fold_region
-            else:
-                test_region = fold_region
-        if train_region is None or calibration_region is None or test_region is None:
-            msg = f"fold {fold_id} is missing one or more required regions"
+        train_region = built["train"]
+        calibration_region = built["calibration"]
+        test_region = built["test"]
+        train_set = set(train_region.event_ids)
+        calibration_set = set(calibration_region.event_ids)
+        test_set = set(test_region.event_ids)
+        if train_set & calibration_set or train_set & test_set or calibration_set & test_set:
+            msg = f"fold {fold_id} assigns an event to multiple regions"
+            raise FeatureError(msg)
+        date_sets = (
+            {event_date_by_id[event_id] for event_id in train_region.event_ids},
+            {event_date_by_id[event_id] for event_id in calibration_region.event_ids},
+            {event_date_by_id[event_id] for event_id in test_region.event_ids},
+        )
+        if (
+            date_sets[0] & date_sets[1]
+            or date_sets[0] & date_sets[2]
+            or date_sets[1] & date_sets[2]
+        ):
+            msg = f"fold {fold_id} regions share calendar dates"
             raise FeatureError(msg)
         if not (
             train_region.end_date < calibration_region.start_date
             and calibration_region.end_date < test_region.start_date
         ):
             msg = f"fold {fold_id} regions overlap or violate chronological ordering"
+            raise FeatureError(msg)
+        if len(train_region.event_ids) < split_config.min_train_rows:
+            msg = f"fold {fold_id} train region below minimum row count"
+            raise FeatureError(msg)
+        if len(calibration_region.event_ids) < split_config.min_calibration_rows:
+            msg = f"fold {fold_id} calibration region below minimum row count"
+            raise FeatureError(msg)
+        if len(test_region.event_ids) < split_config.min_test_rows:
+            msg = f"fold {fold_id} test region below minimum row count"
+            raise FeatureError(msg)
+        if any(train_region.class_counts[label] < 1 for label in ordered_labels):
+            msg = f"fold {fold_id} training region is missing required outcomes"
             raise FeatureError(msg)
         folds.append(
             TemporalFold(
@@ -712,6 +799,26 @@ def _folds_from_table(
                 test=test_region,
             )
         )
+
+    if not folds:
+        msg = "feature artifact contains no folds"
+        raise FeatureError(msg)
+    for index in range(1, len(folds)):
+        if folds[index - 1].test.end_date > folds[index].test.end_date:
+            msg = "persisted folds are not chronologically ordered"
+            raise FeatureError(msg)
+    if folds[-1].test.end_date != latest_feature_date:
+        msg = "final persisted fold does not end on the latest feature date"
+        raise FeatureError(msg)
+
+    reconstructed_summaries = fold_summaries(tuple(folds))
+    if declared_summaries is not None:
+        if not isinstance(declared_summaries, list):
+            msg = "feature artifact fold_summaries are malformed"
+            raise FeatureError(msg)
+        if ensure_json_value(declared_summaries) != ensure_json_value(reconstructed_summaries):
+            msg = "persisted fold summaries do not match reconstructed folds"
+            raise FeatureError(msg)
     return tuple(folds)
 
 

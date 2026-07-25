@@ -22,11 +22,18 @@ class ModelSpecification:
     algorithm: str
     outcome_space: OutcomeSpace
     feature_specification_version: str
+    ordered_feature_names: tuple[str, ...]
     description: str
 
     def __post_init__(self) -> None:
         if not self.outcome_space.ordered_labels:
             msg = "model specification requires a non-empty outcome space"
+            raise ModelError(msg)
+        if not self.ordered_feature_names:
+            msg = "model specification requires ordered feature names"
+            raise ModelError(msg)
+        if len(set(self.ordered_feature_names)) != len(self.ordered_feature_names):
+            msg = "model specification feature names must be unique and ordered"
             raise ModelError(msg)
 
 

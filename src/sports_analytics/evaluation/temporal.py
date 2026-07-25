@@ -86,6 +86,7 @@ def build_rolling_origin_folds(
 ) -> tuple[TemporalFold, ...]:
     """Build date-aligned rolling-origin folds.
 
+    Always attempts a final candidate ending on the latest available date.
     When more valid folds exist than ``maximum_folds``, the most recent folds
     are retained. Returned folds remain ordered chronologically and
     ``folds[-1]`` is always the most recent valid fold.
@@ -133,6 +134,7 @@ def build_rolling_origin_folds(
         raise EvaluationError(msg)
 
     candidate_folds: list[TemporalFold] = []
+    seen_signatures: set[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
     date_index = earliest_test_end
     while date_index < len(unique_dates):
         fold = _try_build_fold(
@@ -145,7 +147,14 @@ def build_rolling_origin_folds(
             ordered_labels=ordered_labels,
         )
         if fold is not None:
-            candidate_folds.append(fold)
+            signature = (
+                fold.train.event_ids,
+                fold.calibration.event_ids,
+                fold.test.event_ids,
+            )
+            if signature not in seen_signatures:
+                seen_signatures.add(signature)
+                candidate_folds.append(fold)
             advanced_rows = 0
             next_index = date_index + 1
             while next_index < len(unique_dates) and advanced_rows < split.step_rows:
@@ -154,6 +163,25 @@ def build_rolling_origin_folds(
             date_index = max(next_index, date_index + 1)
         else:
             date_index += 1
+
+    # Always attempt a final candidate whose test region ends on the latest date.
+    final_fold = _try_build_fold(
+        ordered=ordered,
+        unique_dates=unique_dates,
+        date_to_indices=date_to_indices,
+        test_end_date_index=len(unique_dates) - 1,
+        config=split,
+        fold_number=len(candidate_folds) + 1,
+        ordered_labels=ordered_labels,
+    )
+    if final_fold is not None:
+        signature = (
+            final_fold.train.event_ids,
+            final_fold.calibration.event_ids,
+            final_fold.test.event_ids,
+        )
+        if signature not in seen_signatures:
+            candidate_folds.append(final_fold)
 
     if not candidate_folds:
         msg = (

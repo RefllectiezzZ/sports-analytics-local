@@ -21,6 +21,7 @@ from sports_analytics.models.contracts import (
     MODEL_MANIFEST_VERSION,
     ModelSpecification,
 )
+from sports_analytics.models.identity import content_addressed_id
 from sports_analytics.models.logistic import (
     FittedLogisticParameters,
     LogisticConfiguration,
@@ -29,6 +30,8 @@ from sports_analytics.models.logistic import (
 from sports_analytics.snapshots.paths import is_absolute_path_text, resolve_under_root
 
 ARTIFACT_FILENAME: str = "model.json"
+MODEL_IDENTITY_VERSION: str = "model-identity-v1"
+MODEL_IDENTITY_TYPE: str = "model-artifact"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +62,64 @@ class ModelArtifact:
     feature_lineage: FeatureArtifactLineage
 
 
+def derive_model_artifact_id(
+    *,
+    specification: ModelSpecification,
+    parameters: FittedLogisticParameters,
+    temperature: float,
+    trained_through_date: date,
+    calibrated_through_date: date,
+    feature_lineage: FeatureArtifactLineage,
+    evaluation_summary: dict[str, JsonValue],
+    random_seed: int,
+) -> str:
+    """Derive content-addressed model identity from fitted parameters and lineage."""
+    if parameters.feature_names != specification.ordered_feature_names:
+        msg = "model parameters feature names must match the model specification"
+        raise ModelError(msg)
+    if parameters.outcome_labels != specification.outcome_space.ordered_labels:
+        msg = "model parameters outcome labels must match the model specification"
+        raise ModelError(msg)
+    logistic_config = parameters.configuration
+    evaluation_summary_checksum = hashlib.sha256(
+        dumps_canonical_json(evaluation_summary).encode("utf-8")
+    ).hexdigest()
+    payload: dict[str, JsonValue] = {
+        "identity_version": MODEL_IDENTITY_VERSION,
+        "feature_artifact_id": feature_lineage.feature_artifact_id,
+        "feature_manifest_checksum_sha256": feature_lineage.feature_manifest_checksum_sha256,
+        "folds_file_checksum_sha256": feature_lineage.folds_file_checksum_sha256,
+        "model_specification_version": specification.model_specification_version,
+        "feature_specification_version": specification.feature_specification_version,
+        "ordered_feature_names": list(parameters.feature_names),
+        "ordered_outcome_labels": list(parameters.outcome_labels),
+        "logistic_configuration": {
+            "configuration_version": logistic_config.configuration_version,
+            "solver": logistic_config.solver,
+            "penalty": logistic_config.penalty,
+            "regularization_strength": logistic_config.regularization_strength,
+            "tolerance": logistic_config.tolerance,
+            "maximum_iterations": logistic_config.maximum_iterations,
+            "fit_intercept": logistic_config.fit_intercept,
+            "random_seed": logistic_config.random_seed,
+            "feature_scaler_policy": logistic_config.feature_scaler_policy,
+        },
+        "scaler_mean": list(parameters.scaler_mean),
+        "scaler_scale": list(parameters.scaler_scale),
+        "coefficients": [list(row) for row in parameters.coefficients],
+        "intercepts": list(parameters.intercepts),
+        "calibration_temperature": float(temperature),
+        "trained_through_date": trained_through_date.isoformat(),
+        "calibrated_through_date": calibrated_through_date.isoformat(),
+        "random_seed": random_seed,
+        "sklearn_version": parameters.sklearn_version,
+        "numpy_version": parameters.numpy_version,
+        "convergence_iterations": list(parameters.convergence_iterations),
+        "evaluation_summary_checksum_sha256": evaluation_summary_checksum,
+    }
+    return content_addressed_id(identity_type=MODEL_IDENTITY_TYPE, payload=payload)
+
+
 def build_model_document(
     *,
     artifact_id: str,
@@ -78,6 +139,9 @@ def build_model_document(
     ordered_labels = specification.outcome_space.ordered_labels
     if parameters.outcome_labels != ordered_labels:
         msg = "model artifact outcome labels must match the model specification"
+        raise ModelError(msg)
+    if parameters.feature_names != specification.ordered_feature_names:
+        msg = "model artifact feature names must match the model specification"
         raise ModelError(msg)
     if temperature <= 0 or not np.isfinite(temperature):
         msg = "calibration temperature must be positive and finite"
@@ -263,6 +327,30 @@ def load_model_artifact(
         msg = "trained_through_date must be on or before calibrated_through_date"
         raise ModelError(msg)
     feature_lineage = _feature_lineage_from_document(document)
+    try:
+        evaluation_summary_raw = document["evaluation_summary"]
+        random_seed = int(document["random_seed"])
+        if not isinstance(evaluation_summary_raw, dict):
+            raise TypeError
+        evaluation_summary = ensure_json_value(evaluation_summary_raw)
+        if not isinstance(evaluation_summary, dict):
+            raise TypeError
+    except (KeyError, TypeError, ValueError) as exc:
+        msg = "model artifact evaluation identity fields are malformed"
+        raise ModelError(msg) from exc
+    expected_id = derive_model_artifact_id(
+        specification=specification,
+        parameters=parameters,
+        temperature=temperature,
+        trained_through_date=trained_through,
+        calibrated_through_date=calibrated_through,
+        feature_lineage=feature_lineage,
+        evaluation_summary=evaluation_summary,
+        random_seed=random_seed,
+    )
+    if str(document.get("artifact_id")) != expected_id:
+        msg = "model artifact_id does not match content-addressed identity"
+        raise ModelError(msg)
     return ModelArtifact(
         relative_path=normalized,
         checksum_sha256=digest,
@@ -341,9 +429,19 @@ def _parameters_from_document(
     except (KeyError, TypeError, ValueError) as exc:
         msg = "model artifact parameters are malformed"
         raise ModelError(msg) from exc
+    try:
+        configuration.validate()
+    except ModelError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        msg = "model artifact logistic configuration is invalid"
+        raise ModelError(msg) from exc
     ordered_labels = specification.outcome_space.ordered_labels
     if outcome_labels != ordered_labels:
         msg = "model artifact outcome label order mismatch"
+        raise ModelError(msg)
+    if feature_names != specification.ordered_feature_names:
+        msg = "model artifact feature whitelist mismatch"
         raise ModelError(msg)
     n_features = len(feature_names)
     n_outcomes = len(ordered_labels)
