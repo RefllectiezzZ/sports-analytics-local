@@ -69,6 +69,34 @@ def test_store_bytes_is_idempotent_for_existing_matching_artifact(tmp_path: Path
     assert store.absolute_path_for(first.relative_path).read_bytes() == content
 
 
+def test_store_stream_writes_content_addressed_artifact_from_chunks(tmp_path: Path) -> None:
+    store = RawSourceStore(tmp_path / "raw")
+    chunks = [b"Div,", b"Date\n", b"E0,12/08/2023\n"]
+    content = b"".join(chunks)
+    expected_digest = hashlib.sha256(content).hexdigest()
+
+    artifact = store.store_stream(
+        source_name=SOURCE_NAME,
+        source_url=SOURCE_URL,
+        chunk_iter=iter(chunks),
+        retrieved_at=RETRIEVED_AT,
+        maximum_bytes=1024,
+        content_type="text/csv",
+        etag='"stream-etag"',
+        last_modified="Wed, 01 Jan 2025 00:00:00 GMT",
+    )
+
+    assert artifact.checksum_sha256 == expected_digest
+    assert artifact.byte_count == len(content)
+    assert artifact.relative_path == (
+        f"{SOURCE_NAME}/sha256/{expected_digest[:2]}/{expected_digest}.csv"
+    )
+    assert artifact.content_type == "text/csv"
+    assert artifact.etag == '"stream-etag"'
+    assert store.absolute_path_for(artifact.relative_path).read_bytes() == content
+    assert list((tmp_path / "raw" / SOURCE_NAME / ".tmp").iterdir()) == []
+
+
 def test_store_bytes_rejects_content_over_limit(tmp_path: Path) -> None:
     store = RawSourceStore(tmp_path / "raw")
 
@@ -80,6 +108,38 @@ def test_store_bytes_rejects_content_over_limit(tmp_path: Path) -> None:
             retrieved_at=RETRIEVED_AT,
             maximum_bytes=4,
         )
+
+
+def test_store_stream_rejects_content_over_limit_and_removes_temp_file(tmp_path: Path) -> None:
+    store = RawSourceStore(tmp_path / "raw")
+
+    with pytest.raises(PermanentSourceError, match="exceeds maximum_download_bytes"):
+        store.store_stream(
+            source_name=SOURCE_NAME,
+            source_url=SOURCE_URL,
+            chunk_iter=iter([b"123", b"45"]),
+            retrieved_at=RETRIEVED_AT,
+            maximum_bytes=4,
+        )
+
+    staging_dir = tmp_path / "raw" / SOURCE_NAME / ".tmp"
+    assert staging_dir.exists()
+    assert list(staging_dir.iterdir()) == []
+
+
+def test_store_stream_rejects_html_prefix_without_persisting_artifact(tmp_path: Path) -> None:
+    store = RawSourceStore(tmp_path / "raw")
+
+    with pytest.raises(PermanentSourceError, match="looks like HTML"):
+        store.store_stream(
+            source_name=SOURCE_NAME,
+            source_url=SOURCE_URL,
+            chunk_iter=iter([b"  <!doctype html><title>blocked</title>"]),
+            retrieved_at=RETRIEVED_AT,
+            maximum_bytes=1024,
+        )
+
+    assert not any((tmp_path / "raw" / SOURCE_NAME / "sha256").glob("**/*.csv"))
 
 
 def test_load_verified_returns_artifact_and_bytes(tmp_path: Path) -> None:
@@ -136,6 +196,19 @@ def test_load_verified_rejects_checksum_mismatch(tmp_path: Path) -> None:
             source_url=SOURCE_URL,
             retrieved_at=RETRIEVED_AT,
         )
+
+
+def test_absolute_path_rejects_symlink_intermediate_component(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (raw_root / SOURCE_NAME).symlink_to(outside, target_is_directory=True)
+    store = RawSourceStore(raw_root)
+    relative = f"{SOURCE_NAME}/sha256/{'a' * 2}/{'a' * 64}.csv"
+
+    with pytest.raises(PermanentSourceError, match="symlink"):
+        store.absolute_path_for(relative)
 
 
 def test_store_bytes_rejects_existing_corrupt_artifact_at_digest_path(tmp_path: Path) -> None:

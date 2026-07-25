@@ -16,11 +16,12 @@ from sports_analytics.sources.football_data_co_uk.parser import (
 )
 from sports_analytics.sources.http import (
     Clock,
+    HttpResponseMetadata,
     HttpTransport,
     MonotonicClock,
     Sleeper,
     UrllibHttpTransport,
-    download_bounded_bytes,
+    download_to_raw_store,
 )
 from sports_analytics.sources.raw_store import RawSourceArtifact, RawSourceStore
 from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
@@ -40,6 +41,8 @@ class FootballDataAcquisition:
     artifact: RawSourceArtifact
     parsed: ParsedFootballCsv
     source_observed_at_utc: datetime
+    http_metadata: HttpResponseMetadata | None
+    network_retrieved: bool
 
 
 def acquire_football_data_csv(
@@ -73,13 +76,17 @@ def acquire_football_data_csv(
             retrieved_at=source_observed_at_utc,
         )
         http_meta = None
+        network_retrieved = False
     else:
         active_transport = transport if transport is not None else UrllibHttpTransport()
         mono = monotonic_clock if monotonic_clock is not None else __import__("time").monotonic
         sleep = sleeper if sleeper is not None else __import__("time").sleep
-        download, _ = download_bounded_bytes(
+        download, _ = download_to_raw_store(
             url=source_url,
             transport=active_transport,
+            store=store,
+            source_name=SOURCE_FOOTBALL_DATA_CO_UK,
+            retrieved_at=source_observed_at_utc,
             timeout_seconds=scraping.request_timeout_seconds,
             maximum_bytes=scraping.maximum_download_bytes,
             maximum_retries=scraping.maximum_retries,
@@ -89,19 +96,15 @@ def acquire_football_data_csv(
             monotonic_clock=mono,
             sleeper=sleep,
         )
-        content = download.content
-        artifact = store.store_bytes(
+        artifact = download.artifact
+        _, content = store.load_verified(
             source_name=SOURCE_FOOTBALL_DATA_CO_UK,
+            checksum_sha256=artifact.checksum_sha256,
             source_url=source_url,
-            content=content,
             retrieved_at=source_observed_at_utc,
-            content_type=download.metadata.content_type,
-            etag=download.metadata.etag,
-            last_modified=download.metadata.last_modified,
-            maximum_bytes=scraping.maximum_download_bytes,
         )
         http_meta = download.metadata
-        del http_meta
+        network_retrieved = True
 
     parsed = parse_football_data_csv(
         content,
@@ -130,6 +133,8 @@ def acquire_football_data_csv(
         artifact=artifact,
         parsed=parsed,
         source_observed_at_utc=source_observed_at_utc,
+        http_metadata=http_meta,
+        network_retrieved=network_retrieved,
     )
 
 

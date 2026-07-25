@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import urllib.error
+import urllib.request
+from datetime import UTC, datetime
+from email.message import Message
+from pathlib import Path
 
 import pytest
 
@@ -11,10 +17,63 @@ from sports_analytics.core.exceptions import (
     RetryableSourceError,
     SourceNotFoundError,
 )
-from sports_analytics.sources.http import download_bounded_bytes
+from sports_analytics.sources.http import (
+    UrllibHttpTransport,
+    download_bounded_bytes,
+    download_to_raw_store,
+)
+from sports_analytics.sources.raw_store import RawSourceStore
+from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
 from tests.helpers_http import FakeClock, FakeHttpTransport
 
 URL = "https://www.football-data.co.uk/mmz4281/2324/E0.csv"
+RETRIEVED_AT = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+class _FakeUrllibResponse:
+    def __init__(self, *, url: str, status: int, headers: Message, body: bytes) -> None:
+        self.status = status
+        self.headers = headers
+        self._url = url
+        self._body = io.BytesIO(body)
+        self.closed = False
+
+    def geturl(self) -> str:
+        return self._url
+
+    def getcode(self) -> int:
+        return self.status
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+    def close(self) -> None:
+        self.closed = True
+        self._body.close()
+
+
+class _RecordingOpener:
+    def __init__(self, responses: list[tuple[int, dict[str, str], bytes]]) -> None:
+        self.responses = responses
+        self.calls: list[str] = []
+
+    def open(self, request: urllib.request.Request, *, timeout: float) -> _FakeUrllibResponse:
+        del timeout
+        url = request.full_url
+        self.calls.append(url)
+        status, headers_dict, body = self.responses.pop(0)
+        headers = Message()
+        for key, value in headers_dict.items():
+            headers[key] = value
+        if status in {301, 302, 303, 307, 308}:
+            raise urllib.error.HTTPError(
+                url,
+                status,
+                "redirect",
+                headers,
+                io.BytesIO(body),
+            )
+        return _FakeUrllibResponse(url=url, status=status, headers=headers, body=body)
 
 
 def _download(
@@ -71,6 +130,52 @@ def test_download_returns_content_metadata_and_checksum() -> None:
     assert clock.sleeps == []
 
 
+def test_urllib_transport_follows_allowed_redirects_manually() -> None:
+    body = b"Div,Date\nE0,12/08/2023\n"
+    redirected_url = "https://www.football-data.co.uk/mmz4281/2324/E0.csv?download=1"
+    opener = _RecordingOpener(
+        responses=[
+            (302, {"Location": "/mmz4281/2324/E0.csv?download=1"}, b""),
+            (
+                200,
+                {"Content-Type": "text/csv", "Content-Length": str(len(body))},
+                body,
+            ),
+        ]
+    )
+
+    response = UrllibHttpTransport(opener=opener).get(
+        URL,
+        timeout_seconds=5.0,
+        headers={"User-Agent": "test"},
+        maximum_redirects=1,
+    )
+
+    assert b"".join(response.iter_chunks()) == body
+    assert response.metadata.final_url == redirected_url
+    assert opener.calls == [URL, redirected_url]
+    response.close()
+
+
+def test_urllib_transport_rejects_redirect_destination_before_requesting_it() -> None:
+    opener = _RecordingOpener(
+        responses=[
+            (302, {"Location": "https://evil.example/E0.csv"}, b""),
+            (200, {"Content-Type": "text/csv"}, b"unused"),
+        ]
+    )
+
+    with pytest.raises(PermanentSourceError, match="allowlist"):
+        UrllibHttpTransport(opener=opener).get(
+            URL,
+            timeout_seconds=5.0,
+            headers={"User-Agent": "test"},
+            maximum_redirects=1,
+        )
+
+    assert opener.calls == [URL]
+
+
 def test_download_enforces_request_pacing_without_real_sleep() -> None:
     transport = FakeHttpTransport(responses=[b"Div,Date\n"])
     clock = FakeClock(start=100.0)
@@ -103,6 +208,28 @@ def test_download_retries_retryable_failures_with_exponential_backoff() -> None:
     assert transport.calls == [URL, URL, URL]
     assert clock.sleeps == [0.5, 1.0]
     assert last_request == 11.5
+
+
+def test_download_applies_pacing_after_retry_backoff_from_failed_start() -> None:
+    transport = FakeHttpTransport(
+        responses=[
+            RetryableSourceError("temporary outage"),
+            b"Div,Date\n",
+        ]
+    )
+    clock = FakeClock(start=10.0)
+
+    content, last_request = _download(
+        transport,
+        clock,
+        maximum_retries=1,
+        minimum_request_interval_seconds=2.0,
+    )
+
+    assert content == b"Div,Date\n"
+    assert transport.calls == [URL, URL]
+    assert clock.sleeps == [0.5, 1.5]
+    assert last_request == 12.0
 
 
 def test_download_stops_retrying_after_retry_budget_is_exhausted() -> None:
@@ -186,3 +313,34 @@ def test_download_rejects_non_positive_byte_limit_before_transport_call() -> Non
         _download(transport, clock, maximum_bytes=0)
 
     assert transport.calls == []
+
+
+def test_download_to_raw_store_streams_response_and_preserves_metadata(tmp_path: Path) -> None:
+    body = b"Div,Date\nE0,12/08/2023\n"
+    transport = FakeHttpTransport(responses=[body], chunk_size=3)
+    store = RawSourceStore(tmp_path / "raw")
+    clock = FakeClock(start=25.0)
+
+    result, last_request = download_to_raw_store(
+        url=URL,
+        transport=transport,
+        store=store,
+        source_name=SOURCE_FOOTBALL_DATA_CO_UK,
+        retrieved_at=RETRIEVED_AT,
+        timeout_seconds=5.0,
+        maximum_bytes=1024,
+        maximum_retries=0,
+        retry_backoff_base_seconds=0.5,
+        retry_backoff_max_seconds=2.0,
+        minimum_request_interval_seconds=0.0,
+        monotonic_clock=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+
+    artifact = result.artifact
+    assert store.absolute_path_for(artifact.relative_path).read_bytes() == body
+    assert artifact.checksum_sha256 == hashlib.sha256(body).hexdigest()
+    assert artifact.byte_count == len(body)
+    assert result.metadata.status_code == 200
+    assert result.metadata.content_type == "text/csv"
+    assert last_request == 25.0

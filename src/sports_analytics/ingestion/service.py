@@ -76,6 +76,7 @@ class FootballIngestionService:
         )
         _checkpoint()
         competition = get_competition(acquisition.competition_id)
+        http_metadata = acquisition.http_metadata
         # Parsing already completed inside acquire; checkpoint marks that stage.
         _checkpoint()
         bundle = normalize_football_rows(
@@ -106,9 +107,12 @@ class FootballIngestionService:
             source_observed_at_utc=acquisition.source_observed_at_utc,
             unknown_source_columns=acquisition.parsed.unknown_headers,
             missing_optional_source_columns=acquisition.parsed.missing_optional_headers,
-            http_content_type=acquisition.artifact.content_type,
-            http_etag=acquisition.artifact.etag,
-            http_last_modified=acquisition.artifact.last_modified,
+            http_status=http_metadata.status_code if http_metadata is not None else None,
+            http_content_type=http_metadata.content_type if http_metadata is not None else None,
+            http_content_length=http_metadata.content_length if http_metadata is not None else None,
+            http_etag=http_metadata.etag if http_metadata is not None else None,
+            http_last_modified=http_metadata.last_modified if http_metadata is not None else None,
+            http_final_url=http_metadata.final_url if http_metadata is not None else None,
         )
         _checkpoint()
         publisher = SnapshotPublicationService(
