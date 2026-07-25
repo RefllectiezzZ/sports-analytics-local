@@ -40,6 +40,10 @@ enabled = false
 request_timeout_seconds = 30
 maximum_retries = 3
 browser_headless = true
+retry_backoff_base_seconds = 2
+retry_backoff_max_seconds = 30
+minimum_request_interval_seconds = 2
+maximum_download_bytes = 26214400
 
 [modelling]
 enabled = false

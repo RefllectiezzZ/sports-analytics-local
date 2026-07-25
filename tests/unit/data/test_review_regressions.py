@@ -353,11 +353,6 @@ def test_applied_migration_gap_rejected(tmp_path: Path) -> None:
     with connect_database(db) as connection:
         with transaction(connection):
             connection.execute("DELETE FROM schema_migrations WHERE version = 2")
-            connection.execute(
-                "INSERT INTO schema_migrations(version, name, checksum, applied_at, "
-                "execution_time_ms) VALUES (3, 'gap', ?, '2026-07-24T00:00:00.000000Z', 1)",
-                ("a" * 64,),
-            )
     with pytest.raises(DatabaseMigrationError, match="consecutive prefix"):
         get_migration_status(db)
 

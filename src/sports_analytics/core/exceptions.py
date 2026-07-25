@@ -59,3 +59,43 @@ class RetryableJobError(JobHandlerError):
 
 class PermanentJobError(JobHandlerError):
     """Raised by a handler to request terminal failure without retry."""
+
+
+class SourceError(SportsAnalyticsError):
+    """Base exception for external source adapter failures."""
+
+
+class RetryableSourceError(SourceError):
+    """Raised for temporary source retrieval failures that may succeed on retry."""
+
+
+class PermanentSourceError(SourceError):
+    """Raised for permanent source retrieval or policy violations."""
+
+
+class SourceNotFoundError(PermanentSourceError):
+    """Raised when the external source reports that a resource does not exist."""
+
+
+class ParserError(SportsAnalyticsError):
+    """Raised when source CSV decoding or structural parsing fails permanently."""
+
+
+class NormalizationError(SportsAnalyticsError):
+    """Raised when canonical normalization rejects source row content."""
+
+
+class SnapshotError(SportsAnalyticsError):
+    """Base exception for snapshot preparation, publication, or verification."""
+
+
+class SnapshotBusyError(SnapshotError):
+    """Raised when an active BUILDING snapshot blocks publication (retryable)."""
+
+
+class SnapshotIntegrityError(SnapshotError):
+    """Raised for permanent snapshot filesystem or metadata integrity conflicts."""
+
+
+class SnapshotVerificationError(SnapshotError):
+    """Raised when a READY snapshot fails read-only integrity verification."""

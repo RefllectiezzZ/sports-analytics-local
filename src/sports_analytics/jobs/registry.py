@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from sports_analytics.core.exceptions import JobRegistryError, RepositoryError
 from sports_analytics.data.types import validate_identifier
+from sports_analytics.ingestion.handlers import ingest_football_data_csv_handler
+from sports_analytics.ingestion.types import INGEST_FOOTBALL_DATA_CSV_JOB_TYPE
 from sports_analytics.jobs.handlers import JobHandler, system_noop_handler
 from sports_analytics.jobs.types import SYSTEM_NOOP_JOB_TYPE
 
@@ -43,6 +45,11 @@ class HandlerRegistry:
         """Prevent further registry mutation."""
         self._frozen = True
 
+    @property
+    def frozen(self) -> bool:
+        """Return whether the registry rejects further registration."""
+        return self._frozen
+
     @staticmethod
     def _validate_job_type(job_type: str) -> str:
         try:
@@ -53,8 +60,9 @@ class HandlerRegistry:
 
 
 def build_default_registry() -> HandlerRegistry:
-    """Return a frozen registry with built-in system handlers."""
+    """Return a frozen registry with built-in system and ingestion handlers."""
     registry = HandlerRegistry()
     registry.register(SYSTEM_NOOP_JOB_TYPE, system_noop_handler)
+    registry.register(INGEST_FOOTBALL_DATA_CSV_JOB_TYPE, ingest_football_data_csv_handler)
     registry.freeze()
     return registry

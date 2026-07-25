@@ -37,8 +37,12 @@ def test_duplicate_unknown_and_invalid_job_types_raise_registry_error() -> None:
 
 def test_default_registry_contains_frozen_system_noop_handler() -> None:
     registry = build_default_registry()
-    assert registry.list_job_types() == (SYSTEM_NOOP_JOB_TYPE,)
+    assert registry.list_job_types() == (
+        "ingest.football-data-csv",
+        SYSTEM_NOOP_JOB_TYPE,
+    )
     handler = registry.get(SYSTEM_NOOP_JOB_TYPE)
     assert callable(handler)
+    assert callable(registry.get("ingest.football-data-csv"))
     with pytest.raises(JobRegistryError, match="frozen"):
         registry.register("demo.job", _handler)

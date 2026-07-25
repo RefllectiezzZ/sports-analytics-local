@@ -94,13 +94,19 @@ def test_normal_placeholder_execution(
         argv = ["--once"]
     elif module_name == "run_local":
         argv = ["--worker-once"]
+    elif module_name == "scraper":
+        argv = ["--list-sources"]
     else:
         argv = []
     code = module.main(argv)
     assert code == 0
     captured = capsys.readouterr()
-    if module_name in {"app", "scraper", "engine"}:
+    if module_name in {"app", "engine"}:
         assert "not implemented" in captured.out.lower()
+    elif module_name == "scraper":
+        assert "football-data-co-uk" in captured.out
+        assert not (isolated_cwd / "storage").exists()
+        return
     elif module_name == "worker":
         assert "worker stopped:" in captured.out
         assert "stop_reason=once_no_job" in captured.out

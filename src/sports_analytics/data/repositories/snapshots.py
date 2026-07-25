@@ -114,6 +114,55 @@ class SnapshotRepository:
             return None
         return self._from_row(row)
 
+    def get_active_snapshot_by_source_version(
+        self,
+        *,
+        snapshot_type: str,
+        source_name: str,
+        source_version: str,
+        schema_version: str,
+    ) -> SnapshotRecord | None:
+        """Return the active BUILDING or READY snapshot for a source version.
+
+        Failed snapshots are excluded so a replacement may proceed. When more
+        than one active row exists (should be prevented by migration 0003), the
+        earliest ``created_at`` then ``id`` is returned for deterministic reads.
+        """
+        normalized_type = validate_identifier(snapshot_type, field_name="snapshot_type")
+        normalized_source = validate_identifier(source_name, field_name="source_name")
+        normalized_source_version = validate_identifier(
+            source_version,
+            field_name="source_version",
+        )
+        normalized_schema = validate_identifier(schema_version, field_name="schema_version")
+        try:
+            row = self._connection.execute(
+                f"""
+                SELECT * FROM {SNAPSHOTS_TABLE}
+                WHERE snapshot_type = ?
+                  AND source_name = ?
+                  AND source_version = ?
+                  AND schema_version = ?
+                  AND status IN (?, ?)
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+                """,
+                (
+                    normalized_type,
+                    normalized_source,
+                    normalized_source_version,
+                    normalized_schema,
+                    SnapshotStatus.BUILDING.value,
+                    SnapshotStatus.READY.value,
+                ),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            msg = "failed to look up active snapshot by source version"
+            raise RepositoryError(msg) from exc
+        if row is None:
+            return None
+        return self._from_row(row)
+
     def list_snapshots(
         self,
         *,
