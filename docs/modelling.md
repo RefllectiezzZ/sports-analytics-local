@@ -49,12 +49,12 @@ Ordered model features (whitelist; never inferred from numeric columns):
 24. `home_days_since_prev`
 25. `away_days_since_prev`
 26. `rest_day_diff`
-27. `home_window5_available`
-28. `home_window10_available`
-29. `away_window5_available`
-30. `away_window10_available`
-31. `home_home_form_available`
-32. `away_away_form_available`
+27. `home_window5_count`
+28. `home_window10_count`
+29. `away_window5_count`
+30. `away_window10_count`
+31. `home_home_form_count`
+32. `away_away_form_count`
 33. `home_rest_available`
 34. `away_rest_available`
 

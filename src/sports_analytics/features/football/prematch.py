@@ -21,10 +21,10 @@ from datetime import date, datetime
 from typing import Final
 
 from sports_analytics.core.exceptions import FeatureError
-from sports_analytics.features.contracts import (
+from sports_analytics.features.contracts import FeatureRowMetadata
+from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
     FOOTBALL_1X2_PREMATCH_FEATURES_V1,
-    FeatureRowMetadata,
     football_1x2_prematch_specification,
 )
 from sports_analytics.sports.contracts import EventStatus
@@ -65,6 +65,21 @@ class FeatureVector:
     metadata: FeatureRowMetadata
     features: dict[str, float]
     result_code: str
+
+    @property
+    def example_id(self) -> str:
+        """Return the canonical event id for temporal fold construction."""
+        return self.metadata.canonical_event_id
+
+    @property
+    def event_date(self) -> date:
+        """Return the event date for temporal fold construction."""
+        return self.metadata.event_date
+
+    @property
+    def target_label(self) -> str:
+        """Return the supervised target label."""
+        return self.result_code
 
     def ordered_values(self) -> tuple[float, ...]:
         """Return feature values in the specification whitelist order."""
@@ -238,10 +253,10 @@ def _build_features(
     home_days, home_rest_available = _days_since_previous(home_state.last_match_date, event_date)
     away_days, away_rest_available = _days_since_previous(away_state.last_match_date, event_date)
 
-    home_ppg_5, home_w5 = _rolling_mean_points(home_state.history, 5)
-    home_ppg_10, home_w10 = _rolling_mean_points(home_state.history, 10)
-    away_ppg_5, away_w5 = _rolling_mean_points(away_state.history, 5)
-    away_ppg_10, away_w10 = _rolling_mean_points(away_state.history, 10)
+    home_ppg_5, home_w5_count = _rolling_mean_points(home_state.history, 5)
+    home_ppg_10, home_w10_count = _rolling_mean_points(home_state.history, 10)
+    away_ppg_5, away_w5_count = _rolling_mean_points(away_state.history, 5)
+    away_ppg_10, away_w10_count = _rolling_mean_points(away_state.history, 10)
 
     home_gf_5, _ = _rolling_mean_stat(home_state.history, 5, "goals_for")
     home_gf_10, _ = _rolling_mean_stat(home_state.history, 10, "goals_for")
@@ -258,11 +273,11 @@ def _build_features(
     away_gd_5, _ = _rolling_mean_goal_diff(away_state.history, 5)
     away_gd_10, _ = _rolling_mean_goal_diff(away_state.history, 10)
 
-    home_home_ppg_5, home_home_available = _rolling_mean_points(
+    home_home_ppg_5, home_home_form_count = _rolling_mean_points(
         [item for item in home_state.history if item.is_home],
         5,
     )
-    away_away_ppg_5, away_away_available = _rolling_mean_points(
+    away_away_ppg_5, away_away_form_count = _rolling_mean_points(
         [item for item in away_state.history if not item.is_home],
         5,
     )
@@ -294,12 +309,12 @@ def _build_features(
         "home_days_since_prev": home_days,
         "away_days_since_prev": away_days,
         "rest_day_diff": home_days - away_days,
-        "home_window5_available": home_w5,
-        "home_window10_available": home_w10,
-        "away_window5_available": away_w5,
-        "away_window10_available": away_w10,
-        "home_home_form_available": home_home_available,
-        "away_away_form_available": away_away_available,
+        "home_window5_count": float(home_w5_count),
+        "home_window10_count": float(home_w10_count),
+        "away_window5_count": float(away_w5_count),
+        "away_window10_count": float(away_w10_count),
+        "home_home_form_count": float(home_home_form_count),
+        "away_away_form_count": float(away_away_form_count),
         "home_rest_available": home_rest_available,
         "away_rest_available": away_rest_available,
     }
@@ -374,38 +389,35 @@ def _days_since_previous(last_match_date: date | None, event_date: date) -> tupl
     return float(delta), 1.0
 
 
-def _rolling_mean_points(history: list[_MatchHistoryEntry], window: int) -> tuple[float, float]:
+def _rolling_mean_points(history: list[_MatchHistoryEntry], window: int) -> tuple[float, int]:
     if not history:
-        return 0.0, 0.0
+        return 0.0, 0
     sample = history[-window:]
     mean = sum(item.points for item in sample) / float(len(sample))
-    available = 1.0 if len(sample) >= min(window, 1) and len(history) > 0 else 0.0
-    # Availability is 1 when at least one prior match exists for the window request.
-    available = 1.0 if sample else 0.0
-    return mean, available
+    return mean, len(sample)
 
 
 def _rolling_mean_stat(
     history: list[_MatchHistoryEntry],
     window: int,
     attr: str,
-) -> tuple[float, float]:
+) -> tuple[float, int]:
     if not history:
-        return 0.0, 0.0
+        return 0.0, 0
     sample = history[-window:]
     total = sum(getattr(item, attr) for item in sample)
-    return total / float(len(sample)), 1.0
+    return total / float(len(sample)), len(sample)
 
 
 def _rolling_mean_goal_diff(
     history: list[_MatchHistoryEntry],
     window: int,
-) -> tuple[float, float]:
+) -> tuple[float, int]:
     if not history:
-        return 0.0, 0.0
+        return 0.0, 0
     sample = history[-window:]
     total = sum(item.goals_for - item.goals_against for item in sample)
-    return total / float(len(sample)), 1.0
+    return total / float(len(sample)), len(sample)
 
 
 def training_event_from_row(row: dict[str, object]) -> FinishedTrainingEvent:

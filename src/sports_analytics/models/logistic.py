@@ -3,13 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib.metadata import version as package_version
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from sports_analytics.core.exceptions import ModelError
-from sports_analytics.models.contracts import OUTCOME_LABELS_1X2
+from sports_analytics.features.contracts import OutcomeSpace
+
+
+@dataclass(frozen=True, slots=True)
+class LogisticConfiguration:
+    """Explicit, versioned multinomial logistic regression settings."""
+
+    configuration_version: str = "logistic-configuration-v1"
+    solver: str = "lbfgs"
+    penalty: str = "l2"
+    regularization_strength: float = 1.0
+    tolerance: float = 1e-4
+    maximum_iterations: int = 2000
+    fit_intercept: bool = True
+    random_seed: int = 42
+    feature_scaler_policy: str = "standard-zero-scale-to-one"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +38,10 @@ class FittedLogisticParameters:
     scaler_scale: tuple[float, ...]
     coefficients: tuple[tuple[float, ...], ...]
     intercepts: tuple[float, ...]
+    configuration: LogisticConfiguration
+    sklearn_version: str
+    numpy_version: str
+    convergence_iterations: tuple[int, ...]
 
 
 def fit_multinomial_logistic(
@@ -29,9 +49,12 @@ def fit_multinomial_logistic(
     feature_matrix: np.ndarray,
     labels: tuple[str, ...],
     feature_names: tuple[str, ...],
-    random_seed: int,
+    outcome_space: OutcomeSpace,
+    configuration: LogisticConfiguration | None = None,
 ) -> FittedLogisticParameters:
     """Fit a multinomial logistic model and return explicit parameters."""
+    config = configuration or LogisticConfiguration(random_seed=42)
+    ordered_labels = outcome_space.ordered_labels
     if feature_matrix.ndim != 2:
         msg = "feature matrix must be 2-dimensional"
         raise ModelError(msg)
@@ -42,8 +65,11 @@ def fit_multinomial_logistic(
         msg = "feature matrix width does not match feature_names"
         raise ModelError(msg)
     unique = set(labels)
-    if unique != set(OUTCOME_LABELS_1X2):
-        msg = f"training labels must include all outcomes home/draw/away; found {sorted(unique)}"
+    if unique != set(ordered_labels):
+        msg = (
+            "training labels must include every outcome in the supplied outcome space; "
+            f"expected {ordered_labels}, found {sorted(unique)}"
+        )
         raise ModelError(msg)
     if not np.isfinite(feature_matrix).all():
         msg = "feature matrix contains non-finite values"
@@ -51,22 +77,32 @@ def fit_multinomial_logistic(
 
     scaler = StandardScaler()
     scaled = scaler.fit_transform(feature_matrix)
-    if np.any(scaler.scale_ == 0):
-        # Replace zero scales with 1.0 so inference stays well-defined.
+    if config.feature_scaler_policy == "standard-zero-scale-to-one":
         scale = np.where(scaler.scale_ == 0, 1.0, scaler.scale_)
     else:
-        scale = scaler.scale_
+        msg = f"unsupported feature scaler policy: {config.feature_scaler_policy}"
+        raise ModelError(msg)
 
     model = LogisticRegression(
-        solver="lbfgs",
-        max_iter=2000,
-        random_state=random_seed,
+        solver=config.solver,
+        C=config.regularization_strength,
+        tol=config.tolerance,
+        max_iter=config.maximum_iterations,
+        fit_intercept=config.fit_intercept,
+        random_state=config.random_seed,
     )
     model.fit(scaled, np.asarray(labels))
+    if any(iteration >= config.maximum_iterations for iteration in model.n_iter_):
+        msg = "logistic regression did not converge within the configured maximum iterations"
+        raise ModelError(msg)
+    if not np.isfinite(model.coef_).all() or not np.isfinite(model.intercept_).all():
+        msg = "fitted logistic parameters contain non-finite values"
+        raise ModelError(msg)
+
     class_order = tuple(str(item) for item in model.classes_)
     index_by_label = {label: index for index, label in enumerate(class_order)}
     try:
-        ordered_indices = [index_by_label[label] for label in OUTCOME_LABELS_1X2]
+        ordered_indices = [index_by_label[label] for label in ordered_labels]
     except KeyError as exc:
         msg = "fitted model is missing a required outcome class"
         raise ModelError(msg) from exc
@@ -77,11 +113,15 @@ def fit_multinomial_logistic(
     intercepts = tuple(float(model.intercept_[index]) for index in ordered_indices)
     return FittedLogisticParameters(
         feature_names=feature_names,
-        outcome_labels=OUTCOME_LABELS_1X2,
+        outcome_labels=ordered_labels,
         scaler_mean=tuple(float(value) for value in scaler.mean_),
         scaler_scale=tuple(float(value) for value in scale),
         coefficients=coefficients,
         intercepts=intercepts,
+        configuration=config,
+        sklearn_version=package_version("scikit-learn"),
+        numpy_version=np.__version__,
+        convergence_iterations=tuple(int(value) for value in model.n_iter_),
     )
 
 
@@ -108,6 +148,9 @@ def logits_from_parameters(
     scaled = (matrix - mean) / scale
     coef = np.asarray(parameters.coefficients, dtype=np.float64)
     intercept = np.asarray(parameters.intercepts, dtype=np.float64)
+    if not np.isfinite(coef).all() or not np.isfinite(intercept).all():
+        msg = "model coefficients contain non-finite values"
+        raise ModelError(msg)
     logits = scaled @ coef.T + intercept
     if not np.isfinite(logits).all():
         msg = "non-finite logits produced during inference"

@@ -5,46 +5,65 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
-from uuid import uuid4
 
 import numpy as np
 
 from sports_analytics.core.exceptions import ModelError, TrainingError
-from sports_analytics.data.codec import ensure_json_value, utc_now
+from sports_analytics.data.codec import ensure_json_value
 from sports_analytics.data.types import JsonValue
 from sports_analytics.evaluation.metrics import (
     closing_odds_to_normalized_probabilities,
     evaluate_probabilities,
     metrics_to_json,
 )
-from sports_analytics.evaluation.temporal import (
-    TemporalFold,
-    TemporalSplitConfig,
-    assign_fold_rows,
-    build_rolling_origin_folds,
-)
-from sports_analytics.features.contracts import (
-    FOOTBALL_1X2_FEATURE_NAMES_V1,
-    FOOTBALL_1X2_PREMATCH_FEATURES_V1,
-)
+from sports_analytics.evaluation.temporal import TemporalFold, TemporalSplitConfig
 from sports_analytics.features.football.datasets import ClosingMarketQuoteTriple
 from sports_analytics.features.football.prematch import FeatureVector
+from sports_analytics.features.football.specification import (
+    FOOTBALL_1X2_FEATURE_NAMES_V1,
+    FOOTBALL_1X2_OUTCOME_SPACE,
+    FOOTBALL_1X2_PREMATCH_FEATURES_V1,
+)
 from sports_analytics.models.artifacts import (
+    FeatureArtifactLineage,
     ModelArtifact,
     build_model_document,
     infer_calibrated_probabilities,
+    load_model_artifact,
     write_model_artifact,
 )
 from sports_analytics.models.calibration import fit_temperature, softmax
-from sports_analytics.models.contracts import (
-    FOOTBALL_1X2_LOGISTIC_MODEL_V1,
-    OUTCOME_LABELS_1X2,
-    football_1x2_logistic_specification,
-)
+from sports_analytics.models.contracts import ModelSpecification
+from sports_analytics.models.identity import content_addressed_id, validate_artifact_id_override
 from sports_analytics.models.logistic import (
+    LogisticConfiguration,
     fit_multinomial_logistic,
     logits_from_parameters,
 )
+
+FOOTBALL_1X2_LOGISTIC_MODEL_V1: str = "football-1x2-logistic-v1"
+OUTCOME_LABELS_1X2: tuple[str, ...] = FOOTBALL_1X2_OUTCOME_SPACE.ordered_labels
+
+
+def football_1x2_logistic_specification(
+    feature_specification_version: str,
+) -> ModelSpecification:
+    """Return the football 1X2 logistic model specification."""
+    if feature_specification_version != FOOTBALL_1X2_PREMATCH_FEATURES_V1:
+        msg = (
+            "unsupported feature specification version for football 1X2 logistic model: "
+            f"{feature_specification_version}"
+        )
+        raise ModelError(msg)
+    return ModelSpecification(
+        model_specification_version=FOOTBALL_1X2_LOGISTIC_MODEL_V1,
+        sport_code="football",
+        market_key="football.match-result.1x2.full-match",
+        algorithm="multinomial-logistic-regression",
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        feature_specification_version=feature_specification_version,
+        description="Team-level multinomial logistic baseline for football full-match 1X2.",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +92,6 @@ class Football1x2TrainingResult:
     """Complete training run result including the final deployable artifact."""
 
     folds: tuple[FoldEvaluation, ...]
-    fold_assignments: list[dict[str, object]]
     final_artifact_relative_directory: str
     final_artifact_checksum: str
     final_artifact: ModelArtifact
@@ -108,8 +126,10 @@ def evaluate_fold(
     vectors: tuple[FeatureVector, ...],
     closing_quotes: tuple[ClosingMarketQuoteTriple, ...],
     random_seed: int,
+    logistic_configuration: LogisticConfiguration | None = None,
 ) -> FoldEvaluation:
     """Fit, calibrate, and evaluate one untouched test region."""
+    config = logistic_configuration or LogisticConfiguration(random_seed=random_seed)
     train = select_vectors(vectors, fold.train.event_ids)
     calibration = select_vectors(vectors, fold.calibration.event_ids)
     test = select_vectors(vectors, fold.test.event_ids)
@@ -123,7 +143,8 @@ def evaluate_fold(
         feature_matrix=matrix_from_vectors(train),
         labels=train_labels,
         feature_names=FOOTBALL_1X2_FEATURE_NAMES_V1,
-        random_seed=random_seed,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        configuration=config,
     )
     cal_logits = logits_from_parameters(
         feature_vector=matrix_from_vectors(calibration),
@@ -132,16 +153,33 @@ def evaluate_fold(
     temperature_result = fit_temperature(
         logits=cal_logits,
         labels=tuple(item.result_code for item in calibration),
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
     )
     test_logits = logits_from_parameters(
         feature_vector=matrix_from_vectors(test),
         parameters=parameters,
     )
     test_labels = tuple(item.result_code for item in test)
-    uncalibrated = softmax(test_logits, temperature=1.0)
-    calibrated = softmax(test_logits, temperature=temperature_result.temperature)
-    uncalibrated_metrics = evaluate_probabilities(labels=test_labels, probabilities=uncalibrated)
-    calibrated_metrics = evaluate_probabilities(labels=test_labels, probabilities=calibrated)
+    uncalibrated = softmax(
+        test_logits,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        temperature=1.0,
+    )
+    calibrated = softmax(
+        test_logits,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        temperature=temperature_result.temperature,
+    )
+    uncalibrated_metrics = evaluate_probabilities(
+        labels=test_labels,
+        probabilities=uncalibrated,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+    )
+    calibrated_metrics = evaluate_probabilities(
+        labels=test_labels,
+        probabilities=calibrated,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+    )
 
     benchmark_metrics, coverage = _market_benchmark(
         test=test,
@@ -176,6 +214,16 @@ def evaluate_fold(
         training_configuration={
             "algorithm": "multinomial-logistic-regression",
             "calibration": "temperature-scaling",
+            "logistic_configuration": {
+                "configuration_version": config.configuration_version,
+                "solver": config.solver,
+                "penalty": config.penalty,
+                "regularization_strength": config.regularization_strength,
+                "tolerance": config.tolerance,
+                "maximum_iterations": config.maximum_iterations,
+                "fit_intercept": config.fit_intercept,
+                "feature_scaler_policy": config.feature_scaler_policy,
+            },
         },
     )
 
@@ -185,30 +233,32 @@ def train_final_artifact(
     vectors: tuple[FeatureVector, ...],
     folds: tuple[TemporalFold, ...],
     closing_quotes: tuple[ClosingMarketQuoteTriple, ...],
-    input_snapshots: list[dict[str, JsonValue]],
+    feature_lineage: FeatureArtifactLineage,
     competition_id: str,
     models_root: Any,
     random_seed: int,
     split_config: TemporalSplitConfig,
     artifact_id: str | None = None,
+    logistic_configuration: LogisticConfiguration | None = None,
 ) -> Football1x2TrainingResult:
     """Run rolling-origin evaluation and persist one final deployable artifact."""
     if not folds:
         msg = "training requires at least one valid temporal fold"
         raise TrainingError(msg)
 
+    config = logistic_configuration or LogisticConfiguration(random_seed=random_seed)
     fold_evaluations = tuple(
         evaluate_fold(
             fold=fold,
             vectors=vectors,
             closing_quotes=closing_quotes,
             random_seed=random_seed,
+            logistic_configuration=config,
         )
         for fold in folds
     )
     final_fold = folds[-1]
     train = select_vectors(vectors, final_fold.train.event_ids)
-    # Events with date < calibration start are used for fitting.
     history = tuple(
         item for item in vectors if item.metadata.event_date < final_fold.calibration.start_date
     )
@@ -224,7 +274,8 @@ def train_final_artifact(
         feature_matrix=matrix_from_vectors(history),
         labels=history_labels,
         feature_names=FOOTBALL_1X2_FEATURE_NAMES_V1,
-        random_seed=random_seed,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        configuration=config,
     )
     cal_logits = logits_from_parameters(
         feature_vector=matrix_from_vectors(calibration),
@@ -233,16 +284,43 @@ def train_final_artifact(
     temperature_result = fit_temperature(
         logits=cal_logits,
         labels=tuple(item.result_code for item in calibration),
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
     )
 
-    # Do not train or calibrate on events after the declared artifact cutoff.
     calibrated_through = final_fold.calibration.end_date
     if any(item.metadata.event_date > calibrated_through for item in calibration):
         msg = "calibration window exceeds calibrated_through_date"
         raise TrainingError(msg)
 
     specification = football_1x2_logistic_specification(FOOTBALL_1X2_PREMATCH_FEATURES_V1)
-    resolved_id = artifact_id or str(uuid4())
+    identity_payload: dict[str, JsonValue] = {
+        "feature_artifact_id": feature_lineage.feature_artifact_id,
+        "feature_manifest_checksum_sha256": feature_lineage.feature_manifest_checksum_sha256,
+        "folds_file_checksum_sha256": feature_lineage.folds_file_checksum_sha256,
+        "model_specification_version": specification.model_specification_version,
+        "feature_specification_version": specification.feature_specification_version,
+        "fold_configuration": feature_lineage.fold_configuration,
+        "random_seed": random_seed,
+        "logistic_configuration": {
+            "configuration_version": config.configuration_version,
+            "solver": config.solver,
+            "penalty": config.penalty,
+            "regularization_strength": config.regularization_strength,
+            "tolerance": config.tolerance,
+            "maximum_iterations": config.maximum_iterations,
+            "fit_intercept": config.fit_intercept,
+            "feature_scaler_policy": config.feature_scaler_policy,
+        },
+    }
+    derived_id = content_addressed_id(
+        identity_type="football-1x2-model-artifact",
+        payload=identity_payload,
+    )
+    resolved_id = validate_artifact_id_override(
+        override=artifact_id,
+        derived=derived_id,
+        artifact_kind="model",
+    )
     relative_directory = (
         f"football/{specification.model_specification_version}/{competition_id}/{resolved_id}"
     )
@@ -267,28 +345,20 @@ def train_final_artifact(
     trained_through_date = max(item.metadata.event_date for item in history)
     document = build_model_document(
         artifact_id=resolved_id,
+        specification=specification,
         parameters=parameters,
         temperature=temperature_result.temperature,
-        feature_specification_version=FOOTBALL_1X2_PREMATCH_FEATURES_V1,
-        model_specification_version=FOOTBALL_1X2_LOGISTIC_MODEL_V1,
         competition_id=competition_id,
         trained_through_date=trained_through_date,
         calibrated_through_date=calibrated_through,
-        input_snapshots=input_snapshots,
+        feature_lineage=feature_lineage,
         configuration={
-            "temporal_split": {
-                "min_train_rows": split_config.min_train_rows,
-                "min_calibration_rows": split_config.min_calibration_rows,
-                "min_test_rows": split_config.min_test_rows,
-                "step_rows": split_config.step_rows,
-                "maximum_folds": split_config.maximum_folds,
-            },
+            "temporal_split": ensure_json_value(split_config.to_json()),
             "random_seed": random_seed,
-            "elo_and_features": FOOTBALL_1X2_PREMATCH_FEATURES_V1,
+            "feature_specification_version": FOOTBALL_1X2_PREMATCH_FEATURES_V1,
         },
         validation_metrics=validation_metrics,
         evaluation_summary=evaluation_summary,
-        generated_at=utc_now(),
         random_seed=random_seed,
     )
     _path, checksum = write_model_artifact(
@@ -296,14 +366,12 @@ def train_final_artifact(
         relative_directory=relative_directory,
         document=document,
     )
-    from sports_analytics.models.artifacts import load_model_artifact
-
     artifact = load_model_artifact(
         models_root=models_root,
         relative_path=f"{relative_directory}/model.json",
+        specification=specification,
         expected_checksum=checksum,
     )
-    # Sanity: inference from persisted params matches in-memory temperature softmax.
     sample = history[0]
     persisted = infer_calibrated_probabilities(
         artifact=artifact,
@@ -315,7 +383,11 @@ def train_final_artifact(
         feature_vector=np.asarray(sample.ordered_values(), dtype=np.float64),
         parameters=parameters,
     )
-    direct = softmax(direct_logits, temperature=temperature_result.temperature)[0]
+    direct = softmax(
+        direct_logits,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        temperature=temperature_result.temperature,
+    )[0]
     for index, label in enumerate(OUTCOME_LABELS_1X2):
         if abs(persisted[label] - float(direct[index])) > 1e-12:
             msg = "persisted inference diverged from training-time inference"
@@ -323,7 +395,6 @@ def train_final_artifact(
 
     return Football1x2TrainingResult(
         folds=fold_evaluations,
-        fold_assignments=assign_fold_rows(vectors, folds),
         final_artifact_relative_directory=relative_directory,
         final_artifact_checksum=checksum,
         final_artifact=artifact,
@@ -338,7 +409,13 @@ def prepare_folds(
     config: TemporalSplitConfig | None = None,
 ) -> tuple[TemporalFold, ...]:
     """Build chronological folds for a feature dataset."""
-    return build_rolling_origin_folds(vectors, config=config)
+    from sports_analytics.evaluation.temporal import build_rolling_origin_folds
+
+    return build_rolling_origin_folds(
+        vectors,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        config=config,
+    )
 
 
 def _market_benchmark(
@@ -366,6 +443,7 @@ def _market_benchmark(
     metrics = evaluate_probabilities(
         labels=tuple(labels),
         probabilities=np.asarray(rows, dtype=np.float64),
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
     )
     payload = metrics_to_json(metrics)
     payload["coverage"] = coverage

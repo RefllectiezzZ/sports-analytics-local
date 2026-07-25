@@ -28,7 +28,7 @@ from sports_analytics.core.validation import (
 )
 from sports_analytics.data.codec import dumps_canonical_json, ensure_json_value
 from sports_analytics.evaluation.temporal import TemporalSplitConfig
-from sports_analytics.features.contracts import (
+from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
     FOOTBALL_1X2_PREMATCH_FEATURES_V1,
 )
@@ -111,19 +111,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--min-train-rows",
         default=None,
         metavar="INTEGER",
-        help="Minimum training rows per fold (default 60).",
+        help="Minimum training rows per fold when building features (default 60).",
     )
     parser.add_argument(
         "--min-calibration-rows",
         default=None,
         metavar="INTEGER",
-        help="Minimum calibration rows per fold (default 20).",
+        help="Minimum calibration rows per fold when building features (default 20).",
     )
     parser.add_argument(
         "--min-test-rows",
         default=None,
         metavar="INTEGER",
-        help="Minimum test rows per fold (default 20).",
+        help="Minimum test rows per fold when building features (default 20).",
+    )
+    parser.add_argument(
+        "--maximum-folds",
+        default=None,
+        metavar="INTEGER",
+        help="Maximum rolling-origin folds to retain when building features (default 8).",
     )
     parser.add_argument(
         "--minimum-events",
@@ -194,6 +200,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             args.min_train_rows,
             args.min_calibration_rows,
             args.min_test_rows,
+            args.maximum_folds,
             args.minimum_events,
         )
     )
@@ -222,11 +229,20 @@ def _build_features(args: argparse.Namespace) -> int:
             )
         except RepositoryError as exc:
             raise ConfigurationError(str(exc)) from exc
+    split = TemporalSplitConfig(
+        min_train_rows=_optional_positive(args.min_train_rows, "min_train_rows", 60),
+        min_calibration_rows=_optional_positive(
+            args.min_calibration_rows, "min_calibration_rows", 20
+        ),
+        min_test_rows=_optional_positive(args.min_test_rows, "min_test_rows", 20),
+        maximum_folds=_optional_positive(args.maximum_folds, "maximum_folds", 8),
+    )
     artifact = build_football_1x2_features(
         paths=runtime.paths,
         request=FeatureBuildRequest(
             relative_manifest_paths=tuple(args.snapshot),
             minimum_events=minimum_events,
+            split_config=split,
         ),
     )
     print(
@@ -256,20 +272,12 @@ def _train(args: argparse.Namespace) -> int:
             )
         except RepositoryError as exc:
             raise ConfigurationError(str(exc)) from exc
-    split = TemporalSplitConfig(
-        min_train_rows=_optional_positive(args.min_train_rows, "min_train_rows", 60),
-        min_calibration_rows=_optional_positive(
-            args.min_calibration_rows, "min_calibration_rows", 20
-        ),
-        min_test_rows=_optional_positive(args.min_test_rows, "min_test_rows", 20),
-    )
     result = train_football_1x2_model(
         paths=runtime.paths,
         request=TrainRequest(
             feature_relative_directory=args.features,
             feature_manifest_checksum=args.checksum,
             random_seed=seed,
-            split_config=split,
         ),
     )
     print(
@@ -294,8 +302,8 @@ def _verify_model(args: argparse.Namespace) -> int:
     summary = {
         "relative_path": artifact.relative_path,
         "checksum_sha256": artifact.checksum_sha256,
-        "model_specification_version": artifact.model_specification_version,
-        "feature_specification_version": artifact.feature_specification_version,
+        "model_specification_version": artifact.specification.model_specification_version,
+        "feature_specification_version": artifact.specification.feature_specification_version,
         "trained_through_date": artifact.trained_through_date.isoformat(),
         "calibrated_through_date": artifact.calibrated_through_date.isoformat(),
         "calibration_temperature": artifact.temperature,
@@ -311,12 +319,22 @@ def _verify_model(args: argparse.Namespace) -> int:
 def _infer(args: argparse.Namespace) -> int:
     settings, paths = validate_configuration(config_path=args.config, env_file=args.env_file)
     del settings
-    payload = json.loads(Path(args.feature_row_json).read_text(encoding="utf-8"))
-    feature_names = tuple(payload["feature_names"])
-    feature_values = tuple(float(value) for value in payload["feature_values"])
-    specification = str(
-        payload.get("feature_specification_version", FOOTBALL_1X2_PREMATCH_FEATURES_V1)
-    )
+    try:
+        payload = json.loads(Path(args.feature_row_json).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FeatureError("feature row JSON is malformed or unreadable") from exc
+    if not isinstance(payload, dict):
+        raise FeatureError("feature row JSON must be an object")
+    try:
+        feature_names = tuple(payload["feature_names"])
+        feature_values = tuple(float(value) for value in payload["feature_values"])
+        specification = str(
+            payload.get("feature_specification_version", FOOTBALL_1X2_PREMATCH_FEATURES_V1)
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FeatureError(
+            "feature row JSON is missing required fields or has invalid values"
+        ) from exc
     if feature_names != FOOTBALL_1X2_FEATURE_NAMES_V1:
         raise FeatureError("feature_names must match the ordered v1 whitelist")
     probabilities = infer_from_feature_row(

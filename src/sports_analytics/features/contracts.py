@@ -1,8 +1,9 @@
-"""Reusable feature-engineering contracts for future sports and markets.
+"""Sport-agnostic feature-engineering contracts.
 
-This package currently ships one production feature specification:
-``football-1x2-prematch-features-v1``. Contracts stay sport-agnostic so later
-participant-scoped features can reuse the same artifact and metadata shapes.
+Shared contracts intentionally avoid sport-specific outcome labels, feature
+names, or competition semantics. Sport implementations provide concrete
+``FeatureSpecification`` and ``TargetSpecification`` values in their own
+packages.
 """
 
 from __future__ import annotations
@@ -17,59 +18,13 @@ FEATURE_MANIFEST_VERSION: Final[str] = "feature-manifest-v1"
 FEATURE_SCOPE_TEAM: Final[str] = "team"
 FEATURE_SCOPE_PARTICIPANT: Final[str] = "participant"
 
-FOOTBALL_1X2_PREMATCH_FEATURES_V1: Final[str] = "football-1x2-prematch-features-v1"
-
-#: Ordered model-feature whitelist. Never discover features by scanning numeric columns.
-FOOTBALL_1X2_FEATURE_NAMES_V1: Final[tuple[str, ...]] = (
-    "home_elo",
-    "away_elo",
-    "elo_diff",
-    "home_matches_played",
-    "away_matches_played",
-    "home_ppg_5",
-    "home_ppg_10",
-    "away_ppg_5",
-    "away_ppg_10",
-    "home_gf_pm_5",
-    "home_gf_pm_10",
-    "away_gf_pm_5",
-    "away_gf_pm_10",
-    "home_ga_pm_5",
-    "home_ga_pm_10",
-    "away_ga_pm_5",
-    "away_ga_pm_10",
-    "home_gd_pm_5",
-    "home_gd_pm_10",
-    "away_gd_pm_5",
-    "away_gd_pm_10",
-    "home_home_ppg_5",
-    "away_away_ppg_5",
-    "home_days_since_prev",
-    "away_days_since_prev",
-    "rest_day_diff",
-    "home_window5_available",
-    "home_window10_available",
-    "away_window5_available",
-    "away_window10_available",
-    "home_home_form_available",
-    "away_away_form_available",
-    "home_rest_available",
-    "away_rest_available",
+FEATURE_ARTIFACT_FILES: Final[frozenset[str]] = frozenset(
+    {"features.parquet", "targets.parquet", "folds.parquet", "manifest.json"}
 )
+FEATURE_CHECKSUM_SIDECAR: Final[str] = "manifest_checksum.sha256"
+PROBABILITY_SUM_TOLERANCE: Final[float] = 1e-9
 
-FOOTBALL_1X2_METADATA_COLUMNS: Final[tuple[str, ...]] = (
-    "canonical_event_id",
-    "competition_id",
-    "season_id",
-    "event_date",
-    "scheduled_start_utc",
-    "feature_cutoff_date",
-    "feature_specification_version",
-    "home_canonical_participant_id",
-    "away_canonical_participant_id",
-)
-
-#: Fields that must never appear in the model feature whitelist.
+#: Fields that must never appear in a model feature whitelist.
 FORBIDDEN_MODEL_FEATURE_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "home_score",
@@ -101,6 +56,39 @@ FORBIDDEN_MODEL_FEATURE_FIELDS: Final[frozenset[str]] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class OutcomeSpace:
+    """Ordered outcome labels for one supervised target space."""
+
+    ordered_labels: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.ordered_labels:
+            msg = "outcome space requires at least one ordered label"
+            raise FeatureError(msg)
+        if len(set(self.ordered_labels)) != len(self.ordered_labels):
+            msg = "outcome labels must be unique and ordered"
+            raise FeatureError(msg)
+
+    def index(self, label: str) -> int:
+        """Return the canonical index for ``label``."""
+        try:
+            return self.ordered_labels.index(label)
+        except ValueError as exc:
+            msg = f"unsupported outcome label: {label}"
+            raise FeatureError(msg) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class TargetSpecification:
+    """Versioned supervised target contract."""
+
+    specification_version: str
+    outcome_space: OutcomeSpace
+    target_column: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
 class FeatureSpecification:
     """Versioned description of one feature matrix contract."""
 
@@ -129,6 +117,15 @@ class FeatureSpecification:
 
 
 @dataclass(frozen=True, slots=True)
+class SupervisedExample:
+    """One labelled example for temporal validation and training."""
+
+    example_id: str
+    event_date: date
+    target_label: str
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotIdentity:
     """Immutable identity of one training input snapshot."""
 
@@ -137,9 +134,8 @@ class SnapshotIdentity:
     manifest_checksum_sha256: str
     schema_version: str
     schema_fingerprint_events: str
-    competition_id: str
-    season_id: str
-    season_label: str
+    scope_id: str
+    partition_label: str
     sport_code: str
     source_name: str
     event_row_count: int
@@ -160,27 +156,11 @@ class FeatureRowMetadata:
     away_canonical_participant_id: str
 
 
-def football_1x2_prematch_specification() -> FeatureSpecification:
-    """Return the v1 team-level football full-match 1X2 pre-match specification."""
-    return FeatureSpecification(
-        specification_version=FOOTBALL_1X2_PREMATCH_FEATURES_V1,
-        sport_code="football",
-        market_key="football.match-result.1x2.full-match",
-        feature_scope=FEATURE_SCOPE_TEAM,
-        ordered_feature_names=FOOTBALL_1X2_FEATURE_NAMES_V1,
-        metadata_columns=FOOTBALL_1X2_METADATA_COLUMNS,
-        description=(
-            "Team-level pre-match features for football full-match 1X2. "
-            "Participant-scoped features (players, lineups, injuries) are reserved "
-            "for a later specification and are not present in v1."
-        ),
-    )
-
-
 def validate_feature_vector(
     *,
     feature_names: tuple[str, ...],
     values: tuple[float, ...],
+    expected_names: tuple[str, ...],
     expected_specification_version: str,
     provided_specification_version: str,
 ) -> None:
@@ -191,7 +171,7 @@ def validate_feature_vector(
             f"expected {expected_specification_version}, got {provided_specification_version}"
         )
         raise FeatureError(msg)
-    if feature_names != FOOTBALL_1X2_FEATURE_NAMES_V1:
+    if feature_names != expected_names:
         msg = "feature names must match the ordered whitelist exactly"
         raise FeatureError(msg)
     if len(values) != len(feature_names):

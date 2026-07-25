@@ -4,30 +4,35 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from sports_analytics.core.exceptions import FeatureError
+from sports_analytics.core.exceptions import FeatureError, ModelError
 from sports_analytics.data.codec import (
     dumps_canonical_json,
     ensure_json_value,
     format_utc_timestamp,
-    utc_now,
 )
 from sports_analytics.data.types import JsonValue, validate_sha256_checksum
+from sports_analytics.evaluation.temporal import (
+    TemporalFold,
+    TemporalSplitConfig,
+    assign_fold_rows,
+    build_rolling_origin_folds,
+    fold_summaries,
+)
 from sports_analytics.features.contracts import (
+    FEATURE_CHECKSUM_SIDECAR,
     FEATURE_MANIFEST_VERSION,
-    FOOTBALL_1X2_FEATURE_NAMES_V1,
-    FOOTBALL_1X2_METADATA_COLUMNS,
-    FOOTBALL_1X2_PREMATCH_FEATURES_V1,
+    FeatureRowMetadata,
     SnapshotIdentity,
-    football_1x2_prematch_specification,
 )
 from sports_analytics.features.football.prematch import (
     ELO_CONFIG_VERSION,
@@ -41,7 +46,16 @@ from sports_analytics.features.football.prematch import (
     training_event_from_row,
     validate_training_events,
 )
+from sports_analytics.features.football.specification import (
+    FOOTBALL_1X2_FEATURE_NAMES_V1,
+    FOOTBALL_1X2_METADATA_COLUMNS,
+    FOOTBALL_1X2_OUTCOME_SPACE,
+    FOOTBALL_1X2_PREMATCH_FEATURES_V1,
+    football_1x2_prematch_specification,
+    football_1x2_target_specification,
+)
 from sports_analytics.ingestion.snapshot_specs import resolve_snapshot_suite
+from sports_analytics.models.identity import content_addressed_id, validate_artifact_id_override
 from sports_analytics.snapshots.parquet import file_sha256_and_size, write_parquet_file
 from sports_analytics.snapshots.paths import (
     is_absolute_path_text,
@@ -56,6 +70,22 @@ from sports_analytics.sports.football.markets import (
 )
 from sports_analytics.sports.football.schemas import FOOTBALL_CANONICAL_SCHEMA_VERSION
 from sports_analytics.sports.identifiers import SPORT_FOOTBALL
+
+FEATURE_PUBLISHED_AT_SIDECAR: str = "published_at.json"
+EXPECTED_DATASET_FILES: frozenset[str] = frozenset(
+    {"features.parquet", "targets.parquet", "folds.parquet"}
+)
+VALID_FOLD_REGIONS: frozenset[str] = frozenset({"train", "calibration", "test"})
+
+
+def _default_feature_split() -> TemporalSplitConfig:
+    return TemporalSplitConfig(
+        min_train_rows=30,
+        min_calibration_rows=10,
+        min_test_rows=10,
+        step_rows=10,
+        maximum_folds=8,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +118,10 @@ class BuiltFeatureArtifact:
     manifest_checksum_sha256: str
     feature_row_count: int
     vectors: tuple[FeatureVector, ...]
+    folds: tuple[TemporalFold, ...]
     snapshot_identities: tuple[SnapshotIdentity, ...]
     closing_quotes: tuple[ClosingMarketQuoteTriple, ...]
+    split_config: TemporalSplitConfig
 
 
 def load_finished_events_from_snapshots(
@@ -102,18 +134,10 @@ def load_finished_events_from_snapshots(
     tuple[SnapshotIdentity, ...],
     tuple[ClosingMarketQuoteTriple, ...],
 ]:
-    """Load finished canonical events from explicit immutable snapshot manifests.
-
-    Snapshot order does not affect the resulting feature rows: events are merged
-    and sorted deterministically. Mixed sports, mixed competitions, incompatible
-    schema versions, unresolved/source-scoped training rows, and conflicting
-    duplicate canonical events are rejected.
-    """
+    """Load finished canonical events from explicit immutable snapshot manifests."""
     if not relative_manifest_paths:
         msg = "training inputs must be explicit snapshot manifest paths"
         raise FeatureError(msg)
-    # Normalize ordering of input listing for identity recording, but never treat
-    # "latest" as implicit: every path must be supplied by the caller.
     identities: list[SnapshotIdentity] = []
     events: list[FinishedTrainingEvent] = []
     quotes: list[ClosingMarketQuoteTriple] = []
@@ -147,7 +171,6 @@ def load_finished_events_from_snapshots(
         partition_map = dict(verification.partition_keys)
         partition_competition = _require_partition(partition_map, "competition_id")
         season_label = _require_partition(partition_map, "season_label")
-        season_id = f"{partition_competition}:{season_label}"
         identities.append(
             SnapshotIdentity(
                 snapshot_id=verification.snapshot_id,
@@ -155,9 +178,8 @@ def load_finished_events_from_snapshots(
                 manifest_checksum_sha256=verification.manifest_checksum_sha256,
                 schema_version=verification.schema_version,
                 schema_fingerprint_events=events_fingerprint,
-                competition_id=partition_competition,
-                season_id=season_id,
-                season_label=season_label,
+                scope_id=partition_competition,
+                partition_label=season_label,
                 sport_code=SPORT_FOOTBALL,
                 source_name=verification.source_name,
                 event_row_count=verification.row_count("events"),
@@ -166,11 +188,10 @@ def load_finished_events_from_snapshots(
         for row in events_table.to_pylist():
             if str(row.get("status")) != EventStatus.FINISHED.value:
                 continue
-            # Canonical events.parquet never contains unresolved/source-scoped rows.
             events.append(training_event_from_row(row))
         quotes.extend(_extract_closing_market_averages(quotes_table))
 
-    competition_ids = {item.competition_id for item in identities}
+    competition_ids = {item.scope_id for item in identities}
     if len(competition_ids) != 1:
         msg = f"mixed competitions in snapshot inputs: {sorted(competition_ids)}"
         raise FeatureError(msg)
@@ -180,11 +201,10 @@ def load_finished_events_from_snapshots(
         raise FeatureError(msg)
 
     validated = validate_training_events(tuple(events))
-    # Deterministic quote order by event id.
     quote_by_event = {item.canonical_event_id: item for item in quotes}
     ordered_quotes = tuple(quote_by_event[event_id] for event_id in sorted(quote_by_event))
     ordered_identities = tuple(
-        sorted(identities, key=lambda item: (item.season_id, item.snapshot_id))
+        sorted(identities, key=lambda item: (item.partition_label, item.snapshot_id))
     )
     return validated, ordered_identities, ordered_quotes
 
@@ -194,11 +214,12 @@ def build_feature_artifact(
     features_root: Path,
     snapshots_directory: Path,
     relative_manifest_paths: tuple[str, ...],
+    split_config: TemporalSplitConfig | None = None,
     artifact_id: str | None = None,
-    generated_at: datetime | None = None,
+    published_at: datetime | None = None,
     minimum_events: int = 30,
 ) -> BuiltFeatureArtifact:
-    """Build and persist an immutable football 1X2 feature artifact."""
+    """Build and atomically publish an immutable football 1X2 feature artifact."""
     events, identities, quotes = load_finished_events_from_snapshots(
         snapshots_directory=snapshots_directory,
         relative_manifest_paths=relative_manifest_paths,
@@ -211,66 +232,29 @@ def build_feature_artifact(
         raise FeatureError(msg)
 
     vectors = generate_prematch_features(events)
-    specification = football_1x2_prematch_specification()
-    resolved_id = artifact_id or str(uuid4())
-    competition_id = identities[0].competition_id
-    relative_directory = (
-        f"football/{specification.specification_version}/{competition_id}/{resolved_id}"
-    ).replace("\\", "/")
-    if is_absolute_path_text(relative_directory):
-        msg = "feature artifact relative directory must not be absolute"
-        raise FeatureError(msg)
-    directory = resolve_under_root(
-        features_root,
-        relative_directory,
-        expect_file=False,
-        error_type=FeatureError,
+    split = split_config or _default_feature_split()
+    folds = build_rolling_origin_folds(
+        vectors,
+        outcome_space=FOOTBALL_1X2_OUTCOME_SPACE,
+        config=split,
     )
-    if directory.exists() and any(directory.iterdir()):
-        msg = f"feature artifact directory is not empty: {relative_directory}"
-        raise FeatureError(msg)
-    directory.mkdir(parents=True, exist_ok=True)
-
-    features_table = _features_table(vectors)
-    targets_table = _targets_table(vectors)
-    folds_table = _empty_folds_table()
-    write_parquet_file(directory / "features.parquet", features_table)
-    write_parquet_file(directory / "targets.parquet", targets_table)
-    write_parquet_file(directory / "folds.parquet", folds_table)
-
-    paths = FeatureArtifactPaths()
-    file_meta: dict[str, dict[str, JsonValue]] = {}
-    for filename in (
-        paths.features_filename,
-        paths.targets_filename,
-        paths.folds_filename,
-    ):
-        digest, size = file_sha256_and_size(directory / filename)
-        file_meta[filename] = {
-            "sha256": digest,
-            "byte_count": size,
-            "row_count": (
-                features_table.num_rows
-                if filename == paths.features_filename
-                else targets_table.num_rows
-                if filename == paths.targets_filename
-                else folds_table.num_rows
-            ),
-        }
-
-    timestamp = generated_at or utc_now()
-    manifest: dict[str, JsonValue] = {
-        "manifest_version": FEATURE_MANIFEST_VERSION,
-        "artifact_id": resolved_id,
-        "artifact_type": "football-1x2-feature-dataset",
+    specification = football_1x2_prematch_specification()
+    target_spec = football_1x2_target_specification()
+    competition_id = identities[0].scope_id
+    identity_payload: dict[str, JsonValue] = {
+        "input_snapshots": [
+            {
+                "relative_manifest_path": item.relative_manifest_path,
+                "manifest_checksum_sha256": item.manifest_checksum_sha256,
+                "snapshot_id": item.snapshot_id,
+            }
+            for item in identities
+        ],
         "feature_specification_version": specification.specification_version,
-        "feature_scope": specification.feature_scope,
-        "sport_code": specification.sport_code,
-        "market_key": specification.market_key,
-        "competition_id": competition_id,
-        "season_ids": [item.season_id for item in identities],
-        "ordered_feature_names": list(FOOTBALL_1X2_FEATURE_NAMES_V1),
-        "metadata_columns": list(FOOTBALL_1X2_METADATA_COLUMNS),
+        "target_specification_version": target_spec.specification_version,
+        "ordered_feature_names": list(specification.ordered_feature_names),
+        "ordered_outcome_labels": list(target_spec.outcome_space.ordered_labels),
+        "fold_configuration": ensure_json_value(split.to_json()),
         "elo_configuration": {
             "version": ELO_CONFIG_VERSION,
             "initial_rating": ELO_INITIAL_RATING,
@@ -278,68 +262,167 @@ def build_feature_artifact(
             "home_advantage": ELO_HOME_ADVANTAGE,
             "season_transition_policy": ELO_SEASON_TRANSITION_POLICY,
         },
-        "leakage_policy": {
-            "daily_batching": True,
-            "feature_cutoff": "event_date",
-            "same_date_isolation": True,
-            "odds_as_features": False,
-            "post_match_as_features": False,
-            "participant_features": False,
-        },
-        "input_snapshots": [
-            {
-                "snapshot_id": item.snapshot_id,
-                "relative_manifest_path": item.relative_manifest_path,
-                "manifest_checksum_sha256": item.manifest_checksum_sha256,
-                "schema_version": item.schema_version,
-                "schema_fingerprint_events": item.schema_fingerprint_events,
-                "competition_id": item.competition_id,
-                "season_id": item.season_id,
-                "season_label": item.season_label,
-                "sport_code": item.sport_code,
-                "source_name": item.source_name,
-                "event_row_count": item.event_row_count,
-            }
-            for item in identities
-        ],
-        "files": ensure_json_value(file_meta),
-        "row_counts": {
-            "features": features_table.num_rows,
-            "targets": targets_table.num_rows,
-            "folds": folds_table.num_rows,
-            "closing_quote_triples": len(quotes),
-        },
-        "closing_market_quotes": [
-            {
-                "canonical_event_id": item.canonical_event_id,
-                "home_odds": item.home_odds,
-                "draw_odds": item.draw_odds,
-                "away_odds": item.away_odds,
-            }
-            for item in quotes
-        ],
-        "generated_at_utc": format_utc_timestamp(timestamp),
-        "relative_directory": relative_directory,
-        "limitations": [
-            "Team-level historical football 1X2 baseline features only.",
-            "Does not use players, injuries, or lineups.",
-            "Does not use bookmaker odds as model features.",
-            "Not a betting recommendation engine.",
-        ],
+        "minimum_events": minimum_events,
     }
-    manifest_text = dumps_canonical_json(manifest) + "\n"
-    manifest_path = directory / paths.manifest_filename
-    manifest_path.write_text(manifest_text, encoding="utf-8", newline="\n")
-    manifest_checksum = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+    derived_id = content_addressed_id(
+        identity_type="football-1x2-feature-artifact",
+        payload=identity_payload,
+    )
+    try:
+        resolved_id = validate_artifact_id_override(
+            override=artifact_id,
+            derived=derived_id,
+            artifact_kind="feature",
+        )
+    except ModelError as exc:
+        raise FeatureError(str(exc)) from exc
+    relative_directory = (
+        f"football/{specification.specification_version}/{competition_id}/{resolved_id}"
+    ).replace("\\", "/")
+    if is_absolute_path_text(relative_directory):
+        msg = "feature artifact relative directory must not be absolute"
+        raise FeatureError(msg)
+    final_directory = resolve_under_root(
+        features_root,
+        relative_directory,
+        expect_file=False,
+        error_type=FeatureError,
+    )
+    if final_directory.exists() and any(final_directory.iterdir()):
+        msg = f"feature artifact directory is not empty: {relative_directory}"
+        raise FeatureError(msg)
+
+    features_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".feature-{resolved_id[:8]}-",
+            dir=str(features_root.resolve()),
+        )
+    )
+    try:
+        features_table = _features_table(vectors)
+        targets_table = _targets_table(vectors)
+        fold_rows = assign_fold_rows(vectors, folds)
+        folds_table = pa.Table.from_pylist(fold_rows, schema=_folds_schema())
+        write_parquet_file(temp_dir / "features.parquet", features_table)
+        write_parquet_file(temp_dir / "targets.parquet", targets_table)
+        write_parquet_file(temp_dir / "folds.parquet", folds_table)
+
+        paths = FeatureArtifactPaths()
+        file_meta: dict[str, dict[str, JsonValue]] = {}
+        for filename, table in (
+            (paths.features_filename, features_table),
+            (paths.targets_filename, targets_table),
+            (paths.folds_filename, folds_table),
+        ):
+            digest, size = file_sha256_and_size(temp_dir / filename)
+            file_meta[filename] = {
+                "sha256": digest,
+                "byte_count": size,
+                "row_count": table.num_rows,
+            }
+
+        manifest: dict[str, JsonValue] = {
+            "manifest_version": FEATURE_MANIFEST_VERSION,
+            "artifact_id": resolved_id,
+            "artifact_type": "football-1x2-feature-dataset",
+            "feature_specification_version": specification.specification_version,
+            "target_specification_version": target_spec.specification_version,
+            "feature_scope": specification.feature_scope,
+            "sport_code": specification.sport_code,
+            "market_key": specification.market_key,
+            "competition_id": competition_id,
+            "season_ids": [f"{item.scope_id}:{item.partition_label}" for item in identities],
+            "ordered_feature_names": list(FOOTBALL_1X2_FEATURE_NAMES_V1),
+            "ordered_outcome_labels": list(FOOTBALL_1X2_OUTCOME_SPACE.ordered_labels),
+            "metadata_columns": list(FOOTBALL_1X2_METADATA_COLUMNS),
+            "fold_configuration": ensure_json_value(split.to_json()),
+            "fold_summaries": ensure_json_value(fold_summaries(folds)),
+            "elo_configuration": identity_payload["elo_configuration"],
+            "leakage_policy": {
+                "daily_batching": True,
+                "feature_cutoff": "event_date",
+                "same_date_isolation": True,
+                "odds_as_features": False,
+                "post_match_as_features": False,
+                "participant_features": False,
+            },
+            "input_snapshots": [
+                {
+                    "snapshot_id": item.snapshot_id,
+                    "relative_manifest_path": item.relative_manifest_path,
+                    "manifest_checksum_sha256": item.manifest_checksum_sha256,
+                    "schema_version": item.schema_version,
+                    "schema_fingerprint_events": item.schema_fingerprint_events,
+                    "competition_id": item.scope_id,
+                    "season_id": f"{item.scope_id}:{item.partition_label}",
+                    "season_label": item.partition_label,
+                    "sport_code": item.sport_code,
+                    "source_name": item.source_name,
+                    "event_row_count": item.event_row_count,
+                }
+                for item in identities
+            ],
+            "files": ensure_json_value(file_meta),
+            "row_counts": {
+                "features": features_table.num_rows,
+                "targets": targets_table.num_rows,
+                "folds": folds_table.num_rows,
+                "closing_quote_triples": len(quotes),
+            },
+            "closing_market_quotes": [
+                {
+                    "canonical_event_id": item.canonical_event_id,
+                    "home_odds": item.home_odds,
+                    "draw_odds": item.draw_odds,
+                    "away_odds": item.away_odds,
+                }
+                for item in quotes
+            ],
+            "relative_directory": relative_directory,
+            "limitations": [
+                "Team-level historical football 1X2 baseline features only.",
+                "Does not use players, injuries, or lineups.",
+                "Does not use bookmaker odds as model features.",
+                "Not a betting recommendation engine.",
+            ],
+        }
+        manifest_text = dumps_canonical_json(manifest) + "\n"
+        manifest_path = temp_dir / paths.manifest_filename
+        manifest_path.write_text(manifest_text, encoding="utf-8", newline="\n")
+        manifest_checksum = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+        (temp_dir / FEATURE_CHECKSUM_SIDECAR).write_text(
+            f"{manifest_checksum}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        if published_at is not None:
+            published_payload: dict[str, JsonValue] = {
+                "published_at_utc": format_utc_timestamp(published_at)
+            }
+            (temp_dir / FEATURE_PUBLISHED_AT_SIDECAR).write_text(
+                dumps_canonical_json(published_payload) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        _verify_feature_directory(temp_dir, manifest=manifest, manifest_checksum=manifest_checksum)
+        final_directory.parent.mkdir(parents=True, exist_ok=True)
+        temp_dir.rename(final_directory)
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
     return BuiltFeatureArtifact(
         artifact_id=resolved_id,
-        directory=directory,
+        directory=final_directory,
         relative_directory=relative_directory,
         manifest_checksum_sha256=manifest_checksum,
         feature_row_count=len(vectors),
         vectors=vectors,
+        folds=folds,
         snapshot_identities=identities,
         closing_quotes=quotes,
+        split_config=split,
     )
 
 
@@ -348,25 +431,43 @@ def load_feature_artifact(
     features_root: Path,
     relative_directory: str,
     expected_manifest_checksum: str | None = None,
-) -> tuple[dict[str, Any], tuple[FeatureVector, ...], tuple[ClosingMarketQuoteTriple, ...]]:
+) -> tuple[
+    dict[str, Any],
+    tuple[FeatureVector, ...],
+    tuple[ClosingMarketQuoteTriple, ...],
+    tuple[TemporalFold, ...],
+]:
     """Load and verify a feature artifact from an explicit relative directory."""
     if is_absolute_path_text(relative_directory):
         msg = "feature artifact path must be relative under the features root"
         raise FeatureError(msg)
+    normalized = relative_directory.replace("\\", "/")
     directory = resolve_under_root(
         features_root,
-        relative_directory.replace("\\", "/"),
+        normalized,
         expect_file=False,
         error_type=FeatureError,
     )
     manifest_path = resolve_under_root(
         features_root,
-        f"{relative_directory.replace('\\', '/')}/manifest.json",
+        f"{normalized}/manifest.json",
         expect_file=True,
         error_type=FeatureError,
     )
+    if manifest_path.is_symlink():
+        msg = "feature artifact manifest must not be a symlink"
+        raise FeatureError(msg)
+    sidecar_path = directory / FEATURE_CHECKSUM_SIDECAR
+    if not sidecar_path.is_file():
+        msg = "feature artifact checksum sidecar is missing"
+        raise FeatureError(msg)
+    sidecar_digest = sidecar_path.read_text(encoding="utf-8").strip()
+    validate_sha256_checksum(sidecar_digest)
     raw = manifest_path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
+    if digest != sidecar_digest:
+        msg = "feature artifact manifest checksum sidecar mismatch"
+        raise FeatureError(msg)
     if expected_manifest_checksum is not None:
         expected = validate_sha256_checksum(expected_manifest_checksum)
         if digest != expected:
@@ -380,27 +481,11 @@ def load_feature_artifact(
     if not isinstance(manifest, dict):
         msg = "feature artifact manifest must be a JSON object"
         raise FeatureError(msg)
-    if manifest.get("feature_specification_version") != FOOTBALL_1X2_PREMATCH_FEATURES_V1:
-        msg = "unsupported feature specification version in artifact"
-        raise FeatureError(msg)
-    ordered_names = tuple(manifest.get("ordered_feature_names") or ())
-    if ordered_names != FOOTBALL_1X2_FEATURE_NAMES_V1:
-        msg = "feature artifact whitelist does not match football-1x2-prematch-features-v1"
-        raise FeatureError(msg)
-
-    for filename, meta in (manifest.get("files") or {}).items():
-        path = directory / str(filename)
-        if not path.is_file():
-            msg = f"feature artifact file missing: {filename}"
-            raise FeatureError(msg)
-        actual, _size = file_sha256_and_size(path)
-        expected = str(meta["sha256"])
-        if actual != expected:
-            msg = f"feature artifact checksum mismatch for {filename}"
-            raise FeatureError(msg)
+    _verify_feature_directory(directory, manifest=manifest, manifest_checksum=digest)
 
     features_table = _read_parquet(directory / "features.parquet")
     targets_table = _read_parquet(directory / "targets.parquet")
+    folds_table = _read_parquet(directory / "folds.parquet")
     if set(FOOTBALL_1X2_FEATURE_NAMES_V1).intersection(targets_table.column_names):
         msg = "targets dataset must not contain model feature columns"
         raise FeatureError(msg)
@@ -409,31 +494,34 @@ def load_feature_artifact(
         raise FeatureError(msg)
 
     features_rows = features_table.to_pylist()
+    targets_rows = targets_table.to_pylist()
     targets_by_id = {
-        str(row["canonical_event_id"]): str(row["result_code"]) for row in targets_table.to_pylist()
+        str(row["canonical_event_id"]): str(row["result_code"]) for row in targets_rows
     }
-    if len(features_rows) != len(targets_by_id):
-        msg = "features and targets row counts disagree"
+    feature_ids = [str(row["canonical_event_id"]) for row in features_rows]
+    target_ids = [str(row["canonical_event_id"]) for row in targets_rows]
+    if len(feature_ids) != len(set(feature_ids)):
+        msg = "features dataset contains duplicate canonical_event_id values"
+        raise FeatureError(msg)
+    if sorted(feature_ids) != sorted(target_ids):
+        msg = "feature and target canonical_event_id sets must match exactly"
         raise FeatureError(msg)
 
     vectors: list[FeatureVector] = []
     for row in features_rows:
         event_id = str(row["canonical_event_id"])
         result_code = targets_by_id[event_id]
-        event_date = _as_date(row["event_date"])
         scheduled = row.get("scheduled_start_utc")
         if hasattr(scheduled, "as_py"):
             scheduled = scheduled.as_py()
         features = {name: float(row[name]) for name in FOOTBALL_1X2_FEATURE_NAMES_V1}
-        from sports_analytics.features.contracts import FeatureRowMetadata
-
         vectors.append(
             FeatureVector(
                 metadata=FeatureRowMetadata(
                     canonical_event_id=event_id,
                     competition_id=str(row["competition_id"]),
                     season_id=str(row["season_id"]),
-                    event_date=event_date,
+                    event_date=_as_date(row["event_date"]),
                     scheduled_start_utc=scheduled,
                     feature_cutoff_date=_as_date(row["feature_cutoff_date"]),
                     feature_specification_version=str(row["feature_specification_version"]),
@@ -453,6 +541,7 @@ def load_feature_artifact(
             ),
         )
     )
+    folds = _folds_from_table(folds_table, known_event_ids=set(feature_ids))
     quotes = tuple(
         ClosingMarketQuoteTriple(
             canonical_event_id=str(item["canonical_event_id"]),
@@ -462,38 +551,168 @@ def load_feature_artifact(
         )
         for item in (manifest.get("closing_market_quotes") or [])
     )
-    return manifest, vectors_sorted, quotes
+    return manifest, vectors_sorted, quotes, folds
 
 
-def write_folds_parquet(
+def snapshot_feature_artifact_bytes(directory: Path) -> dict[str, bytes]:
+    """Return raw bytes for every authoritative file in a feature artifact."""
+    files = {
+        "manifest.json": (directory / "manifest.json").read_bytes(),
+        "manifest_checksum.sha256": (directory / FEATURE_CHECKSUM_SIDECAR).read_bytes(),
+        "features.parquet": (directory / "features.parquet").read_bytes(),
+        "targets.parquet": (directory / "targets.parquet").read_bytes(),
+        "folds.parquet": (directory / "folds.parquet").read_bytes(),
+    }
+    published = directory / FEATURE_PUBLISHED_AT_SIDECAR
+    if published.is_file():
+        files[FEATURE_PUBLISHED_AT_SIDECAR] = published.read_bytes()
+    return files
+
+
+def _verify_feature_directory(
     directory: Path,
     *,
-    fold_rows: list[dict[str, object]],
-    update_manifest: bool = True,
+    manifest: dict[str, Any],
+    manifest_checksum: str,
 ) -> None:
-    """Overwrite folds.parquet inside an existing feature artifact directory."""
-    table = pa.Table.from_pylist(fold_rows, schema=_folds_schema())
-    write_parquet_file(directory / "folds.parquet", table)
-    if not update_manifest:
-        return
-    manifest_path = directory / "manifest.json"
-    if not manifest_path.is_file():
-        return
-    raw = manifest_path.read_text(encoding="utf-8")
-    manifest = json.loads(raw)
-    digest, size = file_sha256_and_size(directory / "folds.parquet")
-    files = dict(manifest.get("files") or {})
-    files["folds.parquet"] = {
-        "sha256": digest,
-        "byte_count": size,
-        "row_count": table.num_rows,
-    }
-    manifest["files"] = files
-    row_counts = dict(manifest.get("row_counts") or {})
-    row_counts["folds"] = table.num_rows
-    manifest["row_counts"] = row_counts
-    text = dumps_canonical_json(manifest) + "\n"
-    manifest_path.write_text(text, encoding="utf-8", newline="\n")
+    if manifest.get("manifest_version") != FEATURE_MANIFEST_VERSION:
+        msg = "unsupported feature manifest version"
+        raise FeatureError(msg)
+    if manifest.get("feature_specification_version") != FOOTBALL_1X2_PREMATCH_FEATURES_V1:
+        msg = "unsupported feature specification version in artifact"
+        raise FeatureError(msg)
+    ordered_names = tuple(manifest.get("ordered_feature_names") or ())
+    if ordered_names != FOOTBALL_1X2_FEATURE_NAMES_V1:
+        msg = "feature artifact whitelist does not match football-1x2-prematch-features-v1"
+        raise FeatureError(msg)
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        msg = "feature artifact files section is malformed"
+        raise FeatureError(msg)
+    if set(files) != EXPECTED_DATASET_FILES:
+        msg = "feature artifact manifest must describe exactly features, targets, and folds"
+        raise FeatureError(msg)
+    for filename, meta in files.items():
+        if filename != Path(filename).name or filename in {".", ".."}:
+            msg = f"unsafe feature artifact filename: {filename}"
+            raise FeatureError(msg)
+        if ".." in Path(filename).parts:
+            msg = f"feature artifact filename must not traverse directories: {filename}"
+            raise FeatureError(msg)
+        if not isinstance(meta, dict):
+            msg = f"feature artifact file metadata is malformed for {filename}"
+            raise FeatureError(msg)
+        path = resolve_under_root(
+            directory,
+            filename,
+            expect_file=True,
+            error_type=FeatureError,
+        )
+        if path.is_symlink():
+            msg = f"feature artifact file must not be a symlink: {filename}"
+            raise FeatureError(msg)
+        actual, size = file_sha256_and_size(path)
+        expected = str(meta["sha256"])
+        if actual != expected:
+            msg = f"feature artifact checksum mismatch for {filename}"
+            raise FeatureError(msg)
+        expected_rows = int(meta["row_count"])
+        table = _read_parquet(path)
+        if table.num_rows != expected_rows:
+            msg = f"feature artifact row count mismatch for {filename}"
+            raise FeatureError(msg)
+        if int(meta["byte_count"]) != size:
+            msg = f"feature artifact byte count mismatch for {filename}"
+            raise FeatureError(msg)
+    row_counts = manifest.get("row_counts") or {}
+    if int(row_counts.get("features", -1)) != int(files["features.parquet"]["row_count"]):
+        msg = "feature row count mismatch between manifest sections"
+        raise FeatureError(msg)
+    if int(row_counts.get("targets", -1)) != int(files["targets.parquet"]["row_count"]):
+        msg = "target row count mismatch between manifest sections"
+        raise FeatureError(msg)
+    if int(row_counts.get("folds", -1)) != int(files["folds.parquet"]["row_count"]):
+        msg = "fold row count mismatch between manifest sections"
+        raise FeatureError(msg)
+    if manifest_checksum != hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest():
+        msg = "feature artifact manifest checksum verification failed"
+        raise FeatureError(msg)
+
+
+def _folds_from_table(
+    folds_table: pa.Table,
+    *,
+    known_event_ids: set[str],
+) -> tuple[TemporalFold, ...]:
+    rows = folds_table.to_pylist()
+    grouped: dict[str, dict[str, list[dict[str, object]]]] = {}
+    for row in rows:
+        fold_id = str(row["fold_id"])
+        region = str(row["region"])
+        event_id = str(row["canonical_event_id"])
+        if region not in VALID_FOLD_REGIONS:
+            msg = f"invalid fold region: {region}"
+            raise FeatureError(msg)
+        if event_id not in known_event_ids:
+            msg = f"fold references unknown event id: {event_id}"
+            raise FeatureError(msg)
+        grouped.setdefault(fold_id, {}).setdefault(region, []).append(row)
+    folds: list[TemporalFold] = []
+    for fold_id in sorted(grouped):
+        regions = grouped[fold_id]
+        if set(regions) != VALID_FOLD_REGIONS:
+            msg = f"fold {fold_id} is missing one or more required regions"
+            raise FeatureError(msg)
+        from sports_analytics.evaluation.temporal import FoldRegion, TemporalFold
+
+        train_region: FoldRegion | None = None
+        calibration_region: FoldRegion | None = None
+        test_region: FoldRegion | None = None
+        for region_name in ("train", "calibration", "test"):
+            region_rows = sorted(
+                regions[region_name],
+                key=lambda row: (
+                    _as_date(row["event_date"]).isoformat(),
+                    str(row["canonical_event_id"]),
+                ),
+            )
+            dates = [_as_date(row["event_date"]) for row in region_rows]
+            if dates != sorted(dates):
+                msg = f"fold {fold_id} region {region_name} is not chronological"
+                raise FeatureError(msg)
+            event_ids = tuple(str(row["canonical_event_id"]) for row in region_rows)
+            class_counts = {label: 0 for label in FOOTBALL_1X2_OUTCOME_SPACE.ordered_labels}
+            fold_region = FoldRegion(
+                name=region_name,
+                start_date=dates[0],
+                end_date=dates[-1],
+                event_ids=event_ids,
+                class_counts=class_counts,
+            )
+            if region_name == "train":
+                train_region = fold_region
+            elif region_name == "calibration":
+                calibration_region = fold_region
+            else:
+                test_region = fold_region
+        if train_region is None or calibration_region is None or test_region is None:
+            msg = f"fold {fold_id} is missing one or more required regions"
+            raise FeatureError(msg)
+        if not (
+            train_region.end_date < calibration_region.start_date
+            and calibration_region.end_date < test_region.start_date
+        ):
+            msg = f"fold {fold_id} regions overlap or violate chronological ordering"
+            raise FeatureError(msg)
+        folds.append(
+            TemporalFold(
+                fold_id=fold_id,
+                train=train_region,
+                calibration=calibration_region,
+                test=test_region,
+            )
+        )
+    return tuple(folds)
 
 
 def _features_table(vectors: tuple[FeatureVector, ...]) -> pa.Table:
@@ -525,10 +744,6 @@ def _targets_table(vectors: tuple[FeatureVector, ...]) -> pa.Table:
         for item in vectors
     ]
     return pa.Table.from_pylist(rows, schema=_targets_schema())
-
-
-def _empty_folds_table() -> pa.Table:
-    return pa.Table.from_pylist([], schema=_folds_schema())
 
 
 def _features_schema() -> pa.Schema:
@@ -637,13 +852,13 @@ def _as_date(value: object) -> date:
     raise FeatureError(msg)
 
 
-# Re-export for callers that verify snapshots through feature loading.
 __all__ = [
     "BuiltFeatureArtifact",
     "ClosingMarketQuoteTriple",
     "FeatureArtifactPaths",
+    "FEATURE_PUBLISHED_AT_SIDECAR",
     "build_feature_artifact",
     "load_feature_artifact",
     "load_finished_events_from_snapshots",
-    "write_folds_parquet",
+    "snapshot_feature_artifact_bytes",
 ]

@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from tests.helpers_training import make_club_id, synthetic_finished_events
 
 from sports_analytics.core.exceptions import FeatureError
-from sports_analytics.features.contracts import (
-    FOOTBALL_1X2_FEATURE_NAMES_V1,
-    FORBIDDEN_MODEL_FEATURE_FIELDS,
-    football_1x2_prematch_specification,
-)
+from sports_analytics.features.contracts import FORBIDDEN_MODEL_FEATURE_FIELDS
 from sports_analytics.features.football.prematch import (
     ELO_INITIAL_RATING,
     FinishedTrainingEvent,
     generate_prematch_features,
+)
+from sports_analytics.features.football.specification import (
+    FOOTBALL_1X2_FEATURE_NAMES_V1,
+    football_1x2_prematch_specification,
 )
 
 
@@ -62,7 +62,7 @@ def test_result_does_not_affect_same_event_features() -> None:
     assert vectors[0].features["home_elo"] == ELO_INITIAL_RATING
     assert vectors[0].features["away_elo"] == ELO_INITIAL_RATING
     assert vectors[0].features["home_matches_played"] == 0.0
-    assert vectors[0].features["home_window5_available"] == 0.0
+    assert vectors[0].features["home_window5_count"] == 0.0
 
 
 def test_same_date_matches_do_not_affect_each_other() -> None:
@@ -182,6 +182,47 @@ def test_cold_start_defaults() -> None:
     assert features["home_ppg_5"] == 0.0
     assert features["home_rest_available"] == 0.0
     assert features["home_days_since_prev"] == 7.0
+    assert features["home_window5_count"] == 0.0
+    assert features["home_window10_count"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("prior_matches", "expected_count"),
+    [(0, 0), (1, 1), (5, 5), (10, 5)],
+)
+def test_history_counts_are_capped(prior_matches: int, expected_count: int) -> None:
+    home = make_club_id("Northbridge FC")
+    away = make_club_id("Southport Athletic")
+    opponent = make_club_id("Eastmere United")
+    events: list[FinishedTrainingEvent] = []
+    current = date(2023, 8, 1)
+    for index in range(prior_matches):
+        events.append(
+            _event(
+                event_id=f"hist-{index}",
+                event_date=current,
+                home=home,
+                away=opponent,
+                home_score=1,
+                away_score=0,
+                result_code="home",
+            )
+        )
+        current += timedelta(days=7)
+    events.append(
+        _event(
+            event_id="target",
+            event_date=current,
+            home=home,
+            away=away,
+            home_score=1,
+            away_score=1,
+            result_code="draw",
+        )
+    )
+    vector = generate_prematch_features(tuple(events))[-1]
+    assert vector.features["home_window5_count"] == float(expected_count)
+    assert vector.features["home_window10_count"] == float(min(prior_matches, 10))
 
 
 def test_rejects_mixed_competitions() -> None:
