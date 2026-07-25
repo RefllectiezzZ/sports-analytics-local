@@ -74,23 +74,52 @@ def opportunity_identity_payload(opportunity: Opportunity) -> dict[str, JsonValu
         "dependency_keys": cast(list[JsonValue], sorted(opportunity.dependency_keys)),
         "participant_ids": cast(list[JsonValue], sorted(opportunity.participant_ids)),
         "dependency_metadata_complete": opportunity.dependency_metadata_complete,
+        "dependency_metadata_provenance": opportunity.dependency_metadata_provenance,
         "prediction_quality_passed": opportunity.prediction_quality_passed,
     }
 
 
 def derive_evaluation_id(
     *,
+    evaluation_version: str,
     prediction_id: str,
     quote_observation_id: str,
+    quote_series_id: str,
     selection_id: str,
+    source_name: str,
+    provider_type: str,
+    provider_id: str,
+    evaluation_mode: str,
+    decimal_odds: str,
+    model_probability: float,
+    raw_implied_probability: float,
+    complete_market_raw_total: float,
+    overround: float,
+    normalized_implied_probability: float,
+    edge: float,
+    expected_value: float,
 ) -> str:
-    """Derive one market-evaluation row identity."""
+    """Derive one market-evaluation row identity from material quote and formula content."""
     return content_addressed_id(
-        identity_type="market-evaluation-v1",
+        identity_type="market-evaluation-v2",
         payload={
+            "evaluation_version": evaluation_version,
             "prediction_id": prediction_id,
             "quote_observation_id": quote_observation_id,
+            "quote_series_id": quote_series_id,
             "selection_id": selection_id,
+            "source_name": source_name,
+            "provider_type": provider_type,
+            "provider_id": provider_id,
+            "evaluation_mode": evaluation_mode,
+            "decimal_odds": decimal_odds,
+            "model_probability": model_probability,
+            "raw_implied_probability": raw_implied_probability,
+            "complete_market_raw_total": complete_market_raw_total,
+            "overround": overround,
+            "normalized_implied_probability": normalized_implied_probability,
+            "edge": edge,
+            "expected_value": expected_value,
         },
     )
 
@@ -155,9 +184,11 @@ def build_opportunity_from_evaluation(
     dependency_keys: frozenset[str] | None = None,
     participant_ids: frozenset[str] | None = None,
     dependency_metadata_complete: bool = False,
+    dependency_metadata: object | None = None,
 ) -> Opportunity:
     """Construct one verified opportunity from a complete market evaluation."""
     from sports_analytics.opportunities.contracts import Opportunity
+    from sports_analytics.opportunities.dependency import SelectionDependencyMetadata
 
     prediction = evaluation.prediction
     quote = evaluation.quote
@@ -194,13 +225,20 @@ def build_opportunity_from_evaluation(
         validate_sha256_checksum(lineage.feature_manifest_checksum_sha256)
     except Exception as exc:
         raise OpportunityError("opportunity lineage checksum is malformed") from exc
-    keys = dependency_keys or frozenset(
-        {
-            f"sport:{value.selection.sport_code}",
-            f"event:{prediction.canonical_event_id}",
-        }
-    )
-    participants = participant_ids or frozenset()
+    metadata_provenance = ""
+    if isinstance(dependency_metadata, SelectionDependencyMetadata):
+        keys = dependency_metadata.dependency_keys
+        participants = dependency_metadata.participant_ids
+        dependency_metadata_complete = dependency_metadata.dependency_metadata_complete
+        metadata_provenance = dependency_metadata.metadata_provenance.value
+    else:
+        keys = dependency_keys or frozenset(
+            {
+                f"sport:{value.selection.sport_code}",
+                f"event:{prediction.canonical_event_id}",
+            }
+        )
+        participants = participant_ids or frozenset()
     payload: dict[str, JsonValue] = {
         "identity_version": OPPORTUNITY_IDENTITY_VERSION,
         "evaluation_version": evaluation.evaluation_version,
@@ -237,6 +275,7 @@ def build_opportunity_from_evaluation(
         "dependency_keys": cast(list[JsonValue], sorted(keys)),
         "participant_ids": cast(list[JsonValue], sorted(participants)),
         "dependency_metadata_complete": dependency_metadata_complete,
+        "dependency_metadata_provenance": metadata_provenance,
         "prediction_quality_passed": prediction.quality.production_eligible,
     }
     return Opportunity(
@@ -275,6 +314,7 @@ def build_opportunity_from_evaluation(
         dependency_keys=keys,
         participant_ids=participants,
         dependency_metadata_complete=dependency_metadata_complete,
+        dependency_metadata_provenance=metadata_provenance,
         prediction_quality_passed=prediction.quality.production_eligible,
     )
 

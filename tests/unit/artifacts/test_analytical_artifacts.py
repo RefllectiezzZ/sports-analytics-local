@@ -296,6 +296,8 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
         SettledOpportunity,
         SettlementResult,
     )
+    from sports_analytics.models.identity import content_addressed_id
+    from sports_analytics.opportunities.contracts import OpportunityDecision, OpportunityFilter
 
     opportunity = build_test_opportunity(
         "1",
@@ -303,12 +305,23 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
         start=datetime(2024, 2, 10, 15, tzinfo=UTC),
     )
     settled = SettledOpportunity(opportunity=opportunity, result=SettlementResult.WIN)
+    filters = OpportunityFilter()
+    assert opportunity.decision_as_of_utc is not None
+    strategy_id = "strategy-1"
+    bet_id = content_addressed_id(
+        identity_type="backtest-single-v1",
+        payload={
+            "strategy_id": strategy_id,
+            "fold_id": "fold-1",
+            "opportunity_id": opportunity.opportunity_id,
+        },
+    )
     result = BacktestResult(
         backtest_id="backtest-1",
         decision_run_id="decision-1",
         backtest_result_id="backtest-1",
         mode=BacktestMode.TIMESTAMPED_SYNTHETIC,
-        strategy_id="strategy-1",
+        strategy_id=strategy_id,
         folds=(
             BacktestFold(
                 fold_id="fold-1",
@@ -322,7 +335,7 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
         ),
         bets=(
             SettledBet(
-                bet_id="bet-1",
+                bet_id=bet_id,
                 fold_id="fold-1",
                 kind=BetKind.SINGLE,
                 opportunity_ids=(opportunity.opportunity_id,),
@@ -350,6 +363,16 @@ def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
         ),
         disclaimer="test",
         candidates=(settled,),
+        opportunity_decisions=(
+            OpportunityDecision(
+                opportunity_id=opportunity.opportunity_id,
+                filter_config_id=filters.filter_config_id,
+                decision_as_of_utc=opportunity.decision_as_of_utc,
+                eligible=True,
+                rejection_codes=(),
+                accepted_rank=1,
+            ),
+        ),
     )
     datasets = build_backtest_datasets(
         result=result,

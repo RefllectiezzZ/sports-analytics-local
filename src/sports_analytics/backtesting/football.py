@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import timedelta
 from decimal import Decimal
 
 from sports_analytics.backtesting.contracts import (
@@ -54,6 +53,8 @@ from sports_analytics.predictions.contracts import (
     SelectionProbability,
     build_market_prediction,
 )
+from sports_analytics.predictions.provenance import PredictionProvenance
+from sports_analytics.predictions.replay import derive_historical_replay_cutoff_utc
 from sports_analytics.sports.football.markets import match_result_1x2_selection
 from sports_analytics.value.contracts import (
     CompleteMarketQuote,
@@ -131,6 +132,23 @@ def run_football_1x2_closing_benchmark(
         )
         parameter_payload: dict[str, JsonValue] = {
             "fold_id": fold.fold_id,
+            "model_specification_version": FOOTBALL_1X2_LOGISTIC_MODEL_V1,
+            "feature_specification_version": FOOTBALL_1X2_PREMATCH_FEATURES_V1,
+            "feature_names": list(parameters.feature_names),
+            "outcome_labels": list(parameters.outcome_labels),
+            "logistic_configuration": {
+                "configuration_version": parameters.configuration.configuration_version,
+                "solver": parameters.configuration.solver,
+                "penalty": parameters.configuration.penalty,
+                "regularization_strength": parameters.configuration.regularization_strength,
+                "tolerance": parameters.configuration.tolerance,
+                "maximum_iterations": parameters.configuration.maximum_iterations,
+                "fit_intercept": parameters.configuration.fit_intercept,
+                "random_seed": parameters.configuration.random_seed,
+                "feature_scaler_policy": parameters.configuration.feature_scaler_policy,
+            },
+            "sklearn_version": parameters.sklearn_version,
+            "numpy_version": parameters.numpy_version,
             "coefficients": [list(item) for item in parameters.coefficients],
             "intercepts": list(parameters.intercepts),
             "scaler_mean": list(parameters.scaler_mean),
@@ -154,7 +172,7 @@ def run_football_1x2_closing_benchmark(
             if start is None:
                 continue
             quoted_events += 1
-            simulated_prediction_time = start - timedelta(microseconds=1)
+            replay_cutoff = derive_historical_replay_cutoff_utc(start)
             lineage = PredictionLineage(
                 model_artifact_id=model_id,
                 model_checksum_sha256=model_checksum,
@@ -179,8 +197,8 @@ def run_football_1x2_closing_benchmark(
             prediction = build_market_prediction(
                 canonical_event_id=vector.metadata.canonical_event_id,
                 event_start_utc=start,
-                predicted_at_utc=simulated_prediction_time,
-                feature_available_at_utc=simulated_prediction_time,
+                predicted_at_utc=replay_cutoff,
+                feature_available_at_utc=replay_cutoff,
                 lineage=lineage,
                 probabilities=selection_probabilities,
                 quality=PredictionQualityFlags(
@@ -190,6 +208,7 @@ def run_football_1x2_closing_benchmark(
                     sufficient_history=True,
                     data_quality_passed=False,
                 ),
+                provenance=PredictionProvenance.HISTORICAL_REPLAY,
             )
             complete_quote = _complete_quote(quote)
             try:
@@ -227,6 +246,7 @@ def run_football_1x2_closing_benchmark(
                 candidates=tuple(settled),
                 fold_model_id=model_id,
                 fold_model_checksum_sha256=model_checksum,
+                fold_model_payload=parameter_payload,
                 calibration_temperature=temperature,
                 random_seed=random_seed,
             )

@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from sports_analytics.opportunities.dependency import SelectionDependencyMetadata
 
 from sports_analytics.core.exceptions import OpportunityError, RepositoryError
 from sports_analytics.data.codec import format_utc_timestamp
@@ -85,6 +88,7 @@ class Opportunity:
     dependency_keys: frozenset[str] = frozenset()
     participant_ids: frozenset[str] = frozenset()
     dependency_metadata_complete: bool = False
+    dependency_metadata_provenance: str = ""
     prediction_quality_passed: bool = False
     evaluation_version: str = VALUE_EVALUATION_VERSION
 
@@ -354,20 +358,29 @@ class OpportunityDecision:
 
 def opportunities_from_evaluation(
     evaluation: MarketValueEvaluation,
+    *,
+    dependency_metadata_by_selection: dict[str, SelectionDependencyMetadata] | None = None,
 ) -> tuple[Opportunity, ...]:
     """Project every complete-market value row into a verified immutable opportunity."""
+    from sports_analytics.opportunities.dependency import SelectionDependencyMetadata
     from sports_analytics.opportunities.identity import build_opportunity_from_evaluation
 
     priced = {item.selection.selection_id: item for item in evaluation.quote.selections}
     opportunities: list[Opportunity] = []
     for value in evaluation.selections:
         quote_selection = priced[value.selection.selection_id]
+        metadata = None
+        if dependency_metadata_by_selection is not None:
+            raw = dependency_metadata_by_selection.get(value.selection.selection_id)
+            if isinstance(raw, SelectionDependencyMetadata):
+                metadata = raw
         opportunities.append(
             build_opportunity_from_evaluation(
                 evaluation,
                 value,
                 quote_observation_id=quote_selection.quote_observation_id,
                 quote_series_id=quote_selection.quote_series_id,
+                dependency_metadata=metadata,
             )
         )
     return tuple(opportunities)

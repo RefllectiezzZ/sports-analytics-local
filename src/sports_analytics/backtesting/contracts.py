@@ -186,6 +186,7 @@ class FoldBacktestInput:
     candidates: tuple[SettledOpportunity, ...]
     fold_model_id: str | None = None
     fold_model_checksum_sha256: str | None = None
+    fold_model_payload: dict[str, JsonValue] | None = None
     calibration_temperature: float | None = None
     random_seed: int | None = None
 
@@ -209,6 +210,7 @@ class SettledBet:
     model_probability: float = 0.0
     edge: float = 0.0
     expected_value: float = 0.0
+    combination_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

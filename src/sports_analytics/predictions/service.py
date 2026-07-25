@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from sports_analytics.core.exceptions import FeatureError, PredictionError
@@ -30,6 +30,7 @@ from sports_analytics.predictions.football import VerifiedFeatureRow, _model_inp
 from sports_analytics.predictions.provenance import (
     PredictionProvenance,
 )
+from sports_analytics.predictions.replay import derive_historical_replay_cutoff_utc
 from sports_analytics.sports.football.markets import match_result_1x2_selection
 
 
@@ -102,12 +103,13 @@ def generate_verified_football_1x2_prediction(
         raise PredictionError("historical replay requires persisted scheduled_start_utc")
     if request.event_start_utc != scheduled_start:
         raise PredictionError("event_start_utc must equal persisted scheduled_start_utc")
-    if request.predicted_at_utc >= scheduled_start:
-        raise PredictionError("prediction time must be strictly before stored event start")
+    replay_cutoff = derive_historical_replay_cutoff_utc(scheduled_start)
+    if request.predicted_at_utc != replay_cutoff:
+        raise PredictionError("predicted_at_utc must equal the derived historical replay cutoff")
     event_date = vector.metadata.event_date
     if artifact.calibrated_through_date >= event_date:
         raise PredictionError("model calibration history reaches replay event date")
-    feature_available_at = scheduled_start - timedelta(microseconds=1)
+    feature_available_at = replay_cutoff
     input_snapshots = _aligned_input_snapshots(
         artifact=artifact,
         manifest_snapshots=_feature_input_snapshots(manifest.get("input_snapshots")),
@@ -129,8 +131,9 @@ def generate_verified_football_1x2_prediction(
         artifact=artifact,
         feature_row=feature_row,
         event_start_utc=scheduled_start,
-        predicted_at_utc=request.predicted_at_utc,
-        feature_available_at_utc=feature_available_at,
+        predicted_at_utc=replay_cutoff,
+        feature_available_at_utc=replay_cutoff,
+        provenance=PredictionProvenance.HISTORICAL_REPLAY,
     )
 
 
@@ -141,8 +144,13 @@ def _historical_prediction(
     event_start_utc: datetime,
     predicted_at_utc: datetime,
     feature_available_at_utc: datetime,
+    provenance: PredictionProvenance,
 ) -> MarketPrediction:
     """Generate a verified but explicitly non-production-eligible historical prediction."""
+    if feature_available_at_utc > predicted_at_utc:
+        raise PredictionError("feature data was not available at prediction time")
+    if predicted_at_utc >= event_start_utc:
+        raise PredictionError("prediction time must be strictly before event start")
     model_lineage = artifact.feature_lineage
     if feature_row.feature_artifact_id != model_lineage.feature_artifact_id:
         raise PredictionError("feature artifact id does not match model lineage")
@@ -199,6 +207,7 @@ def _historical_prediction(
             sufficient_history=True,
             data_quality_passed=False,
         ),
+        provenance=provenance,
     )
 
 

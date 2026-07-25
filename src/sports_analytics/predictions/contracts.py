@@ -14,6 +14,7 @@ from sports_analytics.data.types import JsonValue, validate_identifier, validate
 from sports_analytics.features.contracts import PROBABILITY_SUM_TOLERANCE
 from sports_analytics.markets.contracts import MarketDefinition, MarketSelection
 from sports_analytics.models.identity import content_addressed_id
+from sports_analytics.predictions.provenance import PredictionProvenance
 from sports_analytics.sports.contracts import require_utc
 
 PREDICTION_SCHEMA_VERSION: Final[str] = "market-prediction-v1"
@@ -240,6 +241,7 @@ class MarketPrediction:
     probabilities: tuple[SelectionProbability, ...]
     ordered_selection_ids: tuple[str, ...] = ()
     quality: PredictionQualityFlags = PredictionQualityFlags()
+    provenance: PredictionProvenance = PredictionProvenance.SYNTHETIC_CONTRACT
 
     def __post_init__(self) -> None:
         if self.schema_version != PREDICTION_SCHEMA_VERSION:
@@ -291,6 +293,7 @@ class MarketPrediction:
             probabilities=self.probabilities,
             ordered_selection_ids=self.ordered_selection_ids,
             quality=self.quality,
+            provenance=self.provenance,
         )
         if self.prediction_id != expected_id:
             raise PredictionError("prediction_id does not match content-addressed identity")
@@ -327,6 +330,7 @@ def build_market_prediction(
     probabilities: tuple[SelectionProbability, ...],
     ordered_selection_space: tuple[CanonicalSelectionIdentity, ...] | None = None,
     quality: PredictionQualityFlags | None = None,
+    provenance: PredictionProvenance = PredictionProvenance.SYNTHETIC_CONTRACT,
 ) -> MarketPrediction:
     """Build a prediction with its deterministic content-addressed identity."""
     if ordered_selection_space is None:
@@ -350,6 +354,7 @@ def build_market_prediction(
         probabilities=normalized,
         ordered_selection_ids=selection_ids,
         quality=resolved_quality,
+        provenance=provenance,
     )
     return MarketPrediction(
         prediction_id=prediction_id,
@@ -362,6 +367,7 @@ def build_market_prediction(
         probabilities=normalized,
         ordered_selection_ids=selection_ids,
         quality=resolved_quality,
+        provenance=provenance,
     )
 
 
@@ -375,6 +381,7 @@ def derive_prediction_id(
     probabilities: tuple[SelectionProbability, ...],
     ordered_selection_ids: tuple[str, ...] | None = None,
     quality: PredictionQualityFlags | None = None,
+    provenance: PredictionProvenance = PredictionProvenance.SYNTHETIC_CONTRACT,
 ) -> str:
     """Derive identity from canonical selection probabilities and verified lineage."""
     declared_ids = ordered_selection_ids or tuple(
@@ -384,6 +391,7 @@ def derive_prediction_id(
     return content_addressed_id(
         identity_type=PREDICTION_SCHEMA_VERSION,
         payload={
+            "provenance": provenance.value,
             "canonical_event_id": canonical_event_id,
             "event_start_utc": format_utc_timestamp(
                 _utc(event_start_utc, field_name="event_start_utc")

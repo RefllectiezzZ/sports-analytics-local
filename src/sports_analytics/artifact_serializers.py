@@ -39,11 +39,14 @@ REJECTION_KIND_COMBINATION_BUILDER = "combination-builder"
 
 
 def serialize_prediction_row(
-    prediction: MarketPrediction, *, provenance: str
+    prediction: MarketPrediction,
+    *,
+    provenance: str | None = None,
 ) -> dict[str, JsonValue]:
     """Serialize one authoritative prediction dataset row."""
     lineage = prediction.lineage
     quality = prediction.quality
+    row_provenance = provenance or prediction.provenance.value
     return {
         "prediction_id": prediction.prediction_id,
         "schema_version": PREDICTIONS_SCHEMA_VERSION,
@@ -51,7 +54,7 @@ def serialize_prediction_row(
         "event_start_utc": format_utc_timestamp(prediction.event_start_utc),
         "predicted_at_utc": format_utc_timestamp(prediction.predicted_at_utc),
         "feature_available_at_utc": format_utc_timestamp(prediction.feature_available_at_utc),
-        "provenance": provenance,
+        "provenance": row_provenance,
         "ordered_selection_ids": list(prediction.ordered_selection_ids),
         "probabilities": [
             {
@@ -101,12 +104,26 @@ def serialize_market_evaluation_row(
     """Serialize one market evaluation row with enough data to recompute formulas."""
     prediction = evaluation.prediction
     quote = evaluation.quote
+    complete_market_raw_total = 1.0 + evaluation.overround
     evaluation_id = derive_evaluation_id(
+        evaluation_version=evaluation.evaluation_version,
         prediction_id=prediction.prediction_id,
         quote_observation_id=quote_observation_id,
+        quote_series_id=quote_series_id,
         selection_id=value.selection.selection_id,
+        source_name=quote.source_name,
+        provider_type=quote.provider_type,
+        provider_id=quote.provider_id,
+        evaluation_mode=evaluation.mode.value,
+        decimal_odds=format(value.decimal_odds, "f"),
+        model_probability=value.model_probability,
+        raw_implied_probability=value.raw_implied_probability,
+        complete_market_raw_total=complete_market_raw_total,
+        overround=evaluation.overround,
+        normalized_implied_probability=value.normalized_implied_probability,
+        edge=value.edge,
+        expected_value=value.expected_value,
     )
-    complete_market_raw_total = 1.0 + evaluation.overround
     return {
         "evaluation_id": evaluation_id,
         "schema_version": MARKET_EVALUATIONS_SCHEMA_VERSION,
@@ -137,6 +154,8 @@ def serialize_opportunity_row(opportunity: Opportunity) -> dict[str, JsonValue]:
     row = dict(payload)
     row["schema_version"] = OPPORTUNITIES_SCHEMA_VERSION
     row["opportunity_id"] = opportunity.opportunity_id
+    row["model_trained_through_date"] = opportunity.model_trained_through_date.isoformat()
+    row["model_calibrated_through_date"] = opportunity.model_calibrated_through_date.isoformat()
     return row
 
 
@@ -240,9 +259,15 @@ def serialize_combination_builder_rejection_row(
     }
 
 
-def serialize_settlement_row(bet: SettledBet) -> dict[str, JsonValue]:
+def serialize_settlement_row(
+    bet: SettledBet,
+    *,
+    strategy_id: str | None = None,
+    combination_id: str | None = None,
+) -> dict[str, JsonValue]:
     """Serialize one flat-unit settlement row."""
-    return {
+    returned_units = bet.profit_units + bet.stake_units
+    row: dict[str, JsonValue] = {
         "bet_id": bet.bet_id,
         "schema_version": SETTLEMENTS_SCHEMA_VERSION,
         "fold_id": bet.fold_id,
@@ -251,11 +276,17 @@ def serialize_settlement_row(bet: SettledBet) -> dict[str, JsonValue]:
         "decimal_odds": format(bet.decimal_odds, "f"),
         "result": bet.result.value,
         "stake_units": "1",
+        "returned_units": format(returned_units, "f"),
         "profit_units": format(bet.profit_units, "f"),
         "event_start_utc": (
             None if bet.event_start_utc is None else format_utc_timestamp(bet.event_start_utc)
         ),
     }
+    if strategy_id is not None:
+        row["strategy_id"] = strategy_id
+    if combination_id is not None:
+        row["combination_id"] = combination_id
+    return row
 
 
 def serialize_fold_metrics_row(
@@ -351,6 +382,10 @@ def derive_analysis_run_id(
     provenance: str,
 ) -> str:
     """Derive one content-addressed analysis run identity from inputs and strategy."""
+    canonical_markets = sorted(
+        markets,
+        key=lambda item: (item[0].prediction_id, item[1]),
+    )
     return content_addressed_id(
         identity_type="analysis-run-v1",
         payload={
@@ -363,7 +398,7 @@ def derive_analysis_run_id(
                     "prediction_id": prediction.prediction_id,
                     "quote_fingerprint": quote_fingerprint,
                 }
-                for prediction, quote_fingerprint in markets
+                for prediction, quote_fingerprint in canonical_markets
             ],
         },
     )
@@ -376,17 +411,33 @@ def quote_fingerprint_from_quote(quote: object) -> str:
     if not isinstance(quote, CompleteMarketQuote):
         raise TypeError("quote must be a CompleteMarketQuote")
     return content_addressed_id(
-        identity_type="complete-market-quote-v1",
+        identity_type="complete-market-quote-v2",
         payload={
             "canonical_event_id": quote.canonical_event_id,
+            "source_name": quote.source_name,
+            "provider_type": quote.provider_type,
             "provider_id": quote.provider_id,
+            "quote_phase": quote.quote_phase,
+            "quote_timestamp_precision": quote.quote_timestamp_precision,
             "source_observed_at_utc": format_utc_timestamp(quote.source_observed_at_utc),
             "quoted_at_utc": (
                 None if quote.quoted_at_utc is None else format_utc_timestamp(quote.quoted_at_utc)
             ),
+            "quote_valid_from_utc": (
+                None
+                if quote.quote_valid_from_utc is None
+                else format_utc_timestamp(quote.quote_valid_from_utc)
+            ),
+            "quote_valid_to_utc": (
+                None
+                if quote.quote_valid_to_utc is None
+                else format_utc_timestamp(quote.quote_valid_to_utc)
+            ),
             "selections": [
                 {
+                    "selection": item.selection.identity_payload(),
                     "selection_id": item.selection.selection_id,
+                    "quote_series_id": item.quote_series_id,
                     "quote_observation_id": item.quote_observation_id,
                     "decimal_odds": format(item.decimal_odds, "f"),
                 }
@@ -539,7 +590,14 @@ def build_backtest_datasets(
             )
             for item in result.combination_rejections
         ),
-        "settlements": tuple(serialize_settlement_row(bet) for bet in result.bets),
+        "settlements": tuple(
+            serialize_settlement_row(
+                bet,
+                strategy_id=result.strategy_id,
+                combination_id=bet.combination_id or None,
+            )
+            for bet in result.bets
+        ),
         "fold_metrics": tuple(fold_rows),
         "aggregate_metrics": (
             serialize_aggregate_metrics_row(

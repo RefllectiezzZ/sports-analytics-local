@@ -13,6 +13,7 @@ from sports_analytics.combinations.contracts import (
     classify_dependency,
     validate_combination,
 )
+from sports_analytics.combinations.evidence import CombinationEvidenceMode
 from sports_analytics.core.exceptions import CombinationError
 from sports_analytics.opportunities.contracts import Opportunity, opportunity_rank_key
 
@@ -60,6 +61,7 @@ def build_combinations(
     *,
     rules: CombinationRules,
     bounds: BuilderBounds | None = None,
+    evidence_mode: CombinationEvidenceMode = CombinationEvidenceMode.TRUSTED_VERIFIED,
 ) -> CombinationBuildResult:
     """Enumerate stable candidate tuples within explicit hard bounds."""
     limits = bounds or BuilderBounds()
@@ -88,7 +90,11 @@ def build_combinations(
                 break
             evaluated += 1
             ids = tuple(sorted(item.opportunity_id for item in leg_tuple))
-            early_reason = _early_rejection_reason(leg_tuple, rules=rules)
+            early_reason = _early_rejection_reason(
+                leg_tuple,
+                rules=rules,
+                evidence_mode=evidence_mode,
+            )
             if early_reason is not None:
                 rejected.append(CombinationRejection(opportunity_ids=ids, reason=early_reason))
                 continue
@@ -119,10 +125,16 @@ def _early_rejection_reason(
     legs: tuple[Opportunity, ...],
     *,
     rules: CombinationRules,
+    evidence_mode: CombinationEvidenceMode,
 ) -> str | None:
     """Reject unsafe or impossible candidates before full identity construction."""
     odds = Decimal("1")
     for leg in legs:
+        if (
+            evidence_mode is CombinationEvidenceMode.TRUSTED_VERIFIED
+            and not leg.prediction_quality_passed
+        ):
+            return "trusted combination construction rejects failed prediction quality"
         if leg.evaluation_mode.value != "live-safe":
             return "production combinations refuse closing-line historical benchmark quotes"
         if not rules.selection_minimum_odds <= leg.decimal_odds <= rules.selection_maximum_odds:

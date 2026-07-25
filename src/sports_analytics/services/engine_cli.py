@@ -59,6 +59,9 @@ from sports_analytics.services.backtesting import (
     FootballBacktestRequest,
     run_and_publish_football_closing_backtest,
 )
+from sports_analytics.services.combinations_trusted import (
+    build_combinations_from_analysis_artifact,
+)
 from sports_analytics.services.training import (
     FeatureBuildRequest,
     TrainRequest,
@@ -145,13 +148,22 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--build-combinations",
         metavar="JSON_PATH",
         default=None,
-        help="Build bounded combinations from explicit JSON opportunities and policy.",
+        help="Build bounded combinations from synthetic-contract JSON opportunities only.",
     )
     mode.add_argument(
         "--validate-combination",
         metavar="JSON_PATH",
         default=None,
-        help="Validate exact manual combination legs from explicit JSON.",
+        help="Validate one manual combination from synthetic-contract JSON only.",
+    )
+    mode.add_argument(
+        "--build-combinations-from-analysis",
+        metavar="JSON_PATH",
+        default=None,
+        help=(
+            "Build trusted combinations from verified analysis artifact opportunities "
+            "by artifact directory and checksum."
+        ),
     )
     mode.add_argument(
         "--run-backtest",
@@ -326,6 +338,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.build_combinations is not None:
             return _run_json_mode(args.build_combinations, build_combinations_from_json)
+        if args.build_combinations_from_analysis is not None:
+            return _build_combinations_from_analysis(args)
         if args.validate_combination is not None:
             return _run_json_mode(
                 args.validate_combination,
@@ -372,6 +386,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.generate_verified_predictions is not None,
         args.evaluate_opportunities is not None,
         args.build_combinations is not None,
+        args.build_combinations_from_analysis is not None,
         args.validate_combination is not None,
         args.run_backtest is not None,
         args.publish_analysis is not None,
@@ -827,6 +842,67 @@ def _generate_verified_predictions(args: argparse.Namespace) -> int:
         ),
     )
     print(dumps_canonical_json(ensure_json_value(prediction_to_json(prediction))))
+    return SUCCESS_EXIT
+
+
+def _build_combinations_from_analysis(args: argparse.Namespace) -> int:
+    runtime = bootstrap_runtime(
+        "engine",
+        config_path=args.config,
+        env_file=args.env_file,
+    )
+    normalized = args.build_combinations_from_analysis.replace("\\", "/")
+    path = Path(normalized)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigurationError(f"cannot read JSON input: {normalized}") from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            f"JSON input is malformed at line {exc.lineno}, column {exc.colno}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ConfigurationError("trusted combination request must be a JSON object")
+    relative_directory = payload.get("relative_directory")
+    expected_checksum = payload.get("checksum_sha256")
+    if type(relative_directory) is not str or not relative_directory:
+        raise ConfigurationError("relative_directory must be a non-empty JSON string")
+    if type(expected_checksum) is not str or not expected_checksum:
+        raise ConfigurationError("checksum_sha256 must be a non-empty JSON string")
+    rules_payload = payload.get("rules", {})
+    if not isinstance(rules_payload, dict):
+        raise ConfigurationError("rules must be a JSON object")
+    from sports_analytics.services.analysis_json import _rules
+
+    filter_config_id = payload.get("filter_config_id")
+    if filter_config_id is not None and (type(filter_config_id) is not str or not filter_config_id):
+        raise ConfigurationError("filter_config_id must be a non-empty JSON string when provided")
+    result = build_combinations_from_analysis_artifact(
+        paths=runtime.paths,
+        relative_directory=relative_directory,
+        expected_checksum=expected_checksum,
+        rules=_rules(rules_payload),
+        filter_config_id=filter_config_id,
+    )
+    print(
+        dumps_canonical_json(
+            ensure_json_value(
+                {
+                    "evidence_label": "trusted-verified-analysis-artifact",
+                    "combinations": [
+                        {
+                            "combination_id": item.combination_id,
+                            "opportunity_ids": [leg.opportunity_id for leg in item.legs],
+                            "expected_value": item.expected_value,
+                        }
+                        for item in result.combinations
+                    ],
+                    "rejection_count": len(result.rejections),
+                    "truncated": result.truncated,
+                }
+            )
+        )
+    )
     return SUCCESS_EXIT
 
 

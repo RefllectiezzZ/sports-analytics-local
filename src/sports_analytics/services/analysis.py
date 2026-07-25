@@ -17,6 +17,7 @@ from sports_analytics.artifacts import (
 )
 from sports_analytics.combinations.builder import CombinationRejection, build_combinations
 from sports_analytics.combinations.contracts import Combination, CombinationRules
+from sports_analytics.combinations.evidence import CombinationEvidenceMode
 from sports_analytics.core.exceptions import ArtifactError
 from sports_analytics.core.paths import RuntimePaths
 from sports_analytics.opportunities.contracts import (
@@ -25,6 +26,7 @@ from sports_analytics.opportunities.contracts import (
     filter_and_rank_opportunities,
     opportunities_from_evaluation,
 )
+from sports_analytics.opportunities.dependency import MarketDependencyMetadata
 from sports_analytics.predictions.contracts import MarketPrediction
 from sports_analytics.predictions.provenance import PredictionProvenance
 from sports_analytics.value.contracts import (
@@ -39,10 +41,11 @@ ANALYSIS_ARTIFACT_SCHEMA: str = "analysis-v2"
 
 @dataclass(frozen=True, slots=True)
 class AnalysisMarketInput:
-    """One verified prediction and complete quote pair."""
+    """One verified prediction and complete quote pair with optional dependency metadata."""
 
     prediction: MarketPrediction
     quote: CompleteMarketQuote
+    dependency_metadata: MarketDependencyMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,10 +79,17 @@ def publish_analysis_artifact(
     """Calculate, filter, combine, publish atomically, and reload one analysis artifact."""
     if not request.markets:
         raise ArtifactError("analysis publication requires at least one market pair")
+    if request.provenance is PredictionProvenance.HISTORICAL_REPLAY:
+        for market in request.markets:
+            if market.prediction.provenance is not PredictionProvenance.HISTORICAL_REPLAY:
+                raise ArtifactError(
+                    "historical-replay analysis requires verified historical predictions"
+                )
+    canonical_markets = _canonicalize_analysis_markets(request.markets)
     evaluations: list[MarketValueEvaluation] = []
     all_opportunities: list[Opportunity] = []
     predictions: list[MarketPrediction] = []
-    for market in request.markets:
+    for market in canonical_markets:
         if market.prediction.canonical_event_id != market.quote.canonical_event_id:
             raise ArtifactError("prediction and quote canonical_event_id must match")
         evaluation = evaluate_complete_market(
@@ -88,20 +98,34 @@ def publish_analysis_artifact(
             mode=request.mode,
         )
         evaluations.append(evaluation)
-        all_opportunities.extend(opportunities_from_evaluation(evaluation))
+        metadata_map = (
+            None
+            if market.dependency_metadata is None
+            else market.dependency_metadata.by_selection_id
+        )
+        all_opportunities.extend(
+            opportunities_from_evaluation(
+                evaluation,
+                dependency_metadata_by_selection=metadata_map,
+            )
+        )
         predictions.append(market.prediction)
     search = filter_and_rank_opportunities(tuple(all_opportunities), filters=request.filters)
     combinations: tuple[Combination, ...] = ()
     combination_rejections: tuple[CombinationRejection, ...] = ()
     builder_truncated = False
     if request.combination_rules is not None:
-        build = build_combinations(search.accepted, rules=request.combination_rules)
+        build = build_combinations(
+            search.accepted,
+            rules=request.combination_rules,
+            evidence_mode=_combination_evidence_mode(request.provenance),
+        )
         combinations = build.combinations
         combination_rejections = build.rejections
         builder_truncated = build.truncated
     market_fingerprints = tuple(
         (market.prediction, quote_fingerprint_from_quote(market.quote))
-        for market in request.markets
+        for market in canonical_markets
     )
     analysis_run_id = derive_analysis_run_id(
         markets=tuple((prediction, fingerprint) for prediction, fingerprint in market_fingerprints),
@@ -153,3 +177,25 @@ def publish_analysis_artifact(
         relative_directory=verified.relative_directory,
         analysis_run_id=analysis_run_id,
     )
+
+
+def _canonicalize_analysis_markets(
+    markets: tuple[AnalysisMarketInput, ...],
+) -> tuple[AnalysisMarketInput, ...]:
+    return tuple(
+        sorted(
+            markets,
+            key=lambda item: (
+                item.prediction.prediction_id,
+                quote_fingerprint_from_quote(item.quote),
+            ),
+        )
+    )
+
+
+def _combination_evidence_mode(
+    provenance: PredictionProvenance,
+) -> CombinationEvidenceMode:
+    if provenance is PredictionProvenance.SYNTHETIC_CONTRACT:
+        return CombinationEvidenceMode.SYNTHETIC_CONTRACT
+    return CombinationEvidenceMode.TRUSTED_VERIFIED

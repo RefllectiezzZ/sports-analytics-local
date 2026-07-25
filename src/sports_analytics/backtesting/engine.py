@@ -25,6 +25,7 @@ from sports_analytics.combinations.builder import (
     CombinationRejection,
     build_combinations,
 )
+from sports_analytics.combinations.evidence import CombinationEvidenceMode
 from sports_analytics.core.exceptions import BacktestError
 from sports_analytics.data.types import JsonValue
 from sports_analytics.models.identity import content_addressed_id
@@ -189,6 +190,7 @@ def run_backtest(
                 search.accepted,
                 rules=rules,
                 bounds=builder_bounds,
+                evidence_mode=CombinationEvidenceMode.SYNTHETIC_CONTRACT,
             )
             combination_rejections.extend(build.rejections)
             for combination in build.combinations:
@@ -228,6 +230,7 @@ def run_backtest(
                         model_probability=combination.joint_probability,
                         edge=sum(leg.edge for leg in combination.legs) / combination.leg_count,
                         expected_value=combination.expected_value,
+                        combination_id=combination.combination_id,
                     )
                 )
     bets.sort(
@@ -584,6 +587,7 @@ def _derive_backtest_result_id(
             "fold_model_checksum_sha256": item.fold_model_checksum_sha256,
             "calibration_temperature": item.calibration_temperature,
             "random_seed": item.random_seed,
+            "fold_model_payload": item.fold_model_payload,
         }
         for item in ordered_inputs
     ]

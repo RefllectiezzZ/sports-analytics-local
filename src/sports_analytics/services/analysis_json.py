@@ -22,6 +22,10 @@ from sports_analytics.combinations.contracts import (
     CombinationRules,
     validate_combination_manual,
 )
+from sports_analytics.combinations.evidence import (
+    SYNTHETIC_COMBINATION_EVIDENCE_LABEL,
+    CombinationEvidenceMode,
+)
 from sports_analytics.core.exceptions import ConfigurationError
 from sports_analytics.core.paths import RuntimePaths
 from sports_analytics.data.codec import format_utc_timestamp
@@ -32,6 +36,11 @@ from sports_analytics.opportunities.contracts import (
     OpportunityRankingMode,
     filter_and_rank_opportunities,
     opportunities_from_evaluation,
+)
+from sports_analytics.opportunities.dependency import (
+    DependencyMetadataProvenance,
+    MarketDependencyMetadata,
+    SelectionDependencyMetadata,
 )
 from sports_analytics.opportunities.identity import (
     OPPORTUNITY_IDENTITY_VERSION,
@@ -45,6 +54,7 @@ from sports_analytics.predictions.contracts import (
     PredictionLineage,
     PredictionQualityFlags,
     SelectionProbability,
+    build_market_prediction,
 )
 from sports_analytics.predictions.provenance import (
     PredictionProvenance,
@@ -141,7 +151,8 @@ def publish_analysis_with_paths(
     markets_payload = document.get("markets")
     if markets_payload is not None:
         markets = tuple(
-            _analysis_market_input(_mapping(item, "market")) for item in _array(document, "markets")
+            _analysis_market_input(_mapping(item, "market"), provenance=provenance)
+            for item in _array(document, "markets")
         )
         mode = _enum(
             QuoteEvaluationMode,
@@ -149,14 +160,24 @@ def publish_analysis_with_paths(
             "mode",
         )
     else:
-        prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
-        quote = _complete_quote_from_payload(_mapping(document.get("quote"), "quote"))
         mode = _enum(
             QuoteEvaluationMode,
             document.get("mode", QuoteEvaluationMode.LIVE_SAFE.value),
             "mode",
         )
-        markets = (AnalysisMarketInput(prediction=prediction, quote=quote),)
+        if provenance is PredictionProvenance.HISTORICAL_REPLAY:
+            raise ConfigurationError(
+                "historical-replay analysis requires verified prediction markets, not synthetic"
+            )
+        markets = (
+            _analysis_market_input(
+                {
+                    "prediction": document.get("prediction"),
+                    "quote": document.get("quote"),
+                },
+                provenance=provenance,
+            ),
+        )
     filters = _filters(_mapping(document.get("filters", {}), "filters"))
     rules_payload = document.get("combination_rules")
     combination_rules = (
@@ -185,15 +206,27 @@ def publish_analysis_with_paths(
 
 
 def build_combinations_from_json(payload: object) -> dict[str, JsonValue]:
-    """Build bounded combinations from explicit serialized opportunities."""
+    """Build bounded combinations from explicit synthetic-contract opportunity JSON."""
     document = _mapping(payload, "combination build request")
+    provenance = parse_prediction_provenance(
+        document.get("provenance", PredictionProvenance.SYNTHETIC_CONTRACT.value),
+        field_name="provenance",
+    )
+    if provenance is not PredictionProvenance.SYNTHETIC_CONTRACT:
+        raise ConfigurationError("raw combination JSON accepts only synthetic-contract provenance")
     opportunities = tuple(
-        _verified_opportunity(_mapping(item, "opportunity"))
+        _verified_opportunity(_opportunity_entry(item))
         for item in _array(document, "opportunities")
     )
     rules = _rules(_mapping(document.get("rules", {}), "rules"))
-    result = build_combinations(opportunities, rules=rules)
+    result = build_combinations(
+        opportunities,
+        rules=rules,
+        evidence_mode=CombinationEvidenceMode.SYNTHETIC_CONTRACT,
+    )
     return {
+        "evidence_label": SYNTHETIC_COMBINATION_EVIDENCE_LABEL,
+        "provenance": provenance.value,
         "combinations": [_combination_json(item) for item in result.combinations],
         "rejections": [
             {"opportunity_ids": list(item.opportunity_ids), "reason": item.reason}
@@ -206,17 +239,27 @@ def build_combinations_from_json(payload: object) -> dict[str, JsonValue]:
 
 
 def validate_combination_from_json(payload: object) -> dict[str, JsonValue]:
-    """Validate one exact manually selected leg set."""
+    """Validate one exact manually selected leg set from synthetic-contract JSON."""
     document = _mapping(payload, "manual combination request")
+    provenance = parse_prediction_provenance(
+        document.get("provenance", PredictionProvenance.SYNTHETIC_CONTRACT.value),
+        field_name="provenance",
+    )
+    if provenance is not PredictionProvenance.SYNTHETIC_CONTRACT:
+        raise ConfigurationError(
+            "raw combination validation accepts only synthetic-contract provenance"
+        )
     result = validate_combination_manual(
         tuple(
-            _verified_opportunity(_mapping(item, "opportunity"))
+            _verified_opportunity(_opportunity_entry(item))
             for item in _array(document, "opportunities")
         ),
         rules=_rules(_mapping(document.get("rules", {}), "rules")),
     )
     if result.combination is None:
         return {
+            "evidence_label": SYNTHETIC_COMBINATION_EVIDENCE_LABEL,
+            "provenance": provenance.value,
             "eligible": False,
             "rejection_reasons": list(result.rejection_reasons),
             "dependencies": [
@@ -301,10 +344,135 @@ def run_backtest_from_json(payload: object) -> dict[str, JsonValue]:
     }
 
 
-def _analysis_market_input(document: dict[str, object]) -> AnalysisMarketInput:
-    prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
+def _analysis_market_input(
+    document: dict[str, object],
+    *,
+    provenance: PredictionProvenance,
+) -> AnalysisMarketInput:
+    if provenance is PredictionProvenance.HISTORICAL_REPLAY:
+        prediction = _verified_prediction_row(_mapping(document.get("prediction"), "prediction"))
+    else:
+        prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
     quote = _complete_quote_from_payload(_mapping(document.get("quote"), "quote"))
-    return AnalysisMarketInput(prediction=prediction, quote=quote)
+    metadata_payload = document.get("dependency_metadata")
+    dependency_metadata = None
+    if metadata_payload is not None:
+        dependency_metadata = _dependency_metadata_from_payload(
+            _mapping(metadata_payload, "dependency_metadata"),
+            provenance=provenance,
+        )
+    return AnalysisMarketInput(
+        prediction=prediction,
+        quote=quote,
+        dependency_metadata=dependency_metadata,
+    )
+
+
+def _verified_prediction_row(document: dict[str, object]) -> MarketPrediction:
+    provenance = parse_prediction_provenance(
+        document.get("provenance", PredictionProvenance.HISTORICAL_REPLAY.value),
+        field_name="provenance",
+    )
+    if provenance is not PredictionProvenance.HISTORICAL_REPLAY:
+        raise ConfigurationError("verified prediction row requires historical-replay provenance")
+    lineage_payload = _mapping(document.get("lineage"), "lineage")
+    quality_payload = _mapping(document.get("quality", {}), "quality")
+    raw_probabilities = _array(document, "probabilities")
+    probabilities = tuple(
+        SelectionProbability(
+            selection=_selection_from_probability_item(_mapping(item, "probability selection")),
+            probability=_number(_mapping(item, "probability selection"), "probability"),
+        )
+        for item in raw_probabilities
+    )
+    return build_market_prediction(
+        canonical_event_id=_string(document, "canonical_event_id"),
+        event_start_utc=_datetime(document, "event_start_utc"),
+        predicted_at_utc=_datetime(document, "predicted_at_utc"),
+        feature_available_at_utc=_datetime(document, "feature_available_at_utc"),
+        lineage=_lineage_from_payload(lineage_payload),
+        probabilities=probabilities,
+        quality=PredictionQualityFlags(
+            calibrated=_boolean(quality_payload.get("calibrated", False), "calibrated"),
+            model_artifact_verified=_boolean(
+                quality_payload.get("model_artifact_verified", False),
+                "model_artifact_verified",
+            ),
+            feature_artifact_verified=_boolean(
+                quality_payload.get("feature_artifact_verified", False),
+                "feature_artifact_verified",
+            ),
+            sufficient_history=_boolean(
+                quality_payload.get("sufficient_history", False),
+                "sufficient_history",
+            ),
+            data_quality_passed=_boolean(
+                quality_payload.get("data_quality_passed", False),
+                "data_quality_passed",
+            ),
+        ),
+        provenance=provenance,
+    )
+
+
+def _dependency_metadata_from_payload(
+    document: dict[str, object],
+    *,
+    provenance: PredictionProvenance,
+) -> MarketDependencyMetadata:
+    if provenance is not PredictionProvenance.SYNTHETIC_CONTRACT:
+        raise ConfigurationError("explicit dependency metadata is synthetic-contract only")
+    by_selection: dict[str, SelectionDependencyMetadata] = {}
+    for item in _array(document, "selections"):
+        payload = _mapping(item, "dependency metadata selection")
+        selection_id = _string(payload, "selection_id")
+        by_selection[selection_id] = SelectionDependencyMetadata(
+            selection_id=selection_id,
+            dependency_keys=frozenset(_string_array(payload.get("dependency_keys", []))),
+            participant_ids=frozenset(_string_array(payload.get("participant_ids", []))),
+            dependency_metadata_complete=_boolean(
+                payload.get("dependency_metadata_complete", False),
+                "dependency_metadata_complete",
+            ),
+            metadata_provenance=DependencyMetadataProvenance.SYNTHETIC_CONTRACT,
+        )
+    return MarketDependencyMetadata(by_selection_id=by_selection)
+
+
+def _lineage_from_payload(lineage_payload: dict[str, object]) -> PredictionLineage:
+    return PredictionLineage(
+        model_artifact_id=_string(lineage_payload, "model_artifact_id"),
+        model_checksum_sha256=_string(lineage_payload, "model_checksum_sha256"),
+        model_specification_version=_string(lineage_payload, "model_specification_version"),
+        feature_artifact_id=_string(lineage_payload, "feature_artifact_id"),
+        feature_manifest_checksum_sha256=_string(
+            lineage_payload,
+            "feature_manifest_checksum_sha256",
+        ),
+        feature_specification_version=_string(lineage_payload, "feature_specification_version"),
+        feature_row_id=_string(lineage_payload, "feature_row_id"),
+        trained_through_date=_date(lineage_payload, "trained_through_date"),
+        calibrated_through_date=_date(lineage_payload, "calibrated_through_date"),
+        input_snapshots=tuple(
+            PredictionInputSnapshot(
+                snapshot_id=_string(_mapping(item, "input snapshot"), "snapshot_id"),
+                manifest_checksum_sha256=_string(
+                    _mapping(item, "input snapshot"),
+                    "manifest_checksum_sha256",
+                ),
+                schema_version=_string(_mapping(item, "input snapshot"), "schema_version"),
+                source_name=_string(_mapping(item, "input snapshot"), "source_name"),
+            )
+            for item in _array(lineage_payload, "input_snapshots", default=[])
+        ),
+    )
+
+
+def _selection_from_probability_item(document: dict[str, object]) -> CanonicalSelectionIdentity:
+    selection_payload = document.get("selection")
+    if isinstance(selection_payload, dict):
+        return _selection(selection_payload)
+    return _selection(document)
 
 
 def _complete_quote_from_payload(quote_payload: dict[str, object]) -> CompleteMarketQuote:
@@ -415,6 +583,12 @@ def _verified_opportunity(document: dict[str, object]) -> Opportunity:
     return opportunity
 
 
+def _opportunity_entry(item: object) -> dict[str, object]:
+    entry = _mapping(item, "opportunity entry")
+    payload = entry.get("opportunity", entry)
+    return _mapping(payload, "opportunity")
+
+
 def _selection(document: dict[str, object]) -> CanonicalSelectionIdentity:
     line_value = document.get("line_value")
     return CanonicalSelectionIdentity(
@@ -501,6 +675,11 @@ def _opportunity(document: dict[str, object]) -> Opportunity:
             document.get("dependency_metadata_complete", False),
             "dependency_metadata_complete",
         ),
+        "dependency_metadata_provenance": (
+            ""
+            if document.get("dependency_metadata_provenance") in {None, ""}
+            else _string(document, "dependency_metadata_provenance")
+        ),
         "prediction_quality_passed": _boolean(
             document.get("prediction_quality_passed", False),
             "prediction_quality_passed",
@@ -548,6 +727,11 @@ def _opportunity(document: dict[str, object]) -> Opportunity:
         dependency_metadata_complete=_boolean(
             document.get("dependency_metadata_complete", False),
             "dependency_metadata_complete",
+        ),
+        dependency_metadata_provenance=(
+            ""
+            if document.get("dependency_metadata_provenance") in {None, ""}
+            else _string(document, "dependency_metadata_provenance")
         ),
         prediction_quality_passed=_boolean(
             document.get("prediction_quality_passed", False),

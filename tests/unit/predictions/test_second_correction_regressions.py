@@ -42,6 +42,11 @@ from sports_analytics.core.settings import load_settings
 from sports_analytics.evaluation.temporal import TemporalSplitConfig
 from sports_analytics.features.football.datasets import load_feature_artifact
 from sports_analytics.opportunities.contracts import Opportunity, OpportunityFilter
+from sports_analytics.opportunities.dependency import (
+    DependencyMetadataProvenance,
+    MarketDependencyMetadata,
+    SelectionDependencyMetadata,
+)
 from sports_analytics.opportunities.identity import (
     derive_opportunity_id,
     opportunity_identity_payload,
@@ -57,6 +62,7 @@ from sports_analytics.predictions.provenance import (
     PredictionProvenance,
     parse_prediction_provenance,
 )
+from sports_analytics.predictions.replay import derive_historical_replay_cutoff_utc
 from sports_analytics.predictions.service import (
     VerifiedPredictionRequest,
     generate_verified_football_1x2_prediction,
@@ -179,7 +185,7 @@ def test_historical_feature_row_cannot_be_relabelled_with_future_start(tmp_path:
                 feature_manifest_checksum_sha256=artifact.manifest_checksum_sha256,
                 canonical_event_id=vector.metadata.canonical_event_id,
                 event_start_utc=event_start + timedelta(days=1),
-                predicted_at_utc=event_start - timedelta(hours=2),
+                predicted_at_utc=derive_historical_replay_cutoff_utc(event_start),
                 provenance=PredictionProvenance.HISTORICAL_REPLAY,
             ),
         )
@@ -393,13 +399,48 @@ def test_combination_rejection_rows_publish_and_reload(tmp_path: Path) -> None:
     validate_cross_dataset_integrity(dataset_map)
 
 
+def _dependency_metadata_for_opportunity(
+    opportunity: Opportunity,
+    *,
+    event_key: str,
+    participant: str,
+) -> MarketDependencyMetadata:
+    selection_id = opportunity.selection.selection_id
+    return MarketDependencyMetadata(
+        by_selection_id={
+            selection_id: SelectionDependencyMetadata(
+                selection_id=selection_id,
+                dependency_keys=frozenset(
+                    {
+                        f"event:{event_key}",
+                        f"sport:{opportunity.selection.sport_code}",
+                    }
+                ),
+                participant_ids=frozenset({participant}),
+                dependency_metadata_complete=True,
+                metadata_provenance=DependencyMetadataProvenance.SYNTHETIC_CONTRACT,
+            )
+        }
+    )
+
+
 def test_multi_event_analysis_publication(tmp_path: Path) -> None:
     paths = _runtime(tmp_path)
-    first = build_test_opportunity("1", event_id="event-1", start=START)
+    first = build_test_opportunity(
+        "1",
+        event_id="event-1",
+        start=START,
+        quoted=START - timedelta(hours=2),
+        predicted_at_utc=START - timedelta(hours=3),
+        source_observed_at_utc=START - timedelta(hours=1),
+    )
     second = build_test_opportunity(
         "2",
         event_id="event-2",
         start=START + timedelta(days=1),
+        quoted=START - timedelta(hours=2),
+        predicted_at_utc=START - timedelta(hours=3),
+        source_observed_at_utc=START - timedelta(hours=1),
         selection=basketball_selection(
             sport_code="tennis",
             market_key="tennis.match-winner.full-match",
@@ -413,10 +454,20 @@ def test_multi_event_analysis_publication(tmp_path: Path) -> None:
                 AnalysisMarketInput(
                     prediction=_prediction_from_opportunity(first),
                     quote=_quote_from_opportunity(first),
+                    dependency_metadata=_dependency_metadata_for_opportunity(
+                        first,
+                        event_key="event-1",
+                        participant="participant-event-1",
+                    ),
                 ),
                 AnalysisMarketInput(
                     prediction=_prediction_from_opportunity(second),
                     quote=_quote_from_opportunity(second),
+                    dependency_metadata=_dependency_metadata_for_opportunity(
+                        second,
+                        event_key="event-2",
+                        participant="participant-event-2",
+                    ),
                 ),
             ),
             mode=QuoteEvaluationMode.LIVE_SAFE,
@@ -439,6 +490,15 @@ def test_multi_event_analysis_publication(tmp_path: Path) -> None:
     )
     event_ids = {row["canonical_event_id"] for row in loaded.dataset("predictions").rows}
     assert event_ids == {"event-1", "event-2"}
+    combinations = loaded.dataset("combinations").rows
+    assert len(combinations) >= 1
+    opportunity_rows = {row["opportunity_id"]: row for row in loaded.dataset("opportunities").rows}
+    for combination in combinations:
+        leg_sports = {
+            opportunity_rows[opportunity_id]["selection"]["sport_code"]
+            for opportunity_id in combination["opportunity_ids"]
+        }
+        assert len(leg_sports) >= 2
 
 
 def test_different_filters_produce_different_analysis_paths(tmp_path: Path) -> None:
@@ -651,7 +711,7 @@ def test_cli_historical_replay_publication_workflow(tmp_path: Path) -> None:
     paths, artifact, trained, vector = _trained_fixture(tmp_path)
     event_start = vector.metadata.scheduled_start_utc
     assert event_start is not None
-    predicted_at = event_start - timedelta(hours=2)
+    predicted_at = derive_historical_replay_cutoff_utc(event_start)
     request_path = tmp_path / "verified-request.json"
     request_path.write_text(
         json.dumps(

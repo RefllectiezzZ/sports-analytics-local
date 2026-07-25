@@ -218,7 +218,7 @@ def test_prediction_probability_outside_unit_interval_rejected() -> None:
 
 
 def test_orphan_decisions_rejected_by_cross_dataset_integrity() -> None:
-    with pytest.raises(ArtifactError, match="orphan opportunity decision"):
+    with pytest.raises(ArtifactError, match="opportunity decisions must cover every opportunity"):
         validate_cross_dataset_integrity(
             {
                 "predictions": ({"prediction_id": "prediction-1"},),
@@ -327,6 +327,7 @@ def test_formula_inconsistent_settlement_rejected() -> None:
         "decimal_odds": "2.0",
         "result": "win",
         "stake_units": "1",
+        "returned_units": "0.5",
         "profit_units": "0.5",
     }
     with pytest.raises(ArtifactError, match="inconsistent"):
@@ -747,13 +748,15 @@ def test_verified_model_inference_produces_complete_prediction_record(tmp_path: 
         expected_manifest_checksum=artifact.manifest_checksum_sha256,
     )
 
+    from sports_analytics.predictions.replay import derive_historical_replay_cutoff_utc
+
     vectors_with_start = [item for item in vectors if item.metadata.scheduled_start_utc is not None]
     if not vectors_with_start:
         pytest.skip("synthetic fixture lacks scheduled_start_utc required for historical replay")
     vector = max(vectors_with_start, key=lambda item: item.metadata.event_date)
     event_start = vector.metadata.scheduled_start_utc
     assert event_start is not None
-    predicted_at = event_start - timedelta(hours=2)
+    predicted_at = derive_historical_replay_cutoff_utc(event_start)
     prediction = generate_verified_football_1x2_prediction(
         paths=paths,
         request=VerifiedPredictionRequest(
