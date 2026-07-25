@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -12,6 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from sports_analytics.core.exceptions import SnapshotIntegrityError
+from sports_analytics.snapshots.paths import is_absolute_path_text
 from sports_analytics.sports.football.contracts import CANONICAL_DATASETS, PARQUET_FILENAMES
 from sports_analytics.sports.football.normalization import (
     CompetitionRecord,
@@ -208,36 +210,81 @@ def verify_parquet_file(path: Path, *, expected_schema: pa.Schema, expected_rows
     if not path.is_file():
         msg = f"parquet file missing: {path.name}"
         raise SnapshotIntegrityError(msg)
+    parquet_file: Any | None = None
     try:
-        table = pq.read_table(path)
+        parquet_file = pq.ParquetFile(path)
+        table = parquet_file.read()
+        file_metadata = parquet_file.metadata
     except Exception as exc:  # noqa: BLE001 - corrupt files become integrity errors
         msg = f"failed to read parquet file {path.name}"
         raise SnapshotIntegrityError(msg) from exc
+    finally:
+        if parquet_file is not None:
+            close = getattr(parquet_file, "close", None)
+            if callable(close):
+                close()
+
+    _reject_disallowed_metadata(path.name, table.schema.metadata)
+    parquet_metadata = getattr(file_metadata, "metadata", None)
+    if isinstance(parquet_metadata, dict):
+        _reject_disallowed_metadata(path.name, parquet_metadata)
+
     if table.num_rows != expected_rows:
         msg = (
             f"parquet row count mismatch for {path.name}: "
             f"expected {expected_rows}, found {table.num_rows}"
         )
         raise SnapshotIntegrityError(msg)
-    if table.schema != expected_schema:
-        # Compare fingerprints as a stable secondary check when Arrow equality is strict.
-        if schema_fingerprint(table.schema) != schema_fingerprint(expected_schema):
-            msg = f"parquet schema mismatch for {path.name}"
+    if schema_fingerprint(table.schema) != schema_fingerprint(expected_schema):
+        msg = f"parquet schema mismatch for {path.name}"
+        raise SnapshotIntegrityError(msg)
+
+
+def _reject_disallowed_metadata(
+    filename: str,
+    metadata: dict[bytes | str, bytes | str] | None,
+) -> None:
+    if not metadata:
+        return
+    for key, value in metadata.items():
+        decoded_key = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else str(key)
+        if "pandas" in decoded_key.lower():
+            msg = f"parquet file {filename} must not contain pandas metadata"
             raise SnapshotIntegrityError(msg)
-    # Reject pandas index metadata if present.
-    metadata = table.schema.metadata or {}
-    for key in metadata:
-        decoded = key.decode("utf-8") if isinstance(key, bytes) else str(key)
-        if "pandas" in decoded.lower():
-            msg = f"parquet file {path.name} must not contain pandas metadata"
+        if decoded_key == "ARROW:schema":
+            continue
+        decoded_value = (
+            value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+        )
+        if _contains_absolute_path_metadata(decoded_key) or _contains_absolute_path_metadata(
+            decoded_value
+        ):
+            msg = f"parquet file {filename} must not contain absolute path metadata"
             raise SnapshotIntegrityError(msg)
-        value = metadata[key]
-        text = value.decode("utf-8") if isinstance(value, bytes) else str(value)
-        if ":\\" in text or text.startswith("/") and "storage" in text:
-            # Heuristic guard against absolute path leakage in metadata values.
-            if text.startswith("/") or (len(text) > 2 and text[1] == ":"):
-                msg = f"parquet file {path.name} must not contain absolute path metadata"
-                raise SnapshotIntegrityError(msg)
+
+
+def _contains_absolute_path_metadata(text: str) -> bool:
+    stripped = text.strip()
+    if is_absolute_path_text(stripped):
+        return True
+    try:
+        decoded = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    return _json_contains_absolute_path(decoded)
+
+
+def _json_contains_absolute_path(value: object) -> bool:
+    if isinstance(value, str):
+        return is_absolute_path_text(value.strip())
+    if isinstance(value, list):
+        return any(_json_contains_absolute_path(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _json_contains_absolute_path(key) or _json_contains_absolute_path(item)
+            for key, item in value.items()
+        )
+    return False
 
 
 def file_sha256_and_size(path: Path) -> tuple[str, int]:

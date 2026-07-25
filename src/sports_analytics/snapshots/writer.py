@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from sports_analytics.core.exceptions import SnapshotIntegrityError
+from sports_analytics.core.exceptions import SnapshotIntegrityError, SnapshotVerificationError
 from sports_analytics.data.types import JsonValue, normalize_uuid, validate_relative_snapshot_path
 from sports_analytics.snapshots.manifest import build_manifest_document, write_manifest
 from sports_analytics.snapshots.parquet import write_bundle_parquet_files
+from sports_analytics.snapshots.paths import resolve_snapshot_dir
 from sports_analytics.sources.raw_store import RawSourceArtifact
 from sports_analytics.sports.football.contracts import (
     FOOTBALL_CANONICAL_SCHEMA_VERSION,
@@ -185,12 +186,8 @@ def discard_prepared_snapshot(prepared: PreparedSnapshot) -> None:
 
 def resolve_snapshot_directory(snapshots_directory: Path, relative_directory: str) -> Path:
     """Resolve a relative snapshot directory safely under the snapshots root."""
-    validated = validate_relative_snapshot_path(relative_directory)
-    root = Path(snapshots_directory).resolve()
-    candidate = (root / Path(*validated.split("/"))).resolve()
     try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        msg = "snapshot path escapes configured snapshots directory"
+        return resolve_snapshot_dir(snapshots_directory, relative_directory)
+    except SnapshotVerificationError as exc:
+        msg = "invalid snapshot directory path"
         raise SnapshotIntegrityError(msg) from exc
-    return candidate

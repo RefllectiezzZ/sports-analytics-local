@@ -143,7 +143,10 @@ def test_manifest_serialization_is_canonical_and_loadable(tmp_path: Path) -> Non
     assert payload.endswith(b"\n")
     assert payload == manifest.serialize_manifest(document)
     assert digest == hashlib.sha256(payload).hexdigest()
-    assert loaded == document
+    assert loaded.document == document
+    assert loaded.snapshot_id == document["snapshot_id"]
+    assert loaded.games_count == 1
+    assert loaded.teams_count == 2
     assert loaded_payload == payload
     assert loaded_digest == digest
 
@@ -165,6 +168,34 @@ def test_load_manifest_bytes_rejects_unsupported_manifest_version(tmp_path: Path
 
     with pytest.raises(SnapshotVerificationError, match="unsupported manifest_version"):
         manifest.load_manifest_bytes(path)
+
+
+def test_validate_manifest_document_rejects_bool_integer_fields(tmp_path: Path) -> None:
+    document = _manifest_document(tmp_path / "data")
+    document["raw_artifact_bytes"] = True
+
+    with pytest.raises(SnapshotVerificationError, match="raw_artifact_bytes"):
+        manifest.validate_manifest_document(document)
+
+
+def test_validate_manifest_document_rejects_duplicate_file_entries(tmp_path: Path) -> None:
+    document = _manifest_document(tmp_path / "data")
+    files = document["files"]
+    assert isinstance(files, list)
+    files[1] = dict(files[0])
+
+    with pytest.raises(SnapshotVerificationError, match="duplicate entry"):
+        manifest.validate_manifest_document(document)
+
+
+def test_validate_manifest_document_rejects_schema_fingerprint_mismatch(tmp_path: Path) -> None:
+    document = _manifest_document(tmp_path / "data")
+    schema_fingerprints = document["schema_fingerprints"]
+    assert isinstance(schema_fingerprints, dict)
+    schema_fingerprints["games"] = "0" * 64
+
+    with pytest.raises(SnapshotVerificationError, match="schema fingerprint mismatch"):
+        manifest.validate_manifest_document(document)
 
 
 def test_expected_parquet_filenames_matches_contract() -> None:

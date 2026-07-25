@@ -86,6 +86,42 @@ def test_schema_field_types_are_explicit_for_key_columns() -> None:
     )
 
 
+def test_schema_field_nullability_matches_contract() -> None:
+    nullable_by_dataset = {
+        "competitions": set(),
+        "seasons": set(),
+        "teams": set(),
+        "games": {
+            "scheduled_start_utc",
+            "full_time_home_goals",
+            "full_time_away_goals",
+            "full_time_result",
+            "half_time_home_goals",
+            "half_time_away_goals",
+            "half_time_result",
+        },
+        "odds_1x2": {"quoted_at_utc", "quality_reason"},
+        "post_match_statistics": {
+            "referee",
+            "home_shots",
+            "away_shots",
+            "home_shots_on_target",
+            "away_shots_on_target",
+            "home_corners",
+            "away_corners",
+            "home_fouls",
+            "away_fouls",
+            "home_yellow_cards",
+            "away_yellow_cards",
+            "home_red_cards",
+            "away_red_cards",
+        },
+    }
+    for dataset_name, nullable_fields in nullable_by_dataset.items():
+        schema = schemas.dataset_schema(dataset_name)
+        assert {field.name for field in schema if field.nullable} == nullable_fields
+
+
 def test_dataset_schema_rejects_unknown_dataset() -> None:
     with pytest.raises(KeyError, match="unknown football dataset schema"):
         schemas.dataset_schema("not-a-dataset")
@@ -153,6 +189,20 @@ def test_verify_parquet_file_rejects_pandas_metadata(tmp_path: Path) -> None:
     pq.write_table(table, path)
 
     with pytest.raises(SnapshotIntegrityError, match="pandas metadata"):
+        parquet.verify_parquet_file(
+            path,
+            expected_schema=schemas.dataset_schema("games"),
+            expected_rows=0,
+        )
+
+
+def test_verify_parquet_file_rejects_absolute_path_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "games.parquet"
+    schema = schemas.dataset_schema("games").with_metadata({b"source_path": b"/tmp/source.csv"})
+    table = pa.Table.from_pylist([], schema=schema)
+    pq.write_table(table, path)
+
+    with pytest.raises(SnapshotIntegrityError, match="absolute path metadata"):
         parquet.verify_parquet_file(
             path,
             expected_schema=schemas.dataset_schema("games"),

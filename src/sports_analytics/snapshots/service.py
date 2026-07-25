@@ -14,7 +14,7 @@ from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.repositories.audit import AuditEventRepository
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
 from sports_analytics.data.types import JsonValue, SnapshotStatus
-from sports_analytics.snapshots.reader import verify_snapshot_directory
+from sports_analytics.snapshots.reader import SnapshotVerificationResult, verify_snapshot_directory
 from sports_analytics.snapshots.types import PublishedSnapshot
 from sports_analytics.snapshots.writer import (
     PreparedSnapshot,
@@ -232,19 +232,19 @@ class SnapshotPublicationService:
         record = snapshots.create_building_snapshot(
             snapshot_type=FOOTBALL_INGESTION_SNAPSHOT_TYPE,
             relative_path=prepared.relative_manifest_path,
-            source_name=prepared.source_name,
-            schema_version=prepared.schema_version,
-            metadata=prepared.metadata,
+            source_name=verified.source_name or prepared.source_name,
+            schema_version=verified.schema_version or prepared.schema_version,
+            metadata=verified.metadata if verified.metadata is not None else prepared.metadata,
             snapshot_id=verified.snapshot_id,
-            source_version=prepared.source_version,
-            created_at=prepared.source_observed_at_utc,
+            source_version=verified.source_version or prepared.source_version,
+            created_at=verified.source_observed_at_utc or prepared.source_observed_at_utc,
         )
         ready = snapshots.mark_snapshot_ready(
             record.id,
             checksum_sha256=verified.manifest_checksum_sha256,
             row_count=verified.games_count,
             expected_version=record.version,
-            ready_at=prepared.source_observed_at_utc,
+            ready_at=verified.source_observed_at_utc or prepared.source_observed_at_utc,
         )
         audit.append_event(
             event_type="ingestion.snapshot-created",
@@ -255,7 +255,7 @@ class SnapshotPublicationService:
             details=self._audit_details(prepared, reused=False, snapshot_id=ready.id),
             occurred_at=prepared.source_observed_at_utc,
         )
-        return self._from_record(ready, prepared=prepared, reused=False)
+        return self._from_record(ready, prepared=prepared, reused=False, verified=verified)
 
     @staticmethod
     def _audit_details(
@@ -282,28 +282,81 @@ class SnapshotPublicationService:
         *,
         prepared: PreparedSnapshot,
         reused: bool,
+        verified: SnapshotVerificationResult | None = None,
     ) -> PublishedSnapshot:
         from sports_analytics.data.types import SnapshotRecord
 
         assert isinstance(record, SnapshotRecord)
+        games_count = (
+            record.row_count
+            if record.row_count is not None
+            else verified.games_count
+            if verified is not None
+            else prepared.games_count
+        )
+        teams_count = (
+            verified.teams_count
+            if verified is not None and verified.teams_count is not None
+            else prepared.teams_count
+        )
+        odds_quotes_count = (
+            verified.odds_quotes_count
+            if verified is not None and verified.odds_quotes_count is not None
+            else prepared.odds_quotes_count
+        )
+        statistics_rows_count = (
+            verified.statistics_rows_count
+            if verified is not None and verified.statistics_rows_count is not None
+            else prepared.statistics_rows_count
+        )
+        duplicate_rows_discarded = (
+            verified.duplicate_rows_discarded
+            if verified is not None and verified.duplicate_rows_discarded is not None
+            else prepared.duplicate_rows_discarded
+        )
+        warnings_count = (
+            verified.warnings_count
+            if verified is not None and verified.warnings_count is not None
+            else prepared.warnings_count
+        )
         return PublishedSnapshot(
             snapshot_id=record.id,
             snapshot_status=record.status,
             snapshot_reused=reused,
             snapshot_relative_path=record.relative_path,
             source_name=record.source_name,
-            source_version=record.source_version or prepared.source_version,
-            source_file_sha256=prepared.source_file_sha256,
-            competition_id=prepared.competition_id,
-            season_id=prepared.season_id,
-            games_count=record.row_count if record.row_count is not None else prepared.games_count,
-            teams_count=prepared.teams_count,
-            odds_quotes_count=prepared.odds_quotes_count,
-            statistics_rows_count=prepared.statistics_rows_count,
-            duplicate_rows_discarded=prepared.duplicate_rows_discarded,
-            warnings_count=prepared.warnings_count,
+            source_version=(
+                record.source_version
+                or (verified.source_version if verified is not None else None)
+                or prepared.source_version
+            ),
+            source_file_sha256=(
+                verified.source_file_sha256
+                if verified is not None and verified.source_file_sha256 is not None
+                else prepared.source_file_sha256
+            ),
+            competition_id=(
+                verified.competition_id
+                if verified is not None and verified.competition_id is not None
+                else prepared.competition_id
+            ),
+            season_id=(
+                verified.season_id
+                if verified is not None and verified.season_id is not None
+                else prepared.season_id
+            ),
+            games_count=games_count,
+            teams_count=teams_count,
+            odds_quotes_count=odds_quotes_count,
+            statistics_rows_count=statistics_rows_count,
+            duplicate_rows_discarded=duplicate_rows_discarded,
+            warnings_count=warnings_count,
             manifest_checksum_sha256=record.checksum_sha256 or prepared.manifest_checksum_sha256,
-            source_observed_at_utc=prepared.source_observed_at_utc,
+            source_observed_at_utc=(
+                verified.source_observed_at_utc
+                if verified is not None and verified.source_observed_at_utc is not None
+                else prepared.source_observed_at_utc
+            ),
         )
 
 
