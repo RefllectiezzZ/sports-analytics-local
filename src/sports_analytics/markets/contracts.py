@@ -37,7 +37,7 @@ from sports_analytics.core.exceptions import NormalizationError
 from sports_analytics.snapshots.arrow import LINE_DECIMAL_SCALE, PRICE_DECIMAL_SCALE
 from sports_analytics.sports.contracts import require_utc, validate_domain_identifier
 
-MIN_DECIMAL_ODDS: Final[Decimal] = Decimal("1.01")
+MIN_DECIMAL_ODDS: Final[Decimal] = Decimal("1.0001")
 MAX_DECIMAL_ODDS: Final[Decimal] = Decimal("100000")
 MAX_ABS_LINE_VALUE: Final[Decimal] = Decimal("999.99")
 MAX_SOURCE_REFERENCE_LENGTH: Final[int] = 200

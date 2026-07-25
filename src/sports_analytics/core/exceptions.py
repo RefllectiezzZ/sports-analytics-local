@@ -119,3 +119,27 @@ class EvaluationError(SportsAnalyticsError):
 
 class TrainingError(SportsAnalyticsError):
     """Raised when the training service rejects inputs or cannot produce artifacts."""
+
+
+class PredictionError(SportsAnalyticsError):
+    """Raised when prediction identity, lineage, probabilities, or timing are invalid."""
+
+
+class ValueEvaluationError(SportsAnalyticsError):
+    """Raised when complete-market quote evaluation cannot be performed safely."""
+
+
+class OpportunityError(SportsAnalyticsError):
+    """Raised when opportunity filtering or ranking inputs are invalid."""
+
+
+class CombinationError(SportsAnalyticsError):
+    """Raised when a combination is conflicting, unsafe, or outside configured bounds."""
+
+
+class BacktestError(SportsAnalyticsError):
+    """Raised when a backtest violates chronology, strategy, or settlement contracts."""
+
+
+class ArtifactError(SportsAnalyticsError):
+    """Raised when an analytical artifact fails publication or strict verification."""

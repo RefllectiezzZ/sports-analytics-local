@@ -8,8 +8,9 @@ This document describes the first production modelling pipeline for
 **This is a team-level historical football full-match 1X2 baseline.**
 
 It is **not** a betting recommendation engine. It does **not** yet use players,
-injuries, or lineups. It does **not** use bookmaker odds as model features. It
-does **not** produce expected value, stake sizing, or accumulators. Past
+injuries, or lineups. It does **not** use bookmaker odds as model features.
+Expected value is calculated only in the separate complete-market evaluation
+layer; there is no stake sizing or production accumulator execution. Past
 validation performance is **not** a guarantee of future performance.
 
 Participant-scoped feature contracts are reserved for later work. Feature and
@@ -178,11 +179,19 @@ python engine.py --verify-model \
 python engine.py --infer-football-1x2 \
   --model football/football-1x2-logistic-v1/<competition>/<artifact-id>/model.json \
   --feature-row-json path/to/row.json
+
+python engine.py --backtest-football-1x2 \
+  --features football/football-1x2-prematch-features-v1/<competition>/<artifact-id>
 ```
 
 Shared modes (`--validate-config`, `--database-status`, `--migrate-database`)
 remain available. Streamlit is not connected to training. `app.py` does not train
 models.
+
+The backtest command is explicitly a Football-Data market-average closing-line
+historical singles benchmark. It does not treat ingestion/observation time as
+quote availability and does not build closing-line accumulators. See
+[prediction-value-backtesting.md](prediction-value-backtesting.md).
 
 ## Input contract
 

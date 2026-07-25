@@ -8,8 +8,10 @@ infrastructure, a worker-only local supervisor, one Football-Data.co.uk ingestio
 adapter that publishes immutable Parquet snapshots, sport-agnostic canonical data
 contracts, a leakage-safe football full-match 1X2 modelling pipeline (features,
 rolling-origin validation, temperature calibration, and pickle-free artifacts),
-documentation, and quality tooling. Predictions for live betting, recommendations,
-combinations, and Streamlit pages are **not** implemented yet.
+documentation, generic prediction/value/opportunity/combination/backtesting
+contracts, a football closing-line historical singles benchmark, and quality
+tooling. Live prices, betting recommendations, production combinations, and
+Streamlit pages are **not** implemented.
 
 ## Entry points
 
@@ -288,8 +290,11 @@ Application code lives under `src/sports_analytics/` with focused subpackages:
 - `scrapers` — reserved for future browser-free scraping helpers (empty)
 - `features` — football pre-match feature contracts and leakage-safe builders
 - `models` — logistic baseline, temperature calibration, pickle-free artifacts
-- `combinations` — combination generation helpers (empty)
-- `services` — training orchestration and engine CLI
+- `predictions` — complete immutable probability records and verified lineage
+- `value` / `opportunities` — complete-market edge/EV, filters, audit, ranking
+- `combinations` — dependency classification, validation, bounded construction
+- `backtesting` — rolling-origin contracts, pure settlement, required metrics
+- `services` — training/backtesting orchestration and engine CLI
 - `evaluation` — temporal folds and probability metrics
 
 ## Current implementation status
@@ -322,7 +327,10 @@ Implemented:
 - immutable generic Parquet snapshots with `snapshot-manifest-v2`;
 - the `ingest.football-data-csv` handler in the frozen default registry;
 - snapshot listing and verification through `scraper.py`;
-- placeholder `app.py` and `engine.py` wired to shared bootstrap.
+- generic prediction, value, opportunity, combination, and backtest contracts;
+- football 1X2 Football-Data closing-market singles benchmark and strict
+  content-addressed analytical artifacts;
+- placeholder `app.py` wired to shared bootstrap.
 
 Explicitly **not** implemented yet:
 
@@ -331,10 +339,8 @@ Explicitly **not** implemented yet:
 - browser scraping or automation;
 - additional sports;
 - markets beyond production 1X2 plus the synthetic contract proof;
-- feature engineering, models, and predictions;
-- combinations and accumulators;
-- backtesting, settlement, and bankroll management;
-- an opportunity search engine, automatic bet builder, or user bet filters;
+- production current-price opportunity discovery and accumulators;
+- staking, operational settlement, and bankroll management;
 - cross-source fuzzy resolution;
 - Streamlit UI components;
 - Streamlit child process spawning in `run_local.py`.
