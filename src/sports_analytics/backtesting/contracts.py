@@ -162,6 +162,15 @@ class StrategyConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class BacktestLineage:
+    """Optional feature and snapshot lineage included in backtest result identity."""
+
+    feature_artifact_id: str | None = None
+    feature_manifest_checksum_sha256: str | None = None
+    input_snapshots: tuple[dict[str, JsonValue], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SettledOpportunity:
     """A historical/synthetic opportunity with an explicit pure settlement."""
 
@@ -175,6 +184,10 @@ class FoldBacktestInput:
 
     fold: BacktestFold
     candidates: tuple[SettledOpportunity, ...]
+    fold_model_id: str | None = None
+    fold_model_checksum_sha256: str | None = None
+    calibration_temperature: float | None = None
+    random_seed: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

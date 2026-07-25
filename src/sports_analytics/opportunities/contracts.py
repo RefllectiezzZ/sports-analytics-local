@@ -16,7 +16,11 @@ from sports_analytics.markets.contracts import validate_decimal_odds
 from sports_analytics.models.identity import content_addressed_id
 from sports_analytics.predictions.contracts import CanonicalSelectionIdentity
 from sports_analytics.sports.contracts import require_utc
-from sports_analytics.value.contracts import MarketValueEvaluation, QuoteEvaluationMode
+from sports_analytics.value.contracts import (
+    VALUE_EVALUATION_VERSION,
+    MarketValueEvaluation,
+    QuoteEvaluationMode,
+)
 
 
 class RejectionCode(StrEnum):
@@ -56,6 +60,7 @@ class Opportunity:
     model_trained_through_date: date
     model_calibrated_through_date: date
     quote_observation_id: str
+    quote_series_id: str
     quoted_at_utc: datetime | None
     source_observed_at_utc: datetime
     source_name: str
@@ -80,7 +85,8 @@ class Opportunity:
     dependency_keys: frozenset[str] = frozenset()
     participant_ids: frozenset[str] = frozenset()
     dependency_metadata_complete: bool = False
-    prediction_quality_passed: bool = True
+    prediction_quality_passed: bool = False
+    evaluation_version: str = VALUE_EVALUATION_VERSION
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -88,6 +94,7 @@ class Opportunity:
             "canonical_event_id",
             "prediction_id",
             "quote_observation_id",
+            "quote_series_id",
             "source_name",
             "provider_type",
             "provider_id",
@@ -184,14 +191,15 @@ class Opportunity:
             self.feature_specification_version,
             self.feature_row_id,
         )
-        if any(lineage_fields):
-            if not all(lineage_fields):
-                raise OpportunityError("opportunity lineage fields must be complete")
-            try:
-                validate_sha256_checksum(self.model_checksum_sha256)
-                validate_sha256_checksum(self.feature_manifest_checksum_sha256)
-            except RepositoryError as exc:
-                raise OpportunityError("opportunity lineage checksum is malformed") from exc
+        if not all(lineage_fields):
+            raise OpportunityError("opportunity lineage fields must be complete")
+        try:
+            validate_sha256_checksum(self.model_checksum_sha256)
+            validate_sha256_checksum(self.feature_manifest_checksum_sha256)
+        except RepositoryError as exc:
+            raise OpportunityError("opportunity lineage checksum is malformed") from exc
+        if self.feature_row_id != self.canonical_event_id:
+            raise OpportunityError("feature_row_id must match canonical_event_id")
         if type(self.dependency_metadata_complete) is not bool:
             raise OpportunityError("dependency_metadata_complete must be boolean")
         if type(self.prediction_quality_passed) is not bool:
@@ -359,6 +367,7 @@ def opportunities_from_evaluation(
                 evaluation,
                 value,
                 quote_observation_id=quote_selection.quote_observation_id,
+                quote_series_id=quote_selection.quote_series_id,
             )
         )
     return tuple(opportunities)

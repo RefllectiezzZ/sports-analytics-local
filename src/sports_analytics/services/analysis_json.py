@@ -34,6 +34,7 @@ from sports_analytics.opportunities.contracts import (
     opportunities_from_evaluation,
 )
 from sports_analytics.opportunities.identity import (
+    OPPORTUNITY_IDENTITY_VERSION,
     derive_opportunity_id,
     verify_opportunity_identity,
 )
@@ -45,9 +46,14 @@ from sports_analytics.predictions.contracts import (
     PredictionQualityFlags,
     SelectionProbability,
 )
+from sports_analytics.predictions.provenance import (
+    PredictionProvenance,
+    parse_prediction_provenance,
+)
 from sports_analytics.predictions.synthetic import build_synthetic_market_prediction
 from sports_analytics.services.analysis import (
     ANALYSIS_ARTIFACT_SCHEMA,
+    AnalysisMarketInput,
     AnalysisPublicationRequest,
     publish_analysis_artifact,
 )
@@ -128,37 +134,29 @@ def publish_analysis_with_paths(
 ) -> dict[str, JsonValue]:
     """Build, filter, combine, atomically publish, and reload one verified analysis artifact."""
     document = _mapping(payload, "analysis publication request")
-    prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
-    quote_payload = _mapping(document.get("quote"), "quote")
-    quote = CompleteMarketQuote(
-        canonical_event_id=_string(quote_payload, "canonical_event_id"),
-        source_name=_string(quote_payload, "source_name"),
-        provider_type=_string(quote_payload, "provider_type"),
-        provider_id=_string(quote_payload, "provider_id"),
-        quote_phase=_string(quote_payload, "quote_phase"),
-        source_observed_at_utc=_datetime(quote_payload, "source_observed_at_utc"),
-        quoted_at_utc=_optional_datetime(quote_payload.get("quoted_at_utc")),
-        quote_timestamp_precision=_string(quote_payload, "quote_timestamp_precision"),
-        quote_valid_from_utc=_optional_datetime(quote_payload.get("quote_valid_from_utc")),
-        quote_valid_to_utc=_optional_datetime(quote_payload.get("quote_valid_to_utc")),
-        selections=tuple(
-            PricedSelection(
-                selection=_selection(_mapping(item, "priced selection")),
-                decimal_odds=_decimal(_mapping(item, "priced selection"), "decimal_odds"),
-                quote_series_id=_string(_mapping(item, "priced selection"), "quote_series_id"),
-                quote_observation_id=_string(
-                    _mapping(item, "priced selection"),
-                    "quote_observation_id",
-                ),
-            )
-            for item in _array(quote_payload, "selections")
-        ),
+    provenance = parse_prediction_provenance(
+        document.get("provenance", PredictionProvenance.SYNTHETIC_CONTRACT.value),
+        field_name="provenance",
     )
-    mode = _enum(
-        QuoteEvaluationMode,
-        document.get("mode", QuoteEvaluationMode.LIVE_SAFE.value),
-        "mode",
-    )
+    markets_payload = document.get("markets")
+    if markets_payload is not None:
+        markets = tuple(
+            _analysis_market_input(_mapping(item, "market")) for item in _array(document, "markets")
+        )
+        mode = _enum(
+            QuoteEvaluationMode,
+            document.get("mode", QuoteEvaluationMode.LIVE_SAFE.value),
+            "mode",
+        )
+    else:
+        prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
+        quote = _complete_quote_from_payload(_mapping(document.get("quote"), "quote"))
+        mode = _enum(
+            QuoteEvaluationMode,
+            document.get("mode", QuoteEvaluationMode.LIVE_SAFE.value),
+            "mode",
+        )
+        markets = (AnalysisMarketInput(prediction=prediction, quote=quote),)
     filters = _filters(_mapping(document.get("filters", {}), "filters"))
     rules_payload = document.get("combination_rules")
     combination_rules = (
@@ -168,11 +166,11 @@ def publish_analysis_with_paths(
     published = publish_analysis_artifact(
         paths=paths,
         request=AnalysisPublicationRequest(
-            prediction=prediction,
-            quote=quote,
+            markets=markets,
             mode=mode,
             filters=filters,
             combination_rules=combination_rules,
+            provenance=provenance,
             relative_directory=relative_directory,
         ),
     )
@@ -180,7 +178,9 @@ def publish_analysis_with_paths(
         "artifact_id": published.artifact_id,
         "checksum_sha256": published.checksum_sha256,
         "relative_directory": published.relative_directory,
+        "analysis_run_id": published.analysis_run_id,
         "schema_version": ANALYSIS_ARTIFACT_SCHEMA,
+        "provenance": provenance.value,
     }
 
 
@@ -301,6 +301,39 @@ def run_backtest_from_json(payload: object) -> dict[str, JsonValue]:
     }
 
 
+def _analysis_market_input(document: dict[str, object]) -> AnalysisMarketInput:
+    prediction = _synthetic_prediction(_mapping(document.get("prediction"), "prediction"))
+    quote = _complete_quote_from_payload(_mapping(document.get("quote"), "quote"))
+    return AnalysisMarketInput(prediction=prediction, quote=quote)
+
+
+def _complete_quote_from_payload(quote_payload: dict[str, object]) -> CompleteMarketQuote:
+    return CompleteMarketQuote(
+        canonical_event_id=_string(quote_payload, "canonical_event_id"),
+        source_name=_string(quote_payload, "source_name"),
+        provider_type=_string(quote_payload, "provider_type"),
+        provider_id=_string(quote_payload, "provider_id"),
+        quote_phase=_string(quote_payload, "quote_phase"),
+        source_observed_at_utc=_datetime(quote_payload, "source_observed_at_utc"),
+        quoted_at_utc=_optional_datetime(quote_payload.get("quoted_at_utc")),
+        quote_timestamp_precision=_string(quote_payload, "quote_timestamp_precision"),
+        quote_valid_from_utc=_optional_datetime(quote_payload.get("quote_valid_from_utc")),
+        quote_valid_to_utc=_optional_datetime(quote_payload.get("quote_valid_to_utc")),
+        selections=tuple(
+            PricedSelection(
+                selection=_selection(_mapping(item, "priced selection")),
+                decimal_odds=_decimal(_mapping(item, "priced selection"), "decimal_odds"),
+                quote_series_id=_string(_mapping(item, "priced selection"), "quote_series_id"),
+                quote_observation_id=_string(
+                    _mapping(item, "priced selection"),
+                    "quote_observation_id",
+                ),
+            )
+            for item in _array(quote_payload, "selections")
+        ),
+    )
+
+
 def _synthetic_prediction(document: dict[str, object]) -> MarketPrediction:
     lineage_payload = _mapping(document.get("lineage"), "lineage")
     quality_payload = _mapping(document.get("quality", {}), "quality")
@@ -414,65 +447,102 @@ def _opportunity(document: dict[str, object]) -> Opportunity:
     else:
         decision_as_of = event_start
     decimal_odds = _decimal(document, "decimal_odds")
-    opportunity_id = derive_opportunity_id(
-        evaluation_version="complete-market-value-v1",
-        mode=evaluation_mode,
-        prediction_id=_string(document, "prediction_id"),
-        quote_observation_id=_string(document, "quote_observation_id"),
-        selection_id=_selection(_mapping(document.get("selection"), "selection")).selection_id,
-        source_name=_string(document, "source_name"),
-        provider_type=_string(document, "provider_type"),
-        provider_id=_string(document, "provider_id"),
-        decimal_odds=decimal_odds,
-        decision_as_of_utc=decision_as_of,
+    selection = _selection(_mapping(document.get("selection"), "selection"))
+    evaluation_version = (
+        _string(document, "evaluation_version")
+        if "evaluation_version" in document
+        else "complete-market-value-v1"
     )
+    quote_series_id = (
+        _string(document, "quote_series_id")
+        if "quote_series_id" in document
+        else _string(document, "quote_observation_id")
+    )
+    payload: dict[str, JsonValue] = {
+        "identity_version": OPPORTUNITY_IDENTITY_VERSION,
+        "evaluation_version": evaluation_version,
+        "canonical_event_id": _string(document, "canonical_event_id"),
+        "event_start_utc": format_utc_timestamp(event_start),
+        "selection": selection.identity_payload(),
+        "prediction_id": _string(document, "prediction_id"),
+        "predicted_at_utc": format_utc_timestamp(predicted_at),
+        "quote_series_id": quote_series_id,
+        "quote_observation_id": _string(document, "quote_observation_id"),
+        "source_name": _string(document, "source_name"),
+        "provider_type": _string(document, "provider_type"),
+        "provider_id": _string(document, "provider_id"),
+        "evaluation_mode": evaluation_mode.value,
+        "quoted_at_utc": None if quoted_at is None else format_utc_timestamp(quoted_at),
+        "source_observed_at_utc": format_utc_timestamp(source_observed_at),
+        "decision_as_of_utc": format_utc_timestamp(decision_as_of),
+        "decimal_odds": format(decimal_odds, "f"),
+        "model_probability": _number(document, "model_probability"),
+        "raw_implied_probability": _number(document, "raw_implied_probability"),
+        "normalized_implied_probability": _number(document, "normalized_implied_probability"),
+        "overround": _number(document, "overround"),
+        "edge": _number(document, "edge"),
+        "expected_value": _number(document, "expected_value"),
+        "model_artifact_id": _string(document, "model_artifact_id"),
+        "model_checksum_sha256": _string(document, "model_checksum_sha256"),
+        "model_specification_version": _string(document, "model_specification_version"),
+        "feature_artifact_id": _string(document, "feature_artifact_id"),
+        "feature_manifest_checksum_sha256": _string(document, "feature_manifest_checksum_sha256"),
+        "feature_specification_version": _string(document, "feature_specification_version"),
+        "feature_row_id": _string(document, "feature_row_id"),
+        "dependency_keys": cast(
+            list[JsonValue],
+            sorted(_string_array(document.get("dependency_keys", []))),
+        ),
+        "participant_ids": cast(
+            list[JsonValue],
+            sorted(_string_array(document.get("participant_ids", []))),
+        ),
+        "dependency_metadata_complete": _boolean(
+            document.get("dependency_metadata_complete", False),
+            "dependency_metadata_complete",
+        ),
+        "prediction_quality_passed": _boolean(
+            document.get("prediction_quality_passed", False),
+            "prediction_quality_passed",
+        ),
+    }
+    opportunity_id = derive_opportunity_id(payload=payload)
     supplied_id = document.get("opportunity_id")
     if type(supplied_id) is str and supplied_id != opportunity_id:
         raise ConfigurationError("opportunity_id does not match canonical identity")
     return Opportunity(
         opportunity_id=opportunity_id,
         canonical_event_id=_string(document, "canonical_event_id"),
-        event_start_utc=_datetime(document, "event_start_utc"),
-        selection=_selection(_mapping(document.get("selection"), "selection")),
+        event_start_utc=event_start,
+        selection=selection,
         prediction_id=_string(document, "prediction_id"),
-        predicted_at_utc=_datetime(document, "predicted_at_utc"),
+        predicted_at_utc=predicted_at,
         model_trained_through_date=_date(document, "model_trained_through_date"),
         model_calibrated_through_date=_date(document, "model_calibrated_through_date"),
         quote_observation_id=_string(document, "quote_observation_id"),
-        quoted_at_utc=_optional_datetime(document.get("quoted_at_utc")),
-        source_observed_at_utc=_datetime(document, "source_observed_at_utc"),
+        quote_series_id=quote_series_id,
+        quoted_at_utc=quoted_at,
+        source_observed_at_utc=source_observed_at,
         source_name=_string(document, "source_name"),
         provider_type=_string(document, "provider_type"),
         provider_id=_string(document, "provider_id"),
-        evaluation_mode=_enum(
-            QuoteEvaluationMode,
-            document.get("evaluation_mode"),
-            "evaluation_mode",
-        ),
-        decimal_odds=_decimal(document, "decimal_odds"),
+        evaluation_mode=evaluation_mode,
+        evaluation_version=evaluation_version,
+        decimal_odds=decimal_odds,
         model_probability=_number(document, "model_probability"),
         raw_implied_probability=_number(document, "raw_implied_probability"),
-        normalized_implied_probability=_number(
-            document,
-            "normalized_implied_probability",
-        ),
+        normalized_implied_probability=_number(document, "normalized_implied_probability"),
         overround=_number(document, "overround"),
         edge=_number(document, "edge"),
         expected_value=_number(document, "expected_value"),
         decision_as_of_utc=decision_as_of,
-        model_artifact_id=_optional_string(document.get("model_artifact_id")) or "",
-        model_checksum_sha256=_optional_string(document.get("model_checksum_sha256")) or "",
-        model_specification_version=(
-            _optional_string(document.get("model_specification_version")) or ""
-        ),
-        feature_artifact_id=_optional_string(document.get("feature_artifact_id")) or "",
-        feature_manifest_checksum_sha256=(
-            _optional_string(document.get("feature_manifest_checksum_sha256")) or ""
-        ),
-        feature_specification_version=(
-            _optional_string(document.get("feature_specification_version")) or ""
-        ),
-        feature_row_id=_optional_string(document.get("feature_row_id")) or "",
+        model_artifact_id=_string(document, "model_artifact_id"),
+        model_checksum_sha256=_string(document, "model_checksum_sha256"),
+        model_specification_version=_string(document, "model_specification_version"),
+        feature_artifact_id=_string(document, "feature_artifact_id"),
+        feature_manifest_checksum_sha256=_string(document, "feature_manifest_checksum_sha256"),
+        feature_specification_version=_string(document, "feature_specification_version"),
+        feature_row_id=_string(document, "feature_row_id"),
         dependency_keys=frozenset(_string_array(document.get("dependency_keys", []))),
         participant_ids=frozenset(_string_array(document.get("participant_ids", []))),
         dependency_metadata_complete=_boolean(
@@ -614,6 +684,7 @@ def _opportunity_json(item: Opportunity) -> dict[str, JsonValue]:
         "model_trained_through_date": item.model_trained_through_date.isoformat(),
         "model_calibrated_through_date": item.model_calibrated_through_date.isoformat(),
         "quote_observation_id": item.quote_observation_id,
+        "quote_series_id": item.quote_series_id,
         "quoted_at_utc": (
             None if item.quoted_at_utc is None else format_utc_timestamp(item.quoted_at_utc)
         ),

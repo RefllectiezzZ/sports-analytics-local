@@ -191,6 +191,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="JSON file with ordered feature_names, feature_values, and specification version.",
     )
     parser.add_argument(
+        "--model-checksum",
+        default=None,
+        metavar="SHA256",
+        help="Expected model artifact checksum for verified prediction replay.",
+    )
+    parser.add_argument(
+        "--feature-checksum",
+        default=None,
+        metavar="SHA256",
+        help="Expected feature manifest checksum for verified prediction replay.",
+    )
+    parser.add_argument(
         "--checksum",
         default=None,
         metavar="SHA256",
@@ -386,6 +398,8 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             args.minimum_expected_value,
             args.selection_minimum_odds,
             args.selection_maximum_odds,
+            args.model_checksum,
+            args.feature_checksum,
             args.artifact_type,
             args.artifact_schema,
         )
@@ -421,9 +435,15 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     if args.infer_football_1x2 and (args.model is None or args.feature_row_json is None):
         parser.error("--infer-football-1x2 requires --model and --feature-row-json")
     if args.generate_verified_predictions is not None and (
-        args.model is None or args.features is None
+        args.model is None
+        or args.features is None
+        or args.model_checksum is None
+        or args.feature_checksum is None
     ):
-        parser.error("--generate-verified-predictions requires --model and --features")
+        parser.error(
+            "--generate-verified-predictions requires --model, --features, "
+            "--model-checksum, and --feature-checksum"
+        )
     if artifact_mode and args.artifact_schema is None:
         parser.error("artifact verification and summary require --artifact-schema")
 
@@ -769,26 +789,38 @@ def _generate_verified_predictions(args: argparse.Namespace) -> int:
         raise ConfigurationError("verified prediction request must be a JSON object")
     from datetime import datetime
 
+    from sports_analytics.predictions.provenance import parse_prediction_provenance
+
+    event_start_raw = document.get("event_start_utc")
+    predicted_at_raw = document.get("predicted_at_utc")
+    canonical_event_id = document.get("canonical_event_id")
+    if type(event_start_raw) is not str or not event_start_raw:
+        raise ConfigurationError("event_start_utc must be a non-empty JSON string")
+    if type(predicted_at_raw) is not str or not predicted_at_raw:
+        raise ConfigurationError("predicted_at_utc must be a non-empty JSON string")
+    if type(canonical_event_id) is not str or not canonical_event_id:
+        raise ConfigurationError("canonical_event_id must be a non-empty JSON string")
     try:
-        event_start = datetime.fromisoformat(
-            str(document["event_start_utc"]).replace("Z", "+00:00")
-        )
-        predicted_at = datetime.fromisoformat(
-            str(document["predicted_at_utc"]).replace("Z", "+00:00")
-        )
-    except (KeyError, TypeError, ValueError) as exc:
+        event_start = datetime.fromisoformat(event_start_raw.replace("Z", "+00:00"))
+        predicted_at = datetime.fromisoformat(predicted_at_raw.replace("Z", "+00:00"))
+    except ValueError as exc:
         raise ConfigurationError("verified prediction request timestamps are malformed") from exc
-    provenance = document.get("provenance", "historical")
-    if type(provenance) is not str:
-        raise ConfigurationError("provenance must be a string")
+    provenance = parse_prediction_provenance(
+        document.get("provenance", "historical-replay"),
+        field_name="provenance",
+    )
+    if type(args.model_checksum) is not str or not args.model_checksum:
+        raise ConfigurationError("--model-checksum must be a non-empty SHA-256 digest")
+    if type(args.feature_checksum) is not str or not args.feature_checksum:
+        raise ConfigurationError("--feature-checksum must be a non-empty SHA-256 digest")
     prediction = generate_verified_football_1x2_prediction(
         paths=runtime.paths,
         request=VerifiedPredictionRequest(
             model_relative_path=args.model,
-            model_checksum_sha256=args.checksum,
+            model_checksum_sha256=args.model_checksum,
             feature_relative_directory=args.features,
-            feature_manifest_checksum_sha256=None,
-            canonical_event_id=str(document["canonical_event_id"]),
+            feature_manifest_checksum_sha256=args.feature_checksum,
+            canonical_event_id=canonical_event_id,
             event_start_utc=event_start,
             predicted_at_utc=predicted_at,
             provenance=provenance,

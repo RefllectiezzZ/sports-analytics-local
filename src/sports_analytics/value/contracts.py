@@ -255,6 +255,8 @@ def evaluate_complete_market(
     if not math.isfinite(implied_total) or implied_total <= 0.0:
         raise ValueEvaluationError("complete market implied probability total is invalid")
     overround = implied_total - 1.0
+    if overround < 0.0:
+        raise ValueEvaluationError("overround must be non-negative")
     values = tuple(
         SelectionValue(
             selection=predicted[key].selection,

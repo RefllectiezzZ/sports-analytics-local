@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sports_analytics.core.exceptions import FeatureError, PredictionError
 from sports_analytics.core.paths import RuntimePaths
+from sports_analytics.data.types import validate_sha256_checksum
 from sports_analytics.features.football.datasets import load_feature_artifact
 from sports_analytics.features.football.specification import FOOTBALL_1X2_FEATURE_NAMES_V1
 from sports_analytics.models.artifacts import (
@@ -25,10 +26,9 @@ from sports_analytics.predictions.contracts import (
     SelectionProbability,
     build_market_prediction,
 )
-from sports_analytics.predictions.football import (
-    VerifiedFeatureRow,
-    _model_input_snapshots,
-    predict_football_1x2,
+from sports_analytics.predictions.football import VerifiedFeatureRow, _model_input_snapshots
+from sports_analytics.predictions.provenance import (
+    PredictionProvenance,
 )
 from sports_analytics.sports.football.markets import match_result_1x2_selection
 
@@ -38,13 +38,13 @@ class VerifiedPredictionRequest:
     """Explicit inputs required for trusted football 1X2 prediction generation."""
 
     model_relative_path: str
-    model_checksum_sha256: str | None
+    model_checksum_sha256: str
     feature_relative_directory: str
-    feature_manifest_checksum_sha256: str | None
+    feature_manifest_checksum_sha256: str
     canonical_event_id: str
     event_start_utc: datetime
     predicted_at_utc: datetime
-    provenance: str = "historical"
+    provenance: PredictionProvenance = PredictionProvenance.HISTORICAL_REPLAY
 
 
 def generate_verified_football_1x2_prediction(
@@ -53,10 +53,14 @@ def generate_verified_football_1x2_prediction(
     request: VerifiedPredictionRequest,
 ) -> MarketPrediction:
     """Load explicit artifacts, verify checksums, and infer a complete prediction record."""
+    if request.provenance is not PredictionProvenance.HISTORICAL_REPLAY:
+        raise PredictionError("only historical-replay provenance is supported in PR #8")
     if not request.model_relative_path or not request.feature_relative_directory:
         raise PredictionError("model and feature artifact paths must be explicit")
     if not request.canonical_event_id:
         raise PredictionError("canonical_event_id must be explicit")
+    validate_sha256_checksum(request.model_checksum_sha256)
+    validate_sha256_checksum(request.feature_manifest_checksum_sha256)
     specification = football_1x2_logistic_specification("football-1x2-prematch-features-v1")
     artifact = load_model_artifact(
         models_root=paths.models_directory,
@@ -79,6 +83,8 @@ def generate_verified_football_1x2_prediction(
     if not checksum_path.is_file():
         raise PredictionError("feature artifact checksum sidecar is missing")
     manifest_checksum = checksum_path.read_text(encoding="utf-8").strip()
+    if manifest_checksum != request.feature_manifest_checksum_sha256:
+        raise PredictionError("feature manifest checksum does not match request")
     vector = next(
         (
             item
@@ -91,14 +97,20 @@ def generate_verified_football_1x2_prediction(
         raise PredictionError(
             f"canonical_event_id is absent from feature artifact: {request.canonical_event_id}"
         )
-    if vector.metadata.scheduled_start_utc is None and request.provenance == "live":
-        raise PredictionError("feature row lacks scheduled_start_utc; cannot prove live provenance")
+    scheduled_start = vector.metadata.scheduled_start_utc
+    if scheduled_start is None:
+        raise PredictionError("historical replay requires persisted scheduled_start_utc")
+    if request.event_start_utc != scheduled_start:
+        raise PredictionError("event_start_utc must equal persisted scheduled_start_utc")
+    if request.predicted_at_utc >= scheduled_start:
+        raise PredictionError("prediction time must be strictly before stored event start")
+    event_date = vector.metadata.event_date
+    if artifact.calibrated_through_date >= event_date:
+        raise PredictionError("model calibration history reaches replay event date")
+    feature_available_at = scheduled_start - timedelta(microseconds=1)
     input_snapshots = _aligned_input_snapshots(
         artifact=artifact,
         manifest_snapshots=_feature_input_snapshots(manifest.get("input_snapshots")),
-    )
-    production_eligible = request.provenance == "live" and request.predicted_at_utc < (
-        request.event_start_utc
     )
     feature_row = VerifiedFeatureRow(
         canonical_event_id=request.canonical_event_id,
@@ -107,24 +119,18 @@ def generate_verified_football_1x2_prediction(
         feature_specification_version=str(manifest["feature_specification_version"]),
         feature_names=FOOTBALL_1X2_FEATURE_NAMES_V1,
         feature_values=tuple(vector.features[name] for name in FOOTBALL_1X2_FEATURE_NAMES_V1),
-        available_at_utc=request.predicted_at_utc,
+        available_at_utc=feature_available_at,
         input_snapshots=input_snapshots,
         artifact_verified=True,
         sufficient_history=True,
-        data_quality_passed=production_eligible,
+        data_quality_passed=False,
     )
-    if not production_eligible:
-        return _historical_prediction(
-            artifact=artifact,
-            feature_row=feature_row,
-            event_start_utc=request.event_start_utc,
-            predicted_at_utc=request.predicted_at_utc,
-        )
-    return predict_football_1x2(
+    return _historical_prediction(
         artifact=artifact,
         feature_row=feature_row,
-        event_start_utc=request.event_start_utc,
+        event_start_utc=scheduled_start,
         predicted_at_utc=request.predicted_at_utc,
+        feature_available_at_utc=feature_available_at,
     )
 
 
@@ -134,6 +140,7 @@ def _historical_prediction(
     feature_row: VerifiedFeatureRow,
     event_start_utc: datetime,
     predicted_at_utc: datetime,
+    feature_available_at_utc: datetime,
 ) -> MarketPrediction:
     """Generate a verified but explicitly non-production-eligible historical prediction."""
     model_lineage = artifact.feature_lineage
@@ -181,7 +188,7 @@ def _historical_prediction(
         canonical_event_id=feature_row.canonical_event_id,
         event_start_utc=event_start_utc,
         predicted_at_utc=predicted_at_utc,
-        feature_available_at_utc=feature_row.available_at_utc,
+        feature_available_at_utc=feature_available_at_utc,
         lineage=lineage,
         probabilities=selection_probabilities,
         ordered_selection_space=tuple(item.selection for item in selection_probabilities),

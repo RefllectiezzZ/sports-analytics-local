@@ -100,7 +100,7 @@ def _prediction(
     )
 
 
-def _quote(prediction=None, *, odds=(Decimal("2.00"), Decimal("2.20")), closing=False):
+def _quote(prediction=None, *, odds=(Decimal("1.90"), Decimal("1.90")), closing=False):
     prediction = prediction or _prediction()
     prices = tuple(
         PricedSelection(
@@ -242,13 +242,13 @@ def test_complete_market_value_exposes_raw_normalized_edge_and_ev() -> None:
     )
     assert evaluation.quote.source_name == "licensed-feed"
     assert evaluation.quote.provider_id == "provider-a"
-    assert evaluation.overround == pytest.approx((1 / 2.0) + (1 / 2.2) - 1)
+    assert evaluation.overround == pytest.approx((1 / 1.9) + (1 / 1.9) - 1)
     assert sum(item.normalized_implied_probability for item in evaluation.selections) == (
         pytest.approx(1.0)
     )
     by_outcome = {item.selection.outcome_key: item for item in evaluation.selections}
-    assert by_outcome["player-a"].expected_value == pytest.approx(0.2)
-    assert by_outcome["player-a"].raw_implied_probability == pytest.approx(0.5)
+    assert by_outcome["player-a"].expected_value == pytest.approx(0.14)
+    assert by_outcome["player-a"].raw_implied_probability == pytest.approx(1 / 1.9)
 
 
 def test_quote_requires_exact_complete_outcome_set() -> None:

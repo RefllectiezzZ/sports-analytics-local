@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -30,66 +32,106 @@ def _write(root: Path, relative: str = "backtests/example/id-1"):
 
 
 def _typed_datasets():
-    prediction = {
-        "prediction_id": "prediction-1",
-        "canonical_event_id": "event-1",
-        "event_start_utc": "2024-02-10T15:00:00Z",
-        "predicted_at_utc": "2024-02-10T12:00:00Z",
-        "ordered_selection_ids": ["selection-a", "selection-b", "selection-c"],
-        "probabilities": [
-            {"selection_id": "selection-a", "probability": 0.5},
-            {"selection_id": "selection-b", "probability": 0.3},
-            {"selection_id": "selection-c", "probability": 0.2},
-        ],
-    }
-    opportunity = {
-        "opportunity_id": "opportunity-1",
-        "canonical_event_id": "event-1",
-        "event_start_utc": "2024-02-10T15:00:00Z",
-        "decision_as_of_utc": "2024-02-10T14:00:00Z",
-        "prediction_id": "prediction-1",
-        "quote_observation_id": "quote-1",
-        "provider_id": "provider-a",
-        "decimal_odds": "2.0",
-        "model_probability": 0.6,
-        "edge": 0.1,
-        "expected_value": 0.2,
-        "raw_implied_probability": 0.5,
-        "normalized_implied_probability": 0.47619047619047616,
-        "model_artifact_id": "model-1",
-        "model_checksum_sha256": "a" * 64,
-        "feature_artifact_id": "feature-1",
-        "feature_manifest_checksum_sha256": "b" * 64,
-        "feature_row_id": "event-1",
-    }
-    return {
-        "predictions": (prediction,),
-        "market_evaluations": (
-            {
-                "evaluation_id": "evaluation-1",
-                "prediction_id": "prediction-1",
-                "quote_observation_id": "quote-1",
-                "selection_id": "selection-a",
-                "expected_value": 0.2,
-                "edge": 0.1,
-                "raw_implied_probability": 0.5,
-                "normalized_implied_probability": 0.47619047619047616,
-                "overround": 0.05,
-            },
+    from tests.unit.support.verified_opportunities import basketball_selection
+
+    from sports_analytics.artifact_serializers import build_analysis_datasets
+    from sports_analytics.opportunities.contracts import (
+        OpportunityFilter,
+        filter_and_rank_opportunities,
+    )
+    from sports_analytics.predictions.contracts import (
+        PredictionLineage,
+        PredictionQualityFlags,
+        SelectionProbability,
+        build_market_prediction,
+    )
+    from sports_analytics.value.contracts import (
+        CompleteMarketQuote,
+        PricedSelection,
+        QuoteEvaluationMode,
+        evaluate_complete_market,
+    )
+
+    start = datetime(2024, 2, 10, 15, tzinfo=UTC)
+    selection_a = basketball_selection(outcome="a", sport_code="tennis")
+    selection_b = basketball_selection(outcome="b", sport_code="tennis")
+    lineage = PredictionLineage(
+        model_artifact_id="model-1",
+        model_checksum_sha256="a" * 64,
+        model_specification_version="model-v1",
+        feature_artifact_id="feature-1",
+        feature_manifest_checksum_sha256="b" * 64,
+        feature_specification_version="feature-v1",
+        feature_row_id="event-1",
+        trained_through_date=date(2024, 2, 1),
+        calibrated_through_date=date(2024, 2, 2),
+    )
+    prediction = build_market_prediction(
+        canonical_event_id="event-1",
+        event_start_utc=start,
+        predicted_at_utc=start - timedelta(hours=3),
+        feature_available_at_utc=start - timedelta(hours=4),
+        lineage=lineage,
+        probabilities=(
+            SelectionProbability(selection_a, 0.5),
+            SelectionProbability(selection_b, 0.5),
         ),
-        "opportunity_decisions": (
-            {
-                "opportunity_id": "opportunity-1",
-                "filter_config_id": "filter-1",
-                "decision_as_of_utc": "2024-02-10T14:00:00Z",
-                "eligible": True,
-                "rejection_codes": [],
-            },
+        quality=PredictionQualityFlags(
+            calibrated=True,
+            model_artifact_verified=True,
+            feature_artifact_verified=True,
+            sufficient_history=True,
+            data_quality_passed=True,
         ),
-        "opportunities": (opportunity,),
-        "combinations": (),
-        "rejections": (),
-    }
+    )
+    quote = CompleteMarketQuote(
+        canonical_event_id="event-1",
+        source_name="feed",
+        provider_type="bookmaker",
+        provider_id="provider-a",
+        quote_phase="current",
+        source_observed_at_utc=start - timedelta(hours=1),
+        quoted_at_utc=start - timedelta(hours=2),
+        quote_timestamp_precision="exact",
+        quote_valid_from_utc=None,
+        quote_valid_to_utc=None,
+        selections=(
+            PricedSelection(
+                selection=selection_a,
+                decimal_odds=Decimal("1.90"),
+                quote_series_id="series-a",
+                quote_observation_id="quote-1",
+            ),
+            PricedSelection(
+                selection=selection_b,
+                decimal_odds=Decimal("1.90"),
+                quote_series_id="series-b",
+                quote_observation_id="quote-2",
+            ),
+        ),
+    )
+    evaluation = evaluate_complete_market(
+        prediction=prediction,
+        quote=quote,
+        mode=QuoteEvaluationMode.LIVE_SAFE,
+    )
+    from sports_analytics.opportunities.contracts import opportunities_from_evaluation
+
+    opportunities = opportunities_from_evaluation(evaluation)
+    filters = OpportunityFilter()
+    search = filter_and_rank_opportunities(opportunities, filters=filters)
+    return build_analysis_datasets(
+        predictions=(prediction,),
+        evaluations=(evaluation,),
+        opportunities=opportunities,
+        decisions=search.decisions,
+        opportunity_rejections=search.rejected,
+        combinations=(),
+        combination_rejections=(),
+        filters=filters,
+        combination_policy_id=None,
+        provenance="synthetic-contract",
+    )
 
 
 def test_artifact_is_atomic_content_addressed_and_deterministic(tmp_path: Path) -> None:
@@ -223,7 +265,7 @@ def test_typed_artifact_declares_and_verifies_authoritative_datasets(
         root=tmp_path,
         relative_directory="analysis/id-1",
         artifact_kind="analysis",
-        schema_version="analysis-v1",
+        schema_version="analysis-v2",
         datasets=_typed_datasets(),
     )
     assert {item.name for item in artifact.datasets} == set(_typed_datasets())
@@ -231,40 +273,101 @@ def test_typed_artifact_declares_and_verifies_authoritative_datasets(
         root=tmp_path,
         relative_directory="analysis\\id-1",
         expected_kind="analysis",
-        expected_schema_version="analysis-v1",
+        expected_schema_version="analysis-v2",
         expected_artifact_id=artifact.artifact_id,
     )
     assert loaded.dataset("predictions").row_count == 1
-    assert loaded.dataset("opportunities").rows[0]["opportunity_id"] == "opportunity-1"
+    assert loaded.dataset("opportunities").rows[0]["canonical_event_id"] == "event-1"
 
 
 def test_typed_backtest_layout_requires_settlements_and_metric_datasets(
     tmp_path: Path,
 ) -> None:
-    datasets = _typed_datasets()
-    datasets.update(
-        {
-            "settlements": (
-                {
-                    "bet_id": "bet-1",
-                    "fold_id": "fold-1",
-                    "kind": "single",
-                    "opportunity_ids": ["opportunity-1"],
-                    "decimal_odds": "2.0",
-                    "result": "win",
-                    "stake_units": "1",
-                    "profit_units": "1.0",
-                },
+    from tests.unit.support.verified_opportunities import build_test_opportunity
+
+    from sports_analytics.artifact_serializers import build_backtest_datasets
+    from sports_analytics.backtesting.contracts import (
+        BacktestFold,
+        BacktestMetrics,
+        BacktestMode,
+        BacktestResult,
+        BetKind,
+        SettledBet,
+        SettledOpportunity,
+        SettlementResult,
+    )
+
+    opportunity = build_test_opportunity(
+        "1",
+        event_id="event-1",
+        start=datetime(2024, 2, 10, 15, tzinfo=UTC),
+    )
+    settled = SettledOpportunity(opportunity=opportunity, result=SettlementResult.WIN)
+    result = BacktestResult(
+        backtest_id="backtest-1",
+        decision_run_id="decision-1",
+        backtest_result_id="backtest-1",
+        mode=BacktestMode.TIMESTAMPED_SYNTHETIC,
+        strategy_id="strategy-1",
+        folds=(
+            BacktestFold(
+                fold_id="fold-1",
+                train_start_date=date(2024, 1, 1),
+                train_end_date=date(2024, 2, 1),
+                calibration_start_date=date(2024, 2, 2),
+                calibration_end_date=date(2024, 3, 9),
+                test_start_date=date(2024, 3, 10),
+                test_end_date=date(2024, 3, 10),
             ),
-            "fold_metrics": ({"fold_id": "fold-1", "sample_size": 1},),
-            "aggregate_metrics": ({"metric_id": "aggregate", "backtest_id": "backtest-1"},),
-        }
+        ),
+        bets=(
+            SettledBet(
+                bet_id="bet-1",
+                fold_id="fold-1",
+                kind=BetKind.SINGLE,
+                opportunity_ids=(opportunity.opportunity_id,),
+                decimal_odds=opportunity.decimal_odds,
+                result=SettlementResult.WIN,
+                stake_units=Decimal("1"),
+                profit_units=Decimal("1"),
+            ),
+        ),
+        metrics=BacktestMetrics(
+            bet_count=1,
+            settled_decision_count=1,
+            win_count=1,
+            loss_count=0,
+            push_count=0,
+            void_count=0,
+            staked_units=Decimal("1"),
+            returned_units=Decimal("2"),
+            net_profit_units=Decimal("1"),
+            roi=1.0,
+            hit_rate=1.0,
+            average_decimal_odds=2.0,
+            maximum_drawdown_units=Decimal("0"),
+            candidate_count=1,
+        ),
+        disclaimer="test",
+        candidates=(settled,),
+    )
+    datasets = build_backtest_datasets(
+        result=result,
+        predictions=(),
+        evaluations=(),
+        feature_artifact_id="feature-1",
+        feature_manifest_checksum_sha256="b" * 64,
+        input_snapshots=(),
+        random_seed=42,
+        test_event_count=1,
+        complete_quote_event_count=1,
+        quote_coverage=1.0,
     )
     artifact = write_typed_analytical_artifact(
         root=tmp_path,
         relative_directory="backtests/id-1",
         artifact_kind="backtest",
-        schema_version="backtest-v1",
+        schema_version="football-1x2-closing-backtest-v2",
         datasets=datasets,
     )
     assert artifact.dataset("settlements").rows[0]["result"] == "win"
@@ -284,34 +387,35 @@ def test_typed_artifact_rejects_duplicate_ids_hash_tampering_and_bad_timing(
             root=tmp_path,
             relative_directory="analysis/duplicate",
             artifact_kind="analysis",
-            schema_version="analysis-v1",
+            schema_version="analysis-v2",
             datasets=duplicate,
         )
     bad_timing = _typed_datasets()
     bad_opportunity = dict(bad_timing["opportunities"][0])
-    bad_opportunity["decision_as_of_utc"] = "2024-02-10T16:00:00Z"
+    bad_opportunity["decision_as_of_utc"] = "2024-02-10T16:00:00.000000Z"
+    bad_opportunity["opportunity_id"] = "forged-timing-id"
     bad_timing["opportunities"] = (bad_opportunity,)
-    with pytest.raises(ArtifactError, match="timing follows"):
+    with pytest.raises(ArtifactError, match="does not match canonical identity|timing follows"):
         write_typed_analytical_artifact(
             root=tmp_path,
             relative_directory="analysis/bad-timing",
             artifact_kind="analysis",
-            schema_version="analysis-v1",
+            schema_version="analysis-v2",
             datasets=bad_timing,
         )
     artifact = write_typed_analytical_artifact(
         root=tmp_path,
         relative_directory="analysis/tamper",
         artifact_kind="analysis",
-        schema_version="analysis-v1",
+        schema_version="analysis-v2",
         datasets=_typed_datasets(),
     )
     directory = tmp_path / artifact.relative_directory
     opportunities = directory / "opportunities.jsonl"
     opportunities.write_text(
         opportunities.read_text(encoding="utf-8").replace(
-            "2024-02-10T14:00:00Z",
-            "2024-02-10T16:00:00Z",
+            "2024-02-10T14:00:00.000000Z",
+            "2024-02-10T16:00:00.000000Z",
         ),
         encoding="utf-8",
     )
@@ -320,7 +424,7 @@ def test_typed_artifact_rejects_duplicate_ids_hash_tampering_and_bad_timing(
             root=tmp_path,
             relative_directory=artifact.relative_directory,
             expected_kind="analysis",
-            expected_schema_version="analysis-v1",
+            expected_schema_version="analysis-v2",
         )
 
 

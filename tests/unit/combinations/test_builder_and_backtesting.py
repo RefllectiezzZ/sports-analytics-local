@@ -64,16 +64,21 @@ def test_dependency_classifier_is_conservative_and_deterministic() -> None:
 
 def test_dependency_metadata_missing_or_shared_is_unknown_and_builder_rejects() -> None:
     first = _opportunity("1", event_id="event-1", start=START)
-    missing = replace(
-        _opportunity("2", event_id="event-2", start=START + timedelta(days=1)),
+    missing = _opportunity(
+        "2",
+        event_id="event-2",
+        start=START + timedelta(days=1),
         dependency_keys=frozenset(),
         participant_ids=frozenset(),
         dependency_metadata_complete=False,
     )
     assert classify_dependency(first, missing).classification is DependencyClass.UNKNOWN
-    shared = replace(
-        _opportunity("3", event_id="event-3", start=START + timedelta(days=2)),
+    shared = _opportunity(
+        "3",
+        event_id="event-3",
+        start=START + timedelta(days=2),
         dependency_keys=first.dependency_keys,
+        participant_ids=first.participant_ids,
     )
     assert classify_dependency(first, shared).classification is DependencyClass.UNKNOWN
     build = build_combinations(

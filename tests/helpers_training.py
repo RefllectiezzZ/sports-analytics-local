@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from sports_analytics.features.football.prematch import FinishedTrainingEvent
 from sports_analytics.sports.identifiers import (
@@ -78,7 +78,11 @@ def synthetic_finished_events(
                     competition_id=competition_id,
                     season_id=season_id,
                     event_date=event_date,
-                    scheduled_start_utc=None,
+                    scheduled_start_utc=datetime.combine(
+                        event_date,
+                        time(15, 0),
+                        tzinfo=UTC,
+                    ),
                     home_canonical_participant_id=home,
                     away_canonical_participant_id=away,
                     home_score=home_score,
@@ -105,6 +109,7 @@ def synthetic_season_csv(
     header = [
         "Div",
         "Date",
+        "Time",
         "HomeTeam",
         "AwayTeam",
         "FTHG",
@@ -136,7 +141,7 @@ def synthetic_season_csv(
         else:
             day = day + timedelta(days=1)
             match_day = day
-        row = f"{division_code},{match_day.strftime('%d/%m/%Y')},{home},{away},{scores}"
+        row = f"{division_code},{match_day.strftime('%d/%m/%Y')},15:00,{home},{away},{scores}"
         if include_closing_avg:
             row += f",{1.8 + (index % 5) * 0.1:.2f},{3.40:.2f},{4.2 - (index % 4) * 0.1:.2f}"
         lines.append(row)

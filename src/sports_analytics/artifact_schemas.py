@@ -4,21 +4,32 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Final
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Final, cast
 
 from sports_analytics.core.exceptions import ArtifactError
-from sports_analytics.data.types import JsonValue
+from sports_analytics.data.types import JsonValue, validate_sha256_checksum
+from sports_analytics.models.identity import content_addressed_id
+from sports_analytics.opportunities.identity import (
+    OPPORTUNITY_IDENTITY_VERSION,
+    VALUE_CALCULATION_TOLERANCE,
+    derive_evaluation_id,
+    derive_opportunity_id,
+)
 
-PREDICTIONS_SCHEMA_VERSION: Final[str] = "predictions-v1"
-MARKET_EVALUATIONS_SCHEMA_VERSION: Final[str] = "market-evaluations-v1"
-OPPORTUNITY_DECISIONS_SCHEMA_VERSION: Final[str] = "opportunity-decisions-v1"
-OPPORTUNITIES_SCHEMA_VERSION: Final[str] = "opportunities-v1"
-COMBINATIONS_SCHEMA_VERSION: Final[str] = "combinations-v1"
-REJECTIONS_SCHEMA_VERSION: Final[str] = "rejections-v1"
-SETTLEMENTS_SCHEMA_VERSION: Final[str] = "settlements-v1"
-FOLD_METRICS_SCHEMA_VERSION: Final[str] = "fold-metrics-v1"
-AGGREGATE_METRICS_SCHEMA_VERSION: Final[str] = "aggregate-metrics-v1"
+PREDICTIONS_SCHEMA_VERSION: Final[str] = "predictions-v2"
+MARKET_EVALUATIONS_SCHEMA_VERSION: Final[str] = "market-evaluations-v2"
+OPPORTUNITY_DECISIONS_SCHEMA_VERSION: Final[str] = "opportunity-decisions-v2"
+OPPORTUNITIES_SCHEMA_VERSION: Final[str] = "opportunities-v2"
+COMBINATIONS_SCHEMA_VERSION: Final[str] = "combinations-v2"
+REJECTIONS_SCHEMA_VERSION: Final[str] = "rejections-v2"
+SETTLEMENTS_SCHEMA_VERSION: Final[str] = "settlements-v2"
+FOLD_METRICS_SCHEMA_VERSION: Final[str] = "fold-metrics-v2"
+AGGREGATE_METRICS_SCHEMA_VERSION: Final[str] = "aggregate-metrics-v2"
+
+REJECTION_KIND_OPPORTUNITY_FILTER = "opportunity-filter"
+REJECTION_KIND_COMBINATION_BUILDER = "combination-builder"
 
 DATASET_SCHEMA_VERSIONS: Final[dict[str, str]] = {
     "predictions": PREDICTIONS_SCHEMA_VERSION,
@@ -56,8 +67,12 @@ SCHEMAS: Final[dict[str, DatasetSchema]] = {
                 "canonical_event_id",
                 "event_start_utc",
                 "predicted_at_utc",
+                "feature_available_at_utc",
+                "provenance",
                 "ordered_selection_ids",
                 "probabilities",
+                "quality",
+                "lineage",
             }
         ),
     ),
@@ -69,14 +84,24 @@ SCHEMAS: Final[dict[str, DatasetSchema]] = {
             {
                 "evaluation_id",
                 "schema_version",
+                "evaluation_version",
                 "prediction_id",
                 "quote_observation_id",
+                "quote_series_id",
                 "selection_id",
-                "expected_value",
-                "edge",
+                "selection",
+                "source_name",
+                "provider_type",
+                "provider_id",
+                "evaluation_mode",
+                "decimal_odds",
+                "model_probability",
                 "raw_implied_probability",
-                "normalized_implied_probability",
+                "complete_market_raw_total",
                 "overround",
+                "normalized_implied_probability",
+                "edge",
+                "expected_value",
             }
         ),
     ),
@@ -104,23 +129,40 @@ SCHEMAS: Final[dict[str, DatasetSchema]] = {
             {
                 "opportunity_id",
                 "schema_version",
+                "identity_version",
+                "evaluation_version",
                 "canonical_event_id",
                 "event_start_utc",
-                "decision_as_of_utc",
+                "selection",
                 "prediction_id",
+                "predicted_at_utc",
+                "quote_series_id",
                 "quote_observation_id",
+                "source_name",
+                "provider_type",
                 "provider_id",
+                "evaluation_mode",
+                "quoted_at_utc",
+                "source_observed_at_utc",
+                "decision_as_of_utc",
                 "decimal_odds",
                 "model_probability",
-                "edge",
-                "expected_value",
                 "raw_implied_probability",
                 "normalized_implied_probability",
+                "overround",
+                "edge",
+                "expected_value",
                 "model_artifact_id",
                 "model_checksum_sha256",
+                "model_specification_version",
                 "feature_artifact_id",
                 "feature_manifest_checksum_sha256",
+                "feature_specification_version",
                 "feature_row_id",
+                "dependency_keys",
+                "participant_ids",
+                "dependency_metadata_complete",
+                "prediction_quality_passed",
             }
         ),
     ),
@@ -132,13 +174,18 @@ SCHEMAS: Final[dict[str, DatasetSchema]] = {
             {
                 "combination_id",
                 "schema_version",
+                "policy_id",
+                "policy_version",
                 "opportunity_ids",
+                "dependencies",
                 "total_decimal_odds",
                 "joint_probability",
                 "expected_value",
                 "common_decision_time_utc",
                 "earliest_event_start_utc",
-                "policy_id",
+                "latest_event_start_utc",
+                "eligible",
+                "rejection_reasons",
             }
         ),
     ),
@@ -146,7 +193,26 @@ SCHEMAS: Final[dict[str, DatasetSchema]] = {
         name="rejections",
         version=REJECTIONS_SCHEMA_VERSION,
         id_field="rejection_id",
-        required_fields=frozenset({"rejection_id", "schema_version", "opportunity_id", "codes"}),
+        required_fields=frozenset(
+            {
+                "rejection_id",
+                "schema_version",
+                "rejection_kind",
+            }
+        ),
+        optional_fields=frozenset(
+            {
+                "opportunity_id",
+                "filter_config_id",
+                "codes",
+                "strategy_id",
+                "opportunity_ids",
+                "rejection_code",
+                "reason",
+                "policy_id",
+                "builder_truncated",
+            }
+        ),
     ),
     "settlements": DatasetSchema(
         name="settlements",
@@ -165,18 +231,73 @@ SCHEMAS: Final[dict[str, DatasetSchema]] = {
                 "profit_units",
             }
         ),
+        optional_fields=frozenset({"event_start_utc"}),
     ),
     "fold_metrics": DatasetSchema(
         name="fold_metrics",
         version=FOLD_METRICS_SCHEMA_VERSION,
         id_field="fold_id",
-        required_fields=frozenset({"fold_id", "schema_version", "sample_size"}),
+        required_fields=frozenset(
+            {
+                "fold_id",
+                "schema_version",
+                "sample_size",
+                "accepted_single_count",
+                "accepted_combination_count",
+                "net_profit_units",
+            }
+        ),
     ),
     "aggregate_metrics": DatasetSchema(
         name="aggregate_metrics",
         version=AGGREGATE_METRICS_SCHEMA_VERSION,
         id_field="metric_id",
-        required_fields=frozenset({"metric_id", "schema_version", "backtest_id"}),
+        required_fields=frozenset(
+            {
+                "metric_id",
+                "schema_version",
+                "backtest_id",
+                "decision_run_id",
+                "mode",
+                "strategy_id",
+                "feature_artifact_id",
+                "feature_manifest_checksum_sha256",
+                "input_snapshots",
+                "random_seed",
+                "test_event_count",
+                "complete_quote_event_count",
+                "quote_coverage",
+                "candidate_count",
+                "rejection_count",
+                "accepted_single_count",
+                "accepted_combination_count",
+                "bet_count",
+                "win_count",
+                "loss_count",
+                "push_count",
+                "void_count",
+                "staked_units",
+                "returned_units",
+                "gross_return_units",
+                "net_profit_units",
+                "roi",
+                "hit_rate",
+                "average_decimal_odds",
+                "maximum_drawdown_units",
+                "cumulative_profit_units",
+                "average_model_probability",
+                "average_edge",
+                "average_expected_value",
+                "all_prediction_count",
+                "selected_prediction_count",
+                "all_log_loss",
+                "all_multiclass_brier_score",
+                "selected_log_loss",
+                "selected_multiclass_brier_score",
+                "rejection_counts_by_reason",
+                "disclaimer",
+            }
+        ),
     ),
 }
 
@@ -199,39 +320,21 @@ def validate_dataset_row_schema(name: str, row: dict[str, JsonValue], *, version
         raise ArtifactError(f"{name} row is missing required fields")
     if name == "predictions":
         _validate_prediction_row(row)
-    if name in {"market_evaluations", "opportunities", "combinations"}:
+    elif name == "market_evaluations":
+        _validate_market_evaluation_row(row)
+    elif name == "opportunities":
+        _validate_opportunity_row(row)
+    elif name == "opportunity_decisions":
+        _validate_opportunity_decision_row(row)
+    elif name == "combinations":
+        _validate_combination_row(row)
+    elif name == "rejections":
+        _validate_rejection_row(row)
+    elif name == "settlements":
+        _validate_settlement_row(row)
+    elif name in {"market_evaluations", "opportunities"}:
         _validate_finite(row.get("expected_value"), "expected_value")
-    if name in {"market_evaluations", "opportunities"}:
         _validate_finite(row.get("edge"), "edge")
-    if name == "opportunities":
-        _validate_probability(row.get("model_probability"), "model_probability")
-        _validate_probability(row.get("normalized_implied_probability"), "normalized")
-    if name == "combinations":
-        _validate_probability(row.get("joint_probability"), "joint_probability")
-        odds = row.get("total_decimal_odds")
-        if not isinstance(odds, str | int | float) or float(odds) <= 1:
-            raise ArtifactError("combination total_decimal_odds must be >1")
-        joint = row["joint_probability"]
-        expected_value = row["expected_value"]
-        if not isinstance(joint, int | float) or not isinstance(odds, str | int | float):
-            raise ArtifactError("combination probability or odds is invalid")
-        if not isinstance(expected_value, int | float):
-            raise ArtifactError("combination expected_value is invalid")
-        calculated = float(joint) * float(odds) - 1
-        if abs(calculated - float(expected_value)) > 1e-9:
-            raise ArtifactError("combination expected_value is inconsistent")
-    if name == "settlements":
-        if row.get("result") not in {"win", "loss"}:
-            raise ArtifactError("settlement result must be win or loss")
-        if row.get("stake_units") != "1":
-            raise ArtifactError("flat stake must be exactly one unit")
-        returned = float(row["profit_units"]) + 1.0  # type: ignore[arg-type]
-        if row.get("result") == "win":
-            expected = float(row["decimal_odds"])  # type: ignore[arg-type]
-        else:
-            expected = 0.0
-        if abs(returned - expected) > 1e-9:
-            raise ArtifactError("settlement return/profit is inconsistent")
 
 
 def validate_cross_dataset_integrity(datasets: dict[str, tuple[dict[str, JsonValue], ...]]) -> None:
@@ -250,6 +353,7 @@ def validate_cross_dataset_integrity(datasets: dict[str, tuple[dict[str, JsonVal
             raise ArtifactError("eligible decision cannot contain rejection codes")
         if eligible is False and isinstance(codes, list) and not codes:
             raise ArtifactError("rejected decision requires at least one rejection code")
+    _validate_decision_ranks(datasets.get("opportunity_decisions", ()))
     for row in datasets.get("combinations", ()):
         opportunity_ids = row.get("opportunity_ids", [])
         if not isinstance(opportunity_ids, list):
@@ -258,8 +362,21 @@ def validate_cross_dataset_integrity(datasets: dict[str, tuple[dict[str, JsonVal
             if opportunity_id not in opportunities:
                 raise ArtifactError("orphan combination references missing opportunity")
     for row in datasets.get("rejections", ()):
-        if row["opportunity_id"] not in opportunities:
-            raise ArtifactError("orphan rejection references missing opportunity")
+        kind = row.get("rejection_kind")
+        if kind == REJECTION_KIND_OPPORTUNITY_FILTER:
+            if row.get("opportunity_id") not in opportunities:
+                raise ArtifactError("orphan rejection references missing opportunity")
+        elif kind == REJECTION_KIND_COMBINATION_BUILDER:
+            opportunity_ids = row.get("opportunity_ids", [])
+            if not isinstance(opportunity_ids, list):
+                raise ArtifactError("combination rejection opportunity_ids must be a list")
+            for opportunity_id in opportunity_ids:
+                if opportunity_id not in opportunities:
+                    raise ArtifactError(
+                        "orphan combination rejection references missing opportunity"
+                    )
+        else:
+            raise ArtifactError("rejection_kind is unsupported")
     for row in datasets.get("settlements", ()):
         opportunity_ids = row.get("opportunity_ids", [])
         if not isinstance(opportunity_ids, list):
@@ -290,6 +407,358 @@ def _validate_prediction_row(row: dict[str, JsonValue]) -> None:
         raise ArtifactError("prediction ordered selection ids mismatch")
     if abs(math.fsum(values) - 1.0) > 1e-9:
         raise ArtifactError("prediction probabilities must sum to one")
+    provenance = row.get("provenance")
+    if type(provenance) is not str or provenance not in {"historical-replay", "synthetic-contract"}:
+        raise ArtifactError("prediction provenance is unsupported")
+    lineage = row.get("lineage")
+    if not isinstance(lineage, dict):
+        raise ArtifactError("prediction lineage is malformed")
+    for field in (
+        "model_artifact_id",
+        "model_checksum_sha256",
+        "model_specification_version",
+        "feature_artifact_id",
+        "feature_manifest_checksum_sha256",
+        "feature_specification_version",
+        "feature_row_id",
+    ):
+        if type(lineage.get(field)) is not str or not lineage.get(field):
+            raise ArtifactError(f"prediction lineage field {field} is incomplete")
+    try:
+        validate_sha256_checksum(str(lineage["model_checksum_sha256"]))
+        validate_sha256_checksum(str(lineage["feature_manifest_checksum_sha256"]))
+    except Exception as exc:
+        raise ArtifactError("prediction lineage checksum is malformed") from exc
+    if lineage["feature_row_id"] != row["canonical_event_id"]:
+        raise ArtifactError("prediction feature_row_id must match canonical_event_id")
+    expected_id = _recompute_prediction_id(row)
+    if row["prediction_id"] != expected_id:
+        raise ArtifactError("prediction_id does not match canonical identity")
+
+
+def _validate_market_evaluation_row(row: dict[str, JsonValue]) -> None:
+    expected_id = derive_evaluation_id(
+        prediction_id=str(row["prediction_id"]),
+        quote_observation_id=str(row["quote_observation_id"]),
+        selection_id=str(row["selection_id"]),
+    )
+    if row["evaluation_id"] != expected_id:
+        raise ArtifactError("evaluation_id does not match canonical identity")
+    overround = row.get("overround")
+    if isinstance(overround, bool) or not isinstance(overround, int | float):
+        raise ArtifactError("overround must be numeric")
+    if not math.isfinite(float(overround)) or float(overround) < 0.0:
+        raise ArtifactError("overround must be finite and non-negative")
+    complete_total = row.get("complete_market_raw_total")
+    if isinstance(complete_total, bool) or not isinstance(complete_total, int | float):
+        raise ArtifactError("complete_market_raw_total must be numeric")
+    complete_total_f = float(complete_total)
+    if not math.isfinite(complete_total_f) or complete_total_f <= 0.0:
+        raise ArtifactError("complete_market_raw_total must be positive")
+    if abs(complete_total_f - (1.0 + float(overround))) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("complete_market_raw_total is inconsistent with overround")
+    odds = row.get("decimal_odds")
+    if type(odds) is not str:
+        raise ArtifactError("decimal_odds must be a string")
+    odds_f = float(odds)
+    if not math.isfinite(odds_f) or odds_f <= 1.0:
+        raise ArtifactError("decimal_odds must be finite and >1")
+    raw = row.get("raw_implied_probability")
+    normalized = row.get("normalized_implied_probability")
+    model_prob = row.get("model_probability")
+    edge = row.get("edge")
+    expected_value = row.get("expected_value")
+    for field_name, value in (
+        ("raw_implied_probability", raw),
+        ("normalized_implied_probability", normalized),
+        ("model_probability", model_prob),
+        ("edge", edge),
+        ("expected_value", expected_value),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ArtifactError(f"{field_name} must be numeric")
+        if not math.isfinite(float(value)):
+            raise ArtifactError(f"{field_name} must be finite")
+    normalized_f = float(cast(int | float, normalized))
+    raw_f = float(cast(int | float, raw))
+    model_prob_f = float(cast(int | float, model_prob))
+    edge_f = float(cast(int | float, edge))
+    expected_value_f = float(cast(int | float, expected_value))
+    if normalized_f <= 0.0 or normalized_f > 1.0:
+        raise ArtifactError("normalized implied probability must be in (0, 1]")
+    expected_raw = 1.0 / odds_f
+    if abs(raw_f - expected_raw) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("raw implied probability does not match decimal odds")
+    expected_normalized = expected_raw / complete_total_f
+    if abs(normalized_f - expected_normalized) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("normalized implied probability is inconsistent")
+    expected_edge = model_prob_f - expected_normalized
+    if abs(edge_f - expected_edge) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("edge is inconsistent")
+    expected_ev = model_prob_f * odds_f - 1.0
+    if abs(expected_value_f - expected_ev) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("expected_value is inconsistent")
+
+
+def _validate_opportunity_row(row: dict[str, JsonValue]) -> None:
+    if row.get("identity_version") != OPPORTUNITY_IDENTITY_VERSION:
+        raise ArtifactError("opportunity identity_version is unsupported")
+    payload = {key: row[key] for key in row if key not in {"opportunity_id", "schema_version"}}
+    expected_id = derive_opportunity_id(payload=payload)
+    if row["opportunity_id"] != expected_id:
+        raise ArtifactError("opportunity_id does not match canonical identity")
+    for field in (
+        "model_artifact_id",
+        "model_checksum_sha256",
+        "model_specification_version",
+        "feature_artifact_id",
+        "feature_manifest_checksum_sha256",
+        "feature_specification_version",
+        "feature_row_id",
+    ):
+        if type(row.get(field)) is not str or not row.get(field):
+            raise ArtifactError(f"opportunity lineage field {field} is incomplete")
+    if row["feature_row_id"] != row["canonical_event_id"]:
+        raise ArtifactError("opportunity feature_row_id must match canonical_event_id")
+    if type(row.get("prediction_quality_passed")) is not bool:
+        raise ArtifactError("prediction_quality_passed must be boolean")
+    overround = row.get("overround")
+    if isinstance(overround, bool) or not isinstance(overround, int | float):
+        raise ArtifactError("overround must be numeric")
+    if float(overround) < 0.0:
+        raise ArtifactError("overround must be non-negative")
+    odds = row.get("decimal_odds")
+    if type(odds) is not str:
+        raise ArtifactError("decimal_odds must be a string")
+    complete_total = 1.0 + float(overround)
+    odds_f = float(odds)
+    raw = float(row["raw_implied_probability"])  # type: ignore[arg-type]
+    normalized = float(row["normalized_implied_probability"])  # type: ignore[arg-type]
+    if normalized <= 0.0:
+        raise ArtifactError("normalized implied probability must be positive")
+    if abs(raw - 1.0 / odds_f) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("opportunity raw implied probability is inconsistent")
+    if abs(normalized - raw / complete_total) > VALUE_CALCULATION_TOLERANCE:
+        raise ArtifactError("opportunity normalized implied probability is inconsistent")
+
+
+def _validate_opportunity_decision_row(row: dict[str, JsonValue]) -> None:
+    if type(row.get("eligible")) is not bool:
+        raise ArtifactError("eligible must be a boolean")
+    codes = row.get("rejection_codes")
+    if not isinstance(codes, list) or any(type(item) is not str for item in codes):
+        raise ArtifactError("rejection_codes must be a string list")
+
+
+def _validate_combination_row(row: dict[str, JsonValue]) -> None:
+    _validate_finite(row.get("expected_value"), "expected_value")
+    _validate_finite(row.get("edge", 0.0), "edge") if "edge" in row else None
+    _validate_probability(row.get("joint_probability"), "joint_probability")
+    odds = row.get("total_decimal_odds")
+    if type(odds) is not str or float(odds) <= 1:
+        raise ArtifactError("combination total_decimal_odds must be >1")
+    joint = row["joint_probability"]
+    expected_value = row["expected_value"]
+    if not isinstance(joint, int | float) or not isinstance(expected_value, int | float):
+        raise ArtifactError("combination probability or expected_value is invalid")
+    calculated = float(joint) * float(odds) - 1
+    if abs(calculated - float(expected_value)) > 1e-9:
+        raise ArtifactError("combination expected_value is inconsistent")
+    dependencies = row.get("dependencies")
+    if not isinstance(dependencies, list):
+        raise ArtifactError("combination dependencies must be a list")
+    opportunity_ids = row.get("opportunity_ids", [])
+    if not isinstance(opportunity_ids, list):
+        raise ArtifactError("combination opportunity_ids must be a list")
+    pairs_seen: set[tuple[str, str]] = set()
+    for item in dependencies:
+        if not isinstance(item, dict):
+            raise ArtifactError("combination dependency entry is malformed")
+        left = item.get("left_opportunity_id")
+        right = item.get("right_opportunity_id")
+        if type(left) is not str or type(right) is not str:
+            raise ArtifactError("combination dependency ids are malformed")
+        if item.get("classification") != "structurally_separate":
+            raise ArtifactError(
+                "combination dependency classification must be structurally_separate"
+            )
+        pair = cast(tuple[str, str], tuple(sorted((left, right))))
+        if pair in pairs_seen:
+            raise ArtifactError("combination dependency pair is duplicated")
+        pairs_seen.add(pair)
+    expected_pairs = len(opportunity_ids) * (len(opportunity_ids) - 1) // 2
+    if len(pairs_seen) != expected_pairs:
+        raise ArtifactError("combination must contain every dependency pair exactly once")
+
+
+def _validate_rejection_row(row: dict[str, JsonValue]) -> None:
+    kind = row.get("rejection_kind")
+    if kind == REJECTION_KIND_OPPORTUNITY_FILTER:
+        for field in ("opportunity_id", "filter_config_id", "codes"):
+            if field not in row:
+                raise ArtifactError(f"opportunity-filter rejection missing {field}")
+        codes = row.get("codes")
+        if not isinstance(codes, list) or not codes:
+            raise ArtifactError("opportunity-filter rejection codes must be non-empty")
+        expected_id = content_addressed_id(
+            identity_type="opportunity-filter-rejection-v1",
+            payload={
+                "rejection_kind": REJECTION_KIND_OPPORTUNITY_FILTER,
+                "opportunity_id": row["opportunity_id"],
+                "filter_config_id": row["filter_config_id"],
+                "codes": codes,
+                **({"strategy_id": row["strategy_id"]} if "strategy_id" in row else {}),
+            },
+        )
+    elif kind == REJECTION_KIND_COMBINATION_BUILDER:
+        for field in ("opportunity_ids", "rejection_code", "reason", "policy_id"):
+            if field not in row:
+                raise ArtifactError(f"combination-builder rejection missing {field}")
+        expected_id = content_addressed_id(
+            identity_type="combination-builder-rejection-v1",
+            payload={
+                "rejection_kind": REJECTION_KIND_COMBINATION_BUILDER,
+                "opportunity_ids": row["opportunity_ids"],
+                "rejection_code": row["rejection_code"],
+                "reason": row["reason"],
+                "policy_id": row["policy_id"],
+                "builder_truncated": row.get("builder_truncated", False),
+            },
+        )
+    else:
+        raise ArtifactError("rejection_kind is unsupported")
+    if row["rejection_id"] != expected_id:
+        raise ArtifactError("rejection_id does not match canonical identity")
+
+
+def _validate_settlement_row(row: dict[str, JsonValue]) -> None:
+    if row.get("result") not in {"win", "loss"}:
+        raise ArtifactError("settlement result must be win or loss")
+    if row.get("stake_units") != "1":
+        raise ArtifactError("flat stake must be exactly one unit")
+    try:
+        profit = float(row["profit_units"])  # type: ignore[arg-type]
+        odds = float(row["decimal_odds"])  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ArtifactError("settlement numeric fields are malformed") from exc
+    if not math.isfinite(profit) or not math.isfinite(odds):
+        raise ArtifactError("settlement numeric fields must be finite")
+    returned = profit + 1.0
+    expected = odds if row.get("result") == "win" else 0.0
+    if abs(returned - expected) > 1e-9:
+        raise ArtifactError("settlement return/profit is inconsistent")
+
+
+def _validate_decision_ranks(rows: tuple[dict[str, JsonValue], ...]) -> None:
+    by_filter: dict[str, list[dict[str, JsonValue]]] = {}
+    for row in rows:
+        filter_id = row.get("filter_config_id")
+        if type(filter_id) is not str:
+            raise ArtifactError("filter_config_id must be a string")
+        by_filter.setdefault(filter_id, []).append(row)
+    for filter_rows in by_filter.values():
+        opportunity_ids = [str(row["opportunity_id"]) for row in filter_rows]
+        if len(opportunity_ids) != len(set(opportunity_ids)):
+            raise ArtifactError("duplicate opportunity decision under one filter configuration")
+        ranks = []
+        for row in filter_rows:
+            rank = row.get("accepted_rank")
+            if row.get("eligible") is True and isinstance(rank, int):
+                ranks.append(rank)
+        if not ranks:
+            continue
+        ranks_sorted = sorted(ranks)
+        if ranks_sorted != list(range(1, len(ranks_sorted) + 1)):
+            raise ArtifactError("accepted ranks must be unique and contiguous")
+
+
+def _recompute_prediction_id(row: dict[str, JsonValue]) -> str:
+    from sports_analytics.predictions.contracts import (
+        CanonicalSelectionIdentity,
+        PredictionLineage,
+        PredictionQualityFlags,
+        SelectionProbability,
+        derive_prediction_id,
+    )
+
+    lineage_raw = row["lineage"]
+    if not isinstance(lineage_raw, dict):
+        raise ArtifactError("prediction lineage is malformed")
+    quality_raw = row.get("quality")
+    if not isinstance(quality_raw, dict):
+        raise ArtifactError("prediction quality is malformed")
+    probabilities: list[SelectionProbability] = []
+    probabilities_raw = row.get("probabilities")
+    if not isinstance(probabilities_raw, list):
+        raise ArtifactError("prediction probabilities are malformed")
+    for item in probabilities_raw:
+        if not isinstance(item, dict):
+            raise ArtifactError("prediction probability entry is malformed")
+        selection_raw = item.get("selection")
+        if not isinstance(selection_raw, dict):
+            raise ArtifactError("prediction selection is malformed")
+        line_value = selection_raw.get("line_value")
+        participant = selection_raw.get("canonical_participant_id")
+        selection = CanonicalSelectionIdentity(
+            sport_code=str(selection_raw["sport_code"]),
+            market_family=str(selection_raw["market_family"]),
+            market_key=str(selection_raw["market_key"]),
+            market_period=str(selection_raw["market_period"]),
+            participant_scope=str(selection_raw["participant_scope"]),
+            canonical_participant_id=(None if participant is None else str(participant)),
+            line_type=str(selection_raw["line_type"]),
+            line_value=None if line_value is None else Decimal(str(line_value)),
+            outcome_key=str(selection_raw["outcome_key"]),
+        )
+        probabilities.append(
+            SelectionProbability(selection=selection, probability=float(item["probability"]))  # type: ignore[arg-type]
+        )
+    input_snapshots_raw = lineage_raw.get("input_snapshots", [])
+    if not isinstance(input_snapshots_raw, list):
+        raise ArtifactError("prediction input snapshots are malformed")
+    from sports_analytics.predictions.contracts import PredictionInputSnapshot
+
+    input_snapshots = tuple(
+        PredictionInputSnapshot(
+            snapshot_id=str(snapshot["snapshot_id"]),
+            manifest_checksum_sha256=str(snapshot["manifest_checksum_sha256"]),
+            schema_version=str(snapshot.get("schema_version", "snapshot-manifest-v1")),
+            source_name=str(snapshot.get("source_name", "unknown-source")),
+        )
+        for snapshot in input_snapshots_raw
+        if isinstance(snapshot, dict)
+    )
+    lineage = PredictionLineage(
+        model_artifact_id=str(lineage_raw["model_artifact_id"]),
+        model_checksum_sha256=str(lineage_raw["model_checksum_sha256"]),
+        model_specification_version=str(lineage_raw["model_specification_version"]),
+        feature_artifact_id=str(lineage_raw["feature_artifact_id"]),
+        feature_manifest_checksum_sha256=str(lineage_raw["feature_manifest_checksum_sha256"]),
+        feature_specification_version=str(lineage_raw["feature_specification_version"]),
+        feature_row_id=str(lineage_raw["feature_row_id"]),
+        trained_through_date=date.fromisoformat(str(lineage_raw["trained_through_date"])),
+        calibrated_through_date=date.fromisoformat(str(lineage_raw["calibrated_through_date"])),
+        input_snapshots=input_snapshots,
+    )
+    quality = PredictionQualityFlags(
+        calibrated=bool(quality_raw.get("calibrated", False)),
+        model_artifact_verified=bool(quality_raw.get("model_artifact_verified", False)),
+        feature_artifact_verified=bool(quality_raw.get("feature_artifact_verified", False)),
+        sufficient_history=bool(quality_raw.get("sufficient_history", False)),
+        data_quality_passed=bool(quality_raw.get("data_quality_passed", False)),
+    )
+    ordered = row.get("ordered_selection_ids")
+    ordered_ids = tuple(str(item) for item in ordered) if isinstance(ordered, list) else None
+    return derive_prediction_id(
+        canonical_event_id=str(row["canonical_event_id"]),
+        event_start_utc=parse_utc_timestamp(str(row["event_start_utc"])),
+        predicted_at_utc=parse_utc_timestamp(str(row["predicted_at_utc"])),
+        feature_available_at_utc=parse_utc_timestamp(str(row["feature_available_at_utc"])),
+        lineage=lineage,
+        probabilities=tuple(probabilities),
+        ordered_selection_ids=ordered_ids,
+        quality=quality,
+    )
 
 
 def _validate_probability(value: JsonValue | None, field: str) -> None:

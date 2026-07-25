@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import cast
 
 from sports_analytics.backtesting.contracts import (
+    BacktestLineage,
     BacktestMetricAggregation,
     BacktestMetrics,
     BacktestMode,
@@ -33,6 +34,7 @@ from sports_analytics.opportunities.contracts import (
     OpportunityRejection,
     filter_and_rank_opportunities,
 )
+from sports_analytics.opportunities.identity import opportunity_identity_payload
 from sports_analytics.value.contracts import QuoteEvaluationMode
 
 FLAT_STAKE: Decimal = Decimal("1")
@@ -85,6 +87,7 @@ def run_backtest(
     *,
     strategy: StrategyConfiguration,
     builder_bounds: BuilderBounds | None = None,
+    lineage: BacktestLineage | None = None,
 ) -> BacktestResult:
     """Run one fixed strategy over strictly chronological untouched test folds."""
     if not fold_inputs:
@@ -259,6 +262,7 @@ def run_backtest(
         combination_rejections=tuple(combination_rejections),
         bets=tuple(bets),
         metrics=metrics,
+        lineage=lineage,
     )
     disclaimer = (
         "Historical closing-line benchmark only; no pre-kickoff quote availability "
@@ -560,18 +564,46 @@ def _derive_backtest_result_id(
     combination_rejections: tuple[CombinationRejection, ...],
     bets: tuple[SettledBet, ...],
     metrics: BacktestMetrics,
+    lineage: BacktestLineage | None = None,
 ) -> str:
+    candidate_payloads = [
+        {
+            "opportunity_id": item.opportunity.opportunity_id,
+            "result": item.result.value,
+            "identity_checksum": content_addressed_id(
+                identity_type="opportunity-identity-checksum-v1",
+                payload=opportunity_identity_payload(item.opportunity),
+            ),
+        }
+        for item in sorted(candidates, key=lambda row: row.opportunity.opportunity_id)
+    ]
+    fold_models = [
+        {
+            "fold_id": item.fold.fold_id,
+            "fold_model_id": item.fold_model_id,
+            "fold_model_checksum_sha256": item.fold_model_checksum_sha256,
+            "calibration_temperature": item.calibration_temperature,
+            "random_seed": item.random_seed,
+        }
+        for item in ordered_inputs
+    ]
+    lineage_payload: dict[str, JsonValue] | None = None
+    if lineage is not None:
+        lineage_payload = {
+            "feature_artifact_id": lineage.feature_artifact_id,
+            "feature_manifest_checksum_sha256": lineage.feature_manifest_checksum_sha256,
+            "input_snapshots": list(lineage.input_snapshots),
+        }
     return content_addressed_id(
-        identity_type="rolling-origin-backtest-result-v1",
+        identity_type="rolling-origin-backtest-result-v2",
         payload={
             "decision_run_id": decision_run_id,
             "mode": strategy.mode.value,
             "strategy_id": strategy.strategy_id,
             "folds": _fold_payload(ordered_inputs),
-            "candidate_opportunity_ids": cast(
-                list[JsonValue],
-                sorted(item.opportunity.opportunity_id for item in candidates),
-            ),
+            "fold_models": cast(JsonValue, fold_models),
+            "lineage": lineage_payload,
+            "candidate_settlements": cast(JsonValue, candidate_payloads),
             "settlements": [
                 {
                     "bet_id": item.bet_id,
@@ -612,19 +644,62 @@ def _derive_backtest_result_id(
                 }
                 for item in combination_rejections
             ],
-            "metrics": {
-                "bet_count": metrics.bet_count,
-                "net_profit_units": format(metrics.net_profit_units, "f"),
-                "gross_return_units": format(metrics.gross_return_units, "f"),
-                "roi": metrics.roi,
-                "rejection_count": metrics.rejection_count,
-                "rejection_counts_by_reason": [
-                    [reason, count, sample_size]
-                    for reason, count, sample_size in metrics.rejection_counts_by_reason
-                ],
-            },
+            "metrics": _metrics_identity_payload(metrics),
         },
     )
+
+
+def _metrics_identity_payload(metrics: BacktestMetrics) -> dict[str, JsonValue]:
+    return {
+        "bet_count": metrics.bet_count,
+        "settled_decision_count": metrics.settled_decision_count,
+        "win_count": metrics.win_count,
+        "loss_count": metrics.loss_count,
+        "push_count": metrics.push_count,
+        "void_count": metrics.void_count,
+        "staked_units": format(metrics.staked_units, "f"),
+        "returned_units": format(metrics.returned_units, "f"),
+        "net_profit_units": format(metrics.net_profit_units, "f"),
+        "gross_return_units": format(metrics.gross_return_units, "f"),
+        "roi": metrics.roi,
+        "hit_rate": metrics.hit_rate,
+        "average_decimal_odds": metrics.average_decimal_odds,
+        "maximum_drawdown_units": format(metrics.maximum_drawdown_units, "f"),
+        "candidate_count": metrics.candidate_count,
+        "rejection_count": metrics.rejection_count,
+        "accepted_single_count": metrics.accepted_single_count,
+        "accepted_combination_count": metrics.accepted_combination_count,
+        "cumulative_profit_units": [
+            format(value, "f") for value in metrics.cumulative_profit_units
+        ],
+        "average_model_probability": metrics.average_model_probability,
+        "average_edge": metrics.average_edge,
+        "average_expected_value": metrics.average_expected_value,
+        "all_prediction_count": metrics.all_prediction_count,
+        "selected_prediction_count": metrics.selected_prediction_count,
+        "all_log_loss": metrics.all_log_loss,
+        "all_multiclass_brier_score": metrics.all_multiclass_brier_score,
+        "selected_log_loss": metrics.selected_log_loss,
+        "selected_multiclass_brier_score": metrics.selected_multiclass_brier_score,
+        "rejection_counts_by_reason": [
+            [reason, count, sample_size]
+            for reason, count, sample_size in metrics.rejection_counts_by_reason
+        ],
+        "aggregations": [
+            {
+                "dimension": item.dimension,
+                "key": item.key,
+                "sample_size": item.sample_size,
+                "accepted_single_count": item.accepted_single_count,
+                "accepted_combination_count": item.accepted_combination_count,
+                "net_profit_units": format(item.net_profit_units, "f"),
+                "average_model_probability": item.average_model_probability,
+                "average_edge": item.average_edge,
+                "average_expected_value": item.average_expected_value,
+            }
+            for item in metrics.aggregations
+        ],
+    }
 
 
 def _rejection_counts_by_reason(

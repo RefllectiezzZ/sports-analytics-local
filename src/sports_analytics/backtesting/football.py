@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from sports_analytics.backtesting.contracts import (
     BacktestFold,
+    BacktestLineage,
     BacktestMode,
     BacktestResult,
     FoldBacktestInput,
@@ -17,7 +18,7 @@ from sports_analytics.backtesting.contracts import (
     StrategyConfiguration,
 )
 from sports_analytics.backtesting.engine import run_backtest
-from sports_analytics.core.exceptions import BacktestError
+from sports_analytics.core.exceptions import BacktestError, ValueEvaluationError
 from sports_analytics.data.codec import dumps_canonical_json
 from sports_analytics.data.types import JsonValue
 from sports_analytics.evaluation.temporal import TemporalFold
@@ -46,6 +47,7 @@ from sports_analytics.opportunities.contracts import (
 )
 from sports_analytics.predictions.contracts import (
     CanonicalSelectionIdentity,
+    MarketPrediction,
     PredictionInputSnapshot,
     PredictionLineage,
     PredictionQualityFlags,
@@ -55,6 +57,7 @@ from sports_analytics.predictions.contracts import (
 from sports_analytics.sports.football.markets import match_result_1x2_selection
 from sports_analytics.value.contracts import (
     CompleteMarketQuote,
+    MarketValueEvaluation,
     PricedSelection,
     QuoteEvaluationMode,
     evaluate_complete_market,
@@ -69,6 +72,8 @@ class FootballClosingBenchmark:
     test_event_count: int
     complete_quote_event_count: int
     quote_coverage: float
+    predictions: tuple[MarketPrediction, ...] = ()
+    evaluations: tuple[MarketValueEvaluation, ...] = ()
 
 
 def run_football_1x2_closing_benchmark(
@@ -89,6 +94,8 @@ def run_football_1x2_closing_benchmark(
     fold_inputs: list[FoldBacktestInput] = []
     test_events = 0
     quoted_events = 0
+    all_predictions: list[MarketPrediction] = []
+    all_evaluations: list[MarketValueEvaluation] = []
     config = LogisticConfiguration(random_seed=random_seed)
     for fold in folds:
         train = select_vectors(vectors, fold.train.event_ids)
@@ -181,15 +188,20 @@ def run_football_1x2_closing_benchmark(
                     model_artifact_verified=True,
                     feature_artifact_verified=bool(input_snapshots),
                     sufficient_history=True,
-                    data_quality_passed=True,
+                    data_quality_passed=False,
                 ),
             )
             complete_quote = _complete_quote(quote)
-            evaluation = evaluate_complete_market(
-                prediction=prediction,
-                quote=complete_quote,
-                mode=QuoteEvaluationMode.CLOSING_LINE_HISTORICAL_BENCHMARK,
-            )
+            try:
+                evaluation = evaluate_complete_market(
+                    prediction=prediction,
+                    quote=complete_quote,
+                    mode=QuoteEvaluationMode.CLOSING_LINE_HISTORICAL_BENCHMARK,
+                )
+            except ValueEvaluationError:
+                continue
+            all_predictions.append(prediction)
+            all_evaluations.append(evaluation)
             for opportunity in opportunities_from_evaluation(evaluation):
                 settled.append(
                     SettledOpportunity(
@@ -213,6 +225,10 @@ def run_football_1x2_closing_benchmark(
                     test_end_date=fold.test.end_date,
                 ),
                 candidates=tuple(settled),
+                fold_model_id=model_id,
+                fold_model_checksum_sha256=model_checksum,
+                calibration_temperature=temperature,
+                random_seed=random_seed,
             )
         )
     if quoted_events == 0:
@@ -227,12 +243,30 @@ def run_football_1x2_closing_benchmark(
         include_singles=True,
         include_combinations=False,
     )
-    result = run_backtest(tuple(fold_inputs), strategy=strategy)
+    result = run_backtest(
+        tuple(fold_inputs),
+        strategy=strategy,
+        lineage=BacktestLineage(
+            feature_artifact_id=feature_artifact_id,
+            feature_manifest_checksum_sha256=feature_manifest_checksum_sha256,
+            input_snapshots=tuple(
+                {
+                    "snapshot_id": item.snapshot_id,
+                    "manifest_checksum_sha256": item.manifest_checksum_sha256,
+                    "schema_version": item.schema_version,
+                    "source_name": item.source_name,
+                }
+                for item in input_snapshots
+            ),
+        ),
+    )
     return FootballClosingBenchmark(
         result=result,
         test_event_count=test_events,
         complete_quote_event_count=quoted_events,
         quote_coverage=quoted_events / test_events if test_events else 0.0,
+        predictions=tuple(all_predictions),
+        evaluations=tuple(all_evaluations),
     )
 
 

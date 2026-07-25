@@ -11,7 +11,8 @@ from sports_analytics.markets.contracts import (
     MarketSelection,
     ParticipantScope,
 )
-from sports_analytics.opportunities.contracts import Opportunity, opportunities_from_evaluation
+from sports_analytics.opportunities.contracts import Opportunity
+from sports_analytics.opportunities.identity import build_opportunity_from_evaluation
 from sports_analytics.predictions.contracts import (
     CanonicalSelectionIdentity,
     PredictionLineage,
@@ -86,6 +87,11 @@ def build_test_opportunity(
     opponent_probability = (
         1.0 - model_probability if opponent_probability is None else opponent_probability
     )
+    selection_implied = 1.0 / float(Decimal(odds))
+    min_opponent_implied = max(0.01, 1.01 - selection_implied)
+    max_opponent_odds = 1.0 / min_opponent_implied
+    if float(Decimal(opponent_odds)) > max_opponent_odds:
+        opponent_odds = format(Decimal(str(max_opponent_odds)), "f")
     lineage = PredictionLineage(
         model_artifact_id=f"model-{suffix}",
         model_checksum_sha256="a" * 64,
@@ -94,8 +100,8 @@ def build_test_opportunity(
         feature_manifest_checksum_sha256="b" * 64,
         feature_specification_version="feature-v1",
         feature_row_id=event_id,
-        trained_through_date=date(2024, 3, 1),
-        calibrated_through_date=date(2024, 3, 2),
+        trained_through_date=date(2024, 1, 1),
+        calibrated_through_date=date(2024, 1, 2),
     )
     prediction = build_market_prediction(
         canonical_event_id=event_id,
@@ -148,32 +154,25 @@ def build_test_opportunity(
         ),
     )
     evaluation = evaluate_complete_market(prediction=prediction, quote=quote, mode=mode)
-    opportunity = next(
+    priced = {item.selection.selection_id: item for item in quote.selections}
+    value = next(
         item
-        for item in opportunities_from_evaluation(evaluation)
+        for item in evaluation.selections
         if item.selection.selection_id == selection.selection_id
     )
-    needs_metadata_override = (
-        dependency_keys is not None
-        or participant_ids is not None
-        or not dependency_metadata_complete
+    quote_selection = priced[selection.selection_id]
+    keys = dependency_keys if dependency_keys is not None else frozenset({f"event:{event_id}"})
+    participants = (
+        participant_ids if participant_ids is not None else frozenset({f"participant:{event_id}"})
     )
-    if needs_metadata_override:
-        from dataclasses import replace
-
-        return replace(
-            opportunity,
-            dependency_keys=dependency_keys or opportunity.dependency_keys,
-            participant_ids=participant_ids or opportunity.participant_ids,
-            dependency_metadata_complete=dependency_metadata_complete,
-        )
-    from dataclasses import replace
-
-    return replace(
-        opportunity,
-        dependency_keys=frozenset({f"event:{event_id}"}),
-        participant_ids=frozenset({f"participant:{event_id}"}),
-        dependency_metadata_complete=True,
+    return build_opportunity_from_evaluation(
+        evaluation,
+        value,
+        quote_observation_id=quote_selection.quote_observation_id,
+        quote_series_id=quote_selection.quote_series_id,
+        dependency_keys=keys,
+        participant_ids=participants,
+        dependency_metadata_complete=dependency_metadata_complete,
     )
 
 
@@ -185,6 +184,7 @@ def build_three_outcome_opportunities(
     prediction_id: str = "prediction-complete",
 ) -> tuple[Opportunity, Opportunity, Opportunity]:
     """Build three verified opportunities sharing one complete three-outcome prediction."""
+    del prediction_id
     outcomes = ("a", "b", "c")
     selections = tuple(basketball_selection(outcome=outcome) for outcome in outcomes)
     lineage = PredictionLineage(
@@ -195,8 +195,8 @@ def build_three_outcome_opportunities(
         feature_manifest_checksum_sha256="b" * 64,
         feature_specification_version="feature-v1",
         feature_row_id=event_id,
-        trained_through_date=date(2024, 3, 1),
-        calibrated_through_date=date(2024, 3, 2),
+        trained_through_date=date(2024, 1, 1),
+        calibrated_through_date=date(2024, 1, 2),
     )
     prediction = build_market_prediction(
         canonical_event_id=event_id,
@@ -216,7 +216,7 @@ def build_three_outcome_opportunities(
             data_quality_passed=True,
         ),
     )
-    odds = (Decimal("2.0"), Decimal("3.0"), Decimal("10.0"))
+    odds = (Decimal("2.0"), Decimal("3.0"), Decimal("5.0"))
     quote = CompleteMarketQuote(
         canonical_event_id=event_id,
         source_name="feed",
@@ -243,6 +243,8 @@ def build_three_outcome_opportunities(
         quote=quote,
         mode=QuoteEvaluationMode.LIVE_SAFE,
     )
+    from sports_analytics.opportunities.contracts import opportunities_from_evaluation
+
     opportunities = opportunities_from_evaluation(evaluation)
     if len(opportunities) != 3:
         raise RuntimeError("expected three opportunities from complete evaluation")

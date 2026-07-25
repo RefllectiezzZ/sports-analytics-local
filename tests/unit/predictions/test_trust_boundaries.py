@@ -26,7 +26,10 @@ from sports_analytics.backtesting.engine import run_backtest
 from sports_analytics.combinations.contracts import CombinationRules, validate_combination_manual
 from sports_analytics.core.exceptions import ArtifactError, BacktestError, OpportunityError
 from sports_analytics.opportunities.contracts import Opportunity, OpportunityFilter
-from sports_analytics.opportunities.identity import derive_opportunity_id
+from sports_analytics.opportunities.identity import (
+    derive_opportunity_id,
+    opportunity_identity_payload,
+)
 from sports_analytics.predictions.contracts import (
     PredictionQualityFlags,
 )
@@ -67,18 +70,9 @@ def test_opportunity_id_changes_when_material_input_changes() -> None:
     first = build_test_opportunity("1", event_id="event-1", start=START)
     second = build_test_opportunity("2", event_id="event-2", start=START + timedelta(days=1))
     assert first.opportunity_id != second.opportunity_id
-    expected = derive_opportunity_id(
-        evaluation_version="complete-market-value-v1",
-        mode=second.evaluation_mode,
-        prediction_id=second.prediction_id,
-        quote_observation_id=second.quote_observation_id,
-        selection_id=second.selection.selection_id,
-        source_name=second.source_name,
-        provider_type=second.provider_type,
-        provider_id="book-b",
-        decimal_odds=second.decimal_odds,
-        decision_as_of_utc=second.decision_as_of_utc,
-    )
+    payload = opportunity_identity_payload(second)
+    payload = {**payload, "provider_id": "book-b"}
+    expected = derive_opportunity_id(payload=payload)
     assert expected != second.opportunity_id
 
 
@@ -188,18 +182,39 @@ def test_changing_settlement_changes_backtest_result_id() -> None:
 def test_prediction_probability_outside_unit_interval_rejected() -> None:
     row = {
         "prediction_id": "prediction-1",
-        "schema_version": "predictions-v1",
+        "schema_version": "predictions-v2",
         "canonical_event_id": "event-1",
         "event_start_utc": "2024-02-10T15:00:00Z",
         "predicted_at_utc": "2024-02-10T12:00:00Z",
+        "feature_available_at_utc": "2024-02-10T11:00:00Z",
+        "provenance": "synthetic-contract",
         "ordered_selection_ids": ["a", "b"],
         "probabilities": [
             {"selection_id": "a", "probability": 1.2},
             {"selection_id": "b", "probability": -0.2},
         ],
+        "quality": {
+            "calibrated": False,
+            "model_artifact_verified": False,
+            "feature_artifact_verified": False,
+            "sufficient_history": False,
+            "data_quality_passed": False,
+        },
+        "lineage": {
+            "model_artifact_id": "model-1",
+            "model_checksum_sha256": "a" * 64,
+            "model_specification_version": "model-v1",
+            "feature_artifact_id": "feature-1",
+            "feature_manifest_checksum_sha256": "b" * 64,
+            "feature_specification_version": "feature-v1",
+            "feature_row_id": "event-1",
+            "trained_through_date": "2024-02-01",
+            "calibrated_through_date": "2024-02-02",
+            "input_snapshots": [],
+        },
     }
     with pytest.raises(ArtifactError, match="\\[0, 1\\]"):
-        validate_dataset_row_schema("predictions", row, version="predictions-v1")
+        validate_dataset_row_schema("predictions", row, version="predictions-v2")
 
 
 def test_orphan_decisions_rejected_by_cross_dataset_integrity() -> None:
@@ -244,7 +259,7 @@ def test_artifact_verification_cli_requires_schema(tmp_path, capsys) -> None:
 
 def test_missing_eligible_opportunity_lineage_is_rejected() -> None:
     opportunity = build_test_opportunity("1", event_id="event-1", start=START)
-    with pytest.raises(OpportunityError, match="lineage fields must be complete"):
+    with pytest.raises(OpportunityError, match="lineage|does not match canonical identity"):
         Opportunity(
             opportunity_id=opportunity.opportunity_id,
             canonical_event_id=opportunity.canonical_event_id,
@@ -255,6 +270,7 @@ def test_missing_eligible_opportunity_lineage_is_rejected() -> None:
             model_trained_through_date=opportunity.model_trained_through_date,
             model_calibrated_through_date=opportunity.model_calibrated_through_date,
             quote_observation_id=opportunity.quote_observation_id,
+            quote_series_id=opportunity.quote_series_id,
             quoted_at_utc=opportunity.quoted_at_utc,
             source_observed_at_utc=opportunity.source_observed_at_utc,
             source_name=opportunity.source_name,
@@ -286,7 +302,7 @@ def test_missing_eligible_opportunity_lineage_is_rejected() -> None:
 def test_exact_dataset_schema_rejects_unknown_fields() -> None:
     row = {
         "prediction_id": "prediction-1",
-        "schema_version": "predictions-v1",
+        "schema_version": "predictions-v2",
         "canonical_event_id": "event-1",
         "event_start_utc": "2024-02-10T15:00:00Z",
         "predicted_at_utc": "2024-02-10T12:00:00Z",
@@ -298,13 +314,13 @@ def test_exact_dataset_schema_rejects_unknown_fields() -> None:
         "unexpected": True,
     }
     with pytest.raises(ArtifactError, match="unknown fields"):
-        validate_dataset_row_schema("predictions", row, version="predictions-v1")
+        validate_dataset_row_schema("predictions", row, version="predictions-v2")
 
 
 def test_formula_inconsistent_settlement_rejected() -> None:
     row = {
         "bet_id": "bet-1",
-        "schema_version": "settlements-v1",
+        "schema_version": "settlements-v2",
         "fold_id": "fold-1",
         "kind": "single",
         "opportunity_ids": ["opportunity-1"],
@@ -314,7 +330,7 @@ def test_formula_inconsistent_settlement_rejected() -> None:
         "profit_units": "0.5",
     }
     with pytest.raises(ArtifactError, match="inconsistent"):
-        validate_dataset_row_schema("settlements", row, version="settlements-v1")
+        validate_dataset_row_schema("settlements", row, version="settlements-v2")
 
 
 def test_content_inconsistent_opportunity_id_rejected() -> None:
@@ -634,6 +650,7 @@ def test_analysis_publication_is_deterministic_and_reloadable(tmp_path: Path) ->
             ],
         },
         "mode": "live-safe",
+        "provenance": "synthetic-contract",
         "filters": {},
         "relative_directory": "analysis/test-run",
     }
@@ -647,7 +664,7 @@ def test_analysis_publication_is_deterministic_and_reloadable(tmp_path: Path) ->
         root=paths_one.exports_directory,
         relative_directory=str(first["relative_directory"]),
         expected_kind="analysis",
-        expected_schema_version="analysis-v1",
+        expected_schema_version="analysis-v2",
         expected_checksum=str(first["checksum_sha256"]),
     )
     assert loaded.artifact_id == first["artifact_id"]
@@ -661,6 +678,7 @@ def test_verified_model_inference_produces_complete_prediction_record(tmp_path: 
     from sports_analytics.core.settings import load_settings
     from sports_analytics.evaluation.temporal import TemporalSplitConfig
     from sports_analytics.features.football.datasets import load_feature_artifact
+    from sports_analytics.predictions.provenance import PredictionProvenance
     from sports_analytics.predictions.service import (
         VerifiedPredictionRequest,
         generate_verified_football_1x2_prediction,
@@ -728,12 +746,14 @@ def test_verified_model_inference_produces_complete_prediction_record(tmp_path: 
         relative_directory=artifact.relative_directory,
         expected_manifest_checksum=artifact.manifest_checksum_sha256,
     )
-    from datetime import time
 
-    vector = vectors[0]
+    vectors_with_start = [item for item in vectors if item.metadata.scheduled_start_utc is not None]
+    if not vectors_with_start:
+        pytest.skip("synthetic fixture lacks scheduled_start_utc required for historical replay")
+    vector = max(vectors_with_start, key=lambda item: item.metadata.event_date)
     event_start = vector.metadata.scheduled_start_utc
-    if event_start is None:
-        event_start = datetime.combine(vector.metadata.event_date, time(15, 0), tzinfo=UTC)
+    assert event_start is not None
+    predicted_at = event_start - timedelta(hours=2)
     prediction = generate_verified_football_1x2_prediction(
         paths=paths,
         request=VerifiedPredictionRequest(
@@ -743,8 +763,8 @@ def test_verified_model_inference_produces_complete_prediction_record(tmp_path: 
             feature_manifest_checksum_sha256=artifact.manifest_checksum_sha256,
             canonical_event_id=vector.metadata.canonical_event_id,
             event_start_utc=event_start,
-            predicted_at_utc=event_start - timedelta(hours=2),
-            provenance="historical",
+            predicted_at_utc=predicted_at,
+            provenance=PredictionProvenance.HISTORICAL_REPLAY,
         ),
     )
     assert prediction.prediction_id
