@@ -1,8 +1,9 @@
 # Database
 
 Operational persistence for `sports-analytics-local` uses local SQLite via the
-standard-library `sqlite3` module. Analytical datasets will use Parquet in later
-phases; this document describes the current SQLite foundation only.
+standard-library `sqlite3` module. Analytical sports datasets live in immutable
+Parquet snapshots; this document describes the SQLite operational foundation
+only.
 
 ## Roles
 
@@ -249,8 +250,8 @@ After installing the lease triggers, migration `0002` validates every existing
 running job with a NULL lease aborts the migration atomically (`DatabaseMigrationError`),
 leaving schema version 1 and no `worker_instances` objects behind.
 
-No sports-domain tables (teams, fixtures, odds, predictions, bets, etc.) exist
-yet.
+No sports-domain SQLite tables exist. Analytical sports data lives in immutable
+Parquet snapshots; SQLite stores only snapshot metadata.
 
 ### Job priority
 
@@ -367,10 +368,13 @@ manual database manipulation. Do not edit applied migration history by hand.
 
 ## Current limitations
 
-- No sports-domain job handlers.
-- No Parquet writers.
-- No sports-domain schema.
-- No scraping, modelling, betting, or Streamlit UI logic.
+- No sports-domain SQLite tables: analytical sports data lives in Parquet
+  snapshots under `sports_analytics.snapshots`, with metadata only in the
+  `snapshots` table.
+- Sports-domain job handlers live outside this package (`ingest.football-data-csv`
+  in `sports_analytics.ingestion`); SQLite only records job and snapshot
+  metadata.
+- No modelling, betting, settlement, bankroll, or Streamlit UI logic.
 - No paid API or external AI runtime dependency.
 
 
