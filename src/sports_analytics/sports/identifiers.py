@@ -24,6 +24,8 @@ from sports_analytics.sports.contracts import (
 )
 
 SPORT_FOOTBALL: Final[str] = "football"
+SPORT_BASKETBALL: Final[str] = "basketball"
+SPORT_TENNIS: Final[str] = "tennis"
 
 # Project-owned UUIDv5 namespaces. Canonical and source namespaces are distinct so
 # a source-scoped key can never collide with a canonical key.

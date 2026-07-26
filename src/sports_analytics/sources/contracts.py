@@ -68,6 +68,12 @@ class SourceDescriptor:
     supported_scopes: tuple[str, ...]
     requires_network: bool
     notes: str
+    requires_browser: bool = False
+    required_locale: str | None = None
+    allowed_hostnames: tuple[str, ...] = ()
+    supported_market_definition_ids: tuple[str, ...] = ()
+    pre_match_only: bool = False
+    acquisition_status: str = "implemented"
 
     def __post_init__(self) -> None:
         try:
@@ -77,6 +83,13 @@ class SourceDescriptor:
                 validate_identifier(sport_code, field_name="supported_sport")
             for scope in self.supported_scopes:
                 validate_identifier(scope, field_name="supported_scope")
+            for market_id in self.supported_market_definition_ids:
+                validate_identifier(market_id, field_name="supported_market_definition_id")
+            validate_identifier(self.acquisition_status, field_name="acquisition_status")
+            for hostname in self.allowed_hostnames:
+                if not hostname or hostname != hostname.strip().lower():
+                    msg = "allowed_hostnames must be lowercase non-empty hostnames"
+                    raise PermanentSourceError(msg)
         except RepositoryError as exc:
             raise PermanentSourceError(str(exc)) from exc
         if not self.capabilities:
@@ -87,6 +100,17 @@ class SourceDescriptor:
             raise PermanentSourceError(msg)
         if tuple(sorted(self.supported_scopes)) != self.supported_scopes:
             msg = f"source {self.source_id} supported_scopes must be sorted"
+            raise PermanentSourceError(msg)
+        if tuple(sorted(self.allowed_hostnames)) != self.allowed_hostnames:
+            msg = f"source {self.source_id} allowed_hostnames must be sorted"
+            raise PermanentSourceError(msg)
+        if tuple(sorted(self.supported_market_definition_ids)) != (
+            self.supported_market_definition_ids
+        ):
+            msg = f"source {self.source_id} supported_market_definition_ids must be sorted"
+            raise PermanentSourceError(msg)
+        if self.required_locale is not None and not self.required_locale.strip():
+            msg = f"source {self.source_id} required_locale must be non-empty when set"
             raise PermanentSourceError(msg)
 
     @property

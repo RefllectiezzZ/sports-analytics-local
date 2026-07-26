@@ -1,7 +1,7 @@
 """Static top-level source catalog with roles and capabilities.
 
-Only implemented adapters appear here. Bookmaker/current-odds adapters such as
-Betclic and Betano are intentionally absent because no such adapter exists yet.
+Only implemented adapters appear here. Historical Football-Data.co.uk and the
+Portugal bookmaker current-odds adapters (Betano, Betclic) are registered.
 """
 
 from __future__ import annotations
@@ -9,6 +9,31 @@ from __future__ import annotations
 from typing import Final
 
 from sports_analytics.core.exceptions import PermanentSourceError
+from sports_analytics.sources.betano.catalog import (
+    ADAPTER_VERSION as BETANO_ADAPTER_VERSION,
+)
+from sports_analytics.sources.betano.catalog import (
+    ALLOWED_HOSTNAMES as BETANO_ALLOWED_HOSTNAMES,
+)
+from sports_analytics.sources.betano.catalog import (
+    PROVIDER_ID as BETANO_PROVIDER_ID,
+)
+from sports_analytics.sources.betano.catalog import (
+    SUPPORTED_MARKET_DEFINITION_IDS as BETANO_MARKET_DEFINITION_IDS,
+)
+from sports_analytics.sources.betclic.catalog import (
+    ADAPTER_VERSION as BETCLIC_ADAPTER_VERSION,
+)
+from sports_analytics.sources.betclic.catalog import (
+    ALLOWED_HOSTNAMES as BETCLIC_ALLOWED_HOSTNAMES,
+)
+from sports_analytics.sources.betclic.catalog import (
+    PROVIDER_ID as BETCLIC_PROVIDER_ID,
+)
+from sports_analytics.sources.betclic.catalog import (
+    SUPPORTED_MARKET_DEFINITION_IDS as BETCLIC_MARKET_DEFINITION_IDS,
+)
+from sports_analytics.sources.bookmaker_catalog import SUPPORTED_BOOKMAKER_SPORTS
 from sports_analytics.sources.contracts import (
     SourceCapability,
     SourceDescriptor,
@@ -18,6 +43,13 @@ from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
 from sports_analytics.sports.identifiers import SPORT_FOOTBALL
 
 FOOTBALL_DATA_ADAPTER_VERSION: Final[str] = "football-data-co-uk-adapter-v1"
+
+_BOOKMAKER_CAPABILITIES: Final[frozenset[SourceCapability]] = frozenset(
+    {
+        SourceCapability.CURRENT_FIXTURES,
+        SourceCapability.CURRENT_ODDS,
+    }
+)
 
 _FOOTBALL_DATA_DESCRIPTOR: Final[SourceDescriptor] = SourceDescriptor(
     source_id=SOURCE_FOOTBALL_DATA_CO_UK,
@@ -41,8 +73,54 @@ _FOOTBALL_DATA_DESCRIPTOR: Final[SourceDescriptor] = SourceDescriptor(
     ),
 )
 
+_BETANO_DESCRIPTOR: Final[SourceDescriptor] = SourceDescriptor(
+    source_id=BETANO_PROVIDER_ID,
+    display_name="Betano Portugal",
+    role=SourceRole.BOOKMAKER,
+    adapter_version=BETANO_ADAPTER_VERSION,
+    capabilities=_BOOKMAKER_CAPABILITIES,
+    supported_sports=SUPPORTED_BOOKMAKER_SPORTS,
+    supported_scopes=SUPPORTED_BOOKMAKER_SPORTS,
+    requires_network=True,
+    notes=(
+        "Preferred Portugal bookmaker for pre-match fixtures and current odds. "
+        "Visible-browser acquisition only; no live odds, bet placement, or cash-out."
+    ),
+    requires_browser=True,
+    required_locale="pt-PT",
+    allowed_hostnames=tuple(sorted(BETANO_ALLOWED_HOSTNAMES)),
+    supported_market_definition_ids=tuple(sorted(BETANO_MARKET_DEFINITION_IDS)),
+    pre_match_only=True,
+    acquisition_status="implemented",
+)
+
+_BETCLIC_DESCRIPTOR: Final[SourceDescriptor] = SourceDescriptor(
+    source_id=BETCLIC_PROVIDER_ID,
+    display_name="Betclic Portugal",
+    role=SourceRole.BOOKMAKER,
+    adapter_version=BETCLIC_ADAPTER_VERSION,
+    capabilities=_BOOKMAKER_CAPABILITIES,
+    supported_sports=SUPPORTED_BOOKMAKER_SPORTS,
+    supported_scopes=SUPPORTED_BOOKMAKER_SPORTS,
+    requires_network=True,
+    notes=(
+        "Comparison and first-fallback Portugal bookmaker for pre-match fixtures "
+        "and current odds. Visible-browser acquisition only; no live odds, bet "
+        "placement, or cash-out."
+    ),
+    requires_browser=True,
+    required_locale="pt-PT",
+    allowed_hostnames=tuple(sorted(BETCLIC_ALLOWED_HOSTNAMES)),
+    supported_market_definition_ids=tuple(sorted(BETCLIC_MARKET_DEFINITION_IDS)),
+    pre_match_only=True,
+    acquisition_status="implemented",
+)
+
 _DESCRIPTORS: Final[tuple[SourceDescriptor, ...]] = tuple(
-    sorted((_FOOTBALL_DATA_DESCRIPTOR,), key=lambda item: item.source_id)
+    sorted(
+        (_FOOTBALL_DATA_DESCRIPTOR, _BETANO_DESCRIPTOR, _BETCLIC_DESCRIPTOR),
+        key=lambda item: item.source_id,
+    )
 )
 
 
