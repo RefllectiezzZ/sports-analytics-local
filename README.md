@@ -48,14 +48,16 @@ Implemented now:
   flat-unit settlement, and rolling-origin backtesting contracts;
 - a Football-Data market-average closing-price **historical benchmark** for
   football 1X2 singles, with content-addressed analytical artifacts;
+- a read-only Streamlit interface for verified analysis/backtest artifact
+  selection, data status, opportunity browsing, single audit, dependency-safe
+  manual previews, persisted combinations, and backtest/audit views;
 - documentation, linting, typing, and tests.
 
 **Not implemented**: Betclic; Betano; current bookmaker prices; browser scraping
 or automation; additional sports; markets beyond production 1X2 plus a synthetic
 contract proof; player/lineup/injury features; Kelly staking; bet
 recommendations; production accumulators; operational settlement; bankroll
-management; Streamlit UI pages; live automatic bet building; cross-source fuzzy
-resolution.
+management; live automatic bet building; cross-source fuzzy resolution.
 
 ## Supported Python version
 
@@ -295,6 +297,46 @@ python engine.py --config config/settings.toml --verify-backtest-artifact \
 Published backtests are typed, content-addressed multi-dataset artifacts with
 strict manifest, JSONL schema/count/hash, lineage, timing, and duplicate checks.
 
+### Streamlit artifact interface
+
+Run the application from the repository root with the Python 3.12 virtual
+environment:
+
+```powershell
+.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+The sidebar catalogue discovers supported typed `analysis` and `backtest`
+artifacts below the configured `storage.exports_directory`. A candidate is
+selectable only after the existing typed artifact loader verifies its manifest,
+checksum sidecar, dataset checksums, artifact identity, row schemas, canonical
+ordering, and cross-dataset links. Invalid candidates remain visible as
+validation issues and are never exposed as trusted data.
+
+The interface is read-only over persisted analytical artifacts. It provides data
+status, opportunity filters and single-detail audit, local manual accumulator
+validation through the existing dependency/combination domain layer, persisted
+combination browsing, persisted backtest metrics/charts, and raw views of already
+validated typed rows. It does not scrape, ingest, train, predict, write
+artifacts, mutate datasets, or write to SQLite.
+
+Persisted provenance remains explicit:
+
+- `synthetic-contract` rows are contract/test data;
+- `historical-replay` rows are historical analytical replays;
+- closing-line historical benchmarks are not executable bookmaker offers;
+- future live data would require providers and workflows that do not exist yet.
+
+There is no Betclic, Betano, live/upcoming odds feed, staking, bookmaker
+submission, or operational settlement in the interface. Manual accumulator
+results are local interactive previews only and are not persisted or represented
+as accepted bets.
+
+The UI uses a small CSS-only decorative theme with three low-opacity blurred
+orbs, slow transform/opacity motion, visible focus states, and native Streamlit
+controls. Decorative motion communicates no analytical meaning and is disabled
+under the operating system's `prefers-reduced-motion` setting.
+
 ### Windows PowerShell overrides
 
 ```powershell
@@ -357,7 +399,7 @@ pre-commit run --all-files
 
 | File | Role | Status |
 | --- | --- | --- |
-| `app.py` | Streamlit user interface entry point | Placeholder |
+| `app.py` | Read-only Streamlit analytical artifact interface | Implemented |
 | `scraper.py` | Coordinates permitted public data ingestion | Implemented |
 | `engine.py` | Coordinates features, models, predictions, value, and backtesting | Implemented |
 | `worker.py` | Runs durable background jobs outside the Streamlit process | Implemented |
@@ -366,8 +408,9 @@ pre-commit run --all-files
 Each file supports shared validation / database CLI modes. `worker.py` and
 `run_local.py` implement durable worker infrastructure. `scraper.py` implements
 source and competition listing, football ingestion enqueue, snapshot listing, and
-read-only snapshot verification. `app.py` remains a business-function placeholder
-after bootstrap.
+read-only snapshot verification. `app.py` renders the verified artifact
+interface when launched through Streamlit and retains shared configuration and
+database CLI compatibility when invoked as a regular Python script.
 
 ## Directory structure
 
@@ -441,7 +484,7 @@ pipeline. `scrapers` remains reserved.
 
 ## High-level architecture
 
-- **Streamlit** (`app.py`) for local interactive use (planned).
+- **Streamlit** (`app.py`) for local read-only artifact review (implemented).
 - **Ingestion coordinator** (`scraper.py`) for permitted public sources only
   (implemented for the Football-Data.co.uk ingestion adapter).
 - **Engine** (`engine.py`) for deterministic features, local models, prediction
@@ -470,11 +513,12 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 - No sports-domain SQLite schemas: analytical data lives in Parquet snapshots and
   SQLite stores only snapshot metadata.
 - No browser automation and no HTML scraping.
-- `run_local.py` supervises only the worker; no Streamlit child process is
-  started yet, and no Streamlit UI pages exist.
+- `run_local.py` supervises only the worker; it does not start the implemented
+  Streamlit interface, which is launched explicitly.
 - `system.noop` remains infrastructure-only; `ingest.football-data-csv` is the
   only sports-domain job handler.
-- `app.py` remains a functional placeholder after bootstrap.
+- `app.py` exposes a read-only interface over verified typed analytical
+  artifacts.
 
 ## Contribution workflow
 

@@ -10,8 +10,9 @@ contracts, a leakage-safe football full-match 1X2 modelling pipeline (features,
 rolling-origin validation, temperature calibration, and pickle-free artifacts),
 documentation, generic prediction/value/opportunity/combination/backtesting
 contracts, a football closing-line historical singles benchmark, and quality
-tooling. Live prices, betting recommendations, production combinations, and
-Streamlit pages are **not** implemented.
+tooling, plus a read-only Streamlit interface over verified typed analysis and
+backtest artifacts. Live prices, betting recommendations, and production
+combinations are **not** implemented.
 
 ## Entry points
 
@@ -33,8 +34,9 @@ competitions (`--list-competitions`), enqueues football ingestion jobs
 (`--enqueue-football-data`), lists snapshot metadata (`--list-snapshots`), and
 verifies READY snapshots read-only (`--verify-snapshot`). `engine.py` builds
 football 1X2 feature artifacts, trains/calibrates/evaluates the logistic baseline,
-verifies model artifacts, and runs explicit-parameter inference. `app.py` remains
-a business-function placeholder.
+verifies model artifacts, and runs explicit-parameter inference. `app.py` renders
+the read-only artifact interface when launched through Streamlit and retains the
+shared configuration/database CLI modes for regular Python invocation.
 
 ## Domain boundaries
 
@@ -330,7 +332,8 @@ Implemented:
 - generic prediction, value, opportunity, combination, and backtest contracts;
 - football 1X2 Football-Data closing-market singles benchmark and strict
   content-addressed analytical artifacts;
-- placeholder `app.py` wired to shared bootstrap.
+- read-only Streamlit artifact catalogue, opportunity, accumulator-preview,
+  backtest, and audit pages wired to strict typed artifact verification.
 
 Explicitly **not** implemented yet:
 
@@ -342,5 +345,4 @@ Explicitly **not** implemented yet:
 - production current-price opportunity discovery and accumulators;
 - staking, operational settlement, and bankroll management;
 - cross-source fuzzy resolution;
-- Streamlit UI components;
 - Streamlit child process spawning in `run_local.py`.

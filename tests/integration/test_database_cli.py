@@ -85,7 +85,7 @@ def test_normal_execution_migrates_automatically(
     config = _write_config(isolated_cwd)
     code = run_component("app", "test", argv=["--config", str(config)])
     assert code == SUCCESS_EXIT
-    assert "not implemented" in capsys.readouterr().out.lower()
+    assert "streamlit interface ready" in capsys.readouterr().out.lower()
     assert (isolated_cwd / "db" / "ops.sqlite3").is_file()
     reset_logging()
 
