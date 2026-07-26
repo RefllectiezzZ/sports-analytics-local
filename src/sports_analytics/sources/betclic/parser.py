@@ -195,13 +195,18 @@ def _parse_event(raw: dict[str, Any], *, default_sport: str) -> ProviderEventObs
         )
         for item in raw.get("participants", [])
     )
-    markets = tuple(_parse_market(item) for item in raw.get("markets", []) if isinstance(item, dict))
+    markets = tuple(
+        _parse_market(item) for item in raw.get("markets", []) if isinstance(item, dict)
+    )
     start = raw.get("scheduled_start_utc")
     if not isinstance(start, str):
         msg = "malformed scheduled_start_utc"
         raise ParserError(msg)
     try:
-        scheduled = require_utc(datetime.fromisoformat(start.replace("Z", "+00:00")))
+        scheduled = require_utc(
+            datetime.fromisoformat(start.replace("Z", "+00:00")),
+            field_name="scheduled_start_utc",
+        )
     except (TypeError, ValueError, NormalizationError) as exc:
         msg = "malformed scheduled_start_utc"
         raise ParserError(msg) from exc
@@ -263,7 +268,9 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
         selections=tuple(selections),
         period=str(raw["period"]) if raw.get("period") is not None else None,
         line=market_line,
-        overtime_scope=str(raw["overtime_scope"]) if raw.get("overtime_scope") is not None else None,
+        overtime_scope=(
+            str(raw["overtime_scope"]) if raw.get("overtime_scope") is not None else None
+        ),
         rules_scope=str(raw["rules_scope"]) if raw.get("rules_scope") is not None else None,
         canonical_market_definition_id=(
             str(raw["canonical_market_definition_id"])

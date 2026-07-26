@@ -25,8 +25,9 @@ This repository is in **pre-alpha** state.
 Implemented now:
 
 - packaging, typed configuration, local runtime bootstrap, and logging;
-- SQLite operational persistence with forward-only migrations `0001`–`0004`;
-- durable local job worker infrastructure and a worker-only supervisor;
+- SQLite operational persistence with forward-only migrations `0001`–`0005`;
+- durable local job worker infrastructure and a local supervisor that can also
+  start the bookmaker scheduler when enabled;
 - one Football-Data.co.uk **ingestion adapter** covering two competitions
   (`eng-premier-league`, `prt-primeira-liga`), with allowlisted HTTPS retrieval,
   content-addressed raw storage, and strict CSV parsing;
@@ -52,13 +53,17 @@ Implemented now:
   manual previews, persisted combinations, and backtest/audit views;
 - canonical result snapshots, deterministic analytical settlement,
   persisted-evidence monitoring, and explicit champion–challenger governance;
+- Betano Portugal / Betclic Portugal bookmaker acquisition foundation (visible
+  Playwright Chromium, fixed public routes, raw captures, canonical current-odds
+  snapshots, selection/multiples policy, local scheduler, migration `0005`);
 - documentation, linting, typing, and tests.
 
-**Not implemented**: Betclic; Betano; current bookmaker prices; browser scraping
-or automation; additional sports; markets beyond production 1X2 plus a synthetic
-contract proof; player/lineup/injury features; Kelly staking; bet
-recommendations; production accumulators; real bookmaker settlement; bankroll
-management; live automatic bet building; cross-source fuzzy resolution.
+**Not implemented**: login or bet placement; CAPTCHA / anti-bot bypass; guaranteed
+indefinite live browser acquisition; additional sports beyond football /
+basketball / tennis pre-match scope; markets beyond the initial canonical
+mapping set; Kelly staking; bet recommendations; production UI accumulators;
+real bookmaker settlement; bankroll management; live automatic bet building;
+cross-source fuzzy resolution.
 
 ## Supported Python version
 
@@ -98,6 +103,51 @@ Optional environment and configuration examples:
 cp .env.example .env
 cp config/settings.example.toml config/settings.toml
 ```
+
+### Playwright Chromium (bookmaker acquisition)
+
+Bookmaker acquisition uses ordinary visible Playwright Chromium automation on
+localhost only. After installing the package, install the browser once:
+
+```bash
+python -m playwright install chromium
+```
+
+Bookmakers remain **disabled by default** (`bookmakers.enabled = false`). Enable
+only for local operator use after reviewing current provider terms. There is no
+login, no bet placement, and no CAPTCHA or anti-bot bypass. Blocked providers are
+classified and cooled down; the last valid immutable snapshot may be preserved as
+stale/unavailable, never labelled current. Live acquisition is best-effort and
+is **not** guaranteed to work indefinitely as sites change.
+
+## Bookmaker acquisition (PR #11)
+
+Architecture is localhost-only: SQLite jobs + Parquet snapshots on the local
+filesystem. Preferred provider is Betano (`betano-pt`); comparison / first
+fallback is Betclic (`betclic-pt`). Selection default is
+`preferred-unless-better`. Initial sports: football, basketball, tennis
+pre-match only.
+
+Same-bookmaker multiple invariant: a multiple is valid only when every leg uses
+quotes from exactly one bookmaker. Betano-only and Betclic-only totals are
+compared as complete slips; equal totals select Betano. Mixed-provider singles
+use `CrossBookmakerSinglesComparison` and are never labelled or stored as a
+multiple.
+
+Useful local commands (with bookmakers enabled in settings):
+
+```bash
+python -m sports_analytics.bookmakers --help
+python run_local.py --config config/settings.toml
+```
+
+`run_local.py` starts the worker and, when `bookmakers.enabled` is true and not
+`--worker-once`, also starts the bookmaker scheduler. Operator status remains
+available through database/status CLIs and provider-status records; review
+provider terms before enabling live acquisition.
+
+Offline synthetic fixtures under `tests/fixtures/betano/` and
+`tests/fixtures/betclic/` drive parser and domain tests without live pages.
 
 ## Configuration and runtime
 
@@ -200,10 +250,11 @@ python run_local.py --worker-once
 `--recover-expired-leases` runs one recovery batch, `--once` claims at most one
 currently available job, and no flag starts the polling loop.
 
-`run_local.py` currently supervises **only** the worker child process. Streamlit
-supervision is planned for a later phase. The frozen default handler registry
-contains `system.noop` (infrastructure only) and `ingest.football-data-csv`
-(football ingestion).
+`run_local.py` supervises the worker child process and, when
+`bookmakers.enabled` is true (and not `--worker-once`), also supervises the
+bookmaker scheduler. Streamlit is not supervised here. The frozen default
+handler registry includes `system.noop`, `ingest.football-data-csv`,
+`ingest.bookmaker-current-odds`, settlement, and monitoring handlers.
 
 ### Football ingestion workflow
 
@@ -243,9 +294,8 @@ python scraper.py --list-competitions
 
 `--list-sources` prints one tab-separated line per implemented source adapter
 (`source_id`, `display_name`, role, adapter version, capabilities, supported
-sports) without touching the database or the network. Only the
-Football-Data.co.uk ingestion adapter is registered; no bookmaker or current-odds
-adapter exists.
+sports) without touching the database or the network. Registered adapters include
+Football-Data.co.uk plus Betano/Betclic bookmaker current-odds descriptors.
 
 See [docs/sources.md](docs/sources.md), [docs/snapshots.md](docs/snapshots.md),
 and [docs/data-contracts.md](docs/data-contracts.md).
@@ -486,15 +536,16 @@ pipeline. `scrapers` remains reserved.
 ## High-level architecture
 
 - **Streamlit** (`app.py`) for local read-only artifact review (implemented).
-- **Ingestion coordinator** (`scraper.py`) for permitted public sources only
-  (implemented for the Football-Data.co.uk ingestion adapter).
+- **Ingestion coordinator** (`scraper.py`) for permitted public sources
+  (Football-Data.co.uk plus bookmaker enqueue/status CLI surfaces).
 - **Engine** (`engine.py`) for deterministic features, local models, prediction
   contracts, value evaluation, and historical backtesting (implemented).
 - **Worker** (`worker.py`) for durable background jobs, leases, and retries
-  (implemented).
-- **SQLite** for operational state, jobs, snapshot metadata, and audit records.
+  (implemented), including `ingest.bookmaker-current-odds`.
+- **SQLite** for operational state, jobs, snapshot metadata, bookmaker run/status,
+  and audit records.
 - **Parquet** for historical and analytical datasets under versioned immutable
-  snapshots.
+  snapshots, including `current-bookmaker-odds`.
 
 See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 See
@@ -504,12 +555,17 @@ champion–challenger operations.
 
 ## Current limitations
 
-- Only one source is implemented: the Football-Data.co.uk historical CSV
-  **ingestion adapter**. No **bookmaker / current-odds adapter** exists, so there
-  is no Betclic, no Betano, and no current price data.
-- Only two football competitions are supported, and only historical 1X2 is
-  emitted into the generic market contract. A synthetic totals fixture proves the
-  contract generalizes, but no adapter produces other markets.
+- Historical Football-Data.co.uk ingestion remains the only non-browser CSV
+  adapter. Bookmaker adapters for Betano Portugal and Betclic Portugal exist for
+  pre-match football/basketball/tennis current odds, but live browser acquisition
+  is best-effort and not guaranteed indefinitely.
+- Bookmaker acquisition never logs in, places bets, or bypasses CAPTCHA/anti-bot
+  controls. Blocked providers are classified and cooled down; stale cache is never
+  labelled current.
+- Same-bookmaker multiples only; mixed-provider collections are singles
+  comparisons, not multiples.
+- Only two Football-Data competitions are supported for historical CSV
+  ingestion; historical 1X2 is the production Football-Data market.
 - Cross-source resolution is limited to exact canonical identity. There is no
   fuzzy or machine-learning matching and no silent alias merge; unresolved source
   events stay in `source_events` and are excluded from downstream-safe datasets.
@@ -517,11 +573,13 @@ champion–challenger operations.
   correlation model, or bankroll management. Deterministic flat-unit analytical
   settlement of verified persisted positions is implemented.
 - Analytical datasets remain immutable artifacts. SQLite additionally stores
-  minimal operational result, settlement, monitoring, and model-role indexes.
-- No browser automation and no HTML scraping.
-- `run_local.py` supervises only the worker; it does not start the implemented
-  Streamlit interface, which is launched explicitly.
-- `system.noop` remains infrastructure-only. Durable handlers include ingestion,
+  minimal operational result, settlement, monitoring, model-role, and bookmaker
+  acquisition indexes.
+- Visible Playwright automation is used only for allowlisted bookmaker public
+  routes when enabled; there is no arbitrary URL/HTML scraping surface.
+- `run_local.py` supervises the worker and optional bookmaker scheduler; it does
+  not start Streamlit, which is launched explicitly.
+- Durable handlers include football ingestion, bookmaker current-odds ingestion,
   deterministic analytical settlement, and persisted-evidence monitoring.
 - `app.py` exposes a read-only interface over verified typed analytical
   artifacts.

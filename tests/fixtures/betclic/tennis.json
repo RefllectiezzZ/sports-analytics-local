@@ -1,0 +1,53 @@
+{
+  "schema": "betclic-fixture-bundle-v1",
+  "events": [
+    {
+      "source_event_id": "betclic-evt-tennis-1",
+      "source_competition_id": "betclic-tennis-open",
+      "competition_display_name": "Synthetic Tennis Open",
+      "sport": "tennis",
+      "scheduled_start_utc": "2026-08-17T14:00:00Z",
+      "event_state": "pre-match",
+      "source_page_route_id": "tennis-prematch",
+      "participants": [
+        {
+          "source_participant_id": "betclic-player-elena",
+          "display_name": "Elena Marquez",
+          "role": "player-1",
+          "normalized_name": "elena marquez"
+        },
+        {
+          "source_participant_id": "betclic-player-sofia",
+          "display_name": "Sofia Lindqvist",
+          "role": "player-2",
+          "normalized_name": "sofia lindqvist"
+        }
+      ],
+      "markets": [
+        {
+          "source_market_id": "betclic-mkt-winner",
+          "display_label": "Match Winner",
+          "market_status": "open",
+          "period": "full-match",
+          "rules_scope": "best-of:3;retirement:walkover-counts",
+          "canonical_market_definition_id": "tennis-match-winner",
+          "selections": [
+            {
+              "source_selection_id": "betclic-sel-p1",
+              "display_label": "Elena Marquez",
+              "decimal_odds": "1.65",
+              "selection_status": "active"
+            },
+            {
+              "source_selection_id": "betclic-sel-p2",
+              "display_label": "Sofia Lindqvist",
+              "decimal_odds": "2.25",
+              "selection_status": "active"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "unknown_markets": []
+}

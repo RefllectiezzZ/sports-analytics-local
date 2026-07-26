@@ -375,13 +375,15 @@ added without colliding with handler-defined payloads.
 
 - one job at a time per worker process;
 - no cooperative running-job cancellation;
-- registered domain handlers are `ingest.football-data-csv`,
-  `settlement.settle-analysis`, and `monitoring.run`; there are no Betclic,
-  Betano, bookmaker-execution, or automatic-promotion handlers;
+- registered domain handlers include `ingest.football-data-csv`,
+  `ingest.bookmaker-current-odds`, `settlement.settle-analysis`, and
+  `monitoring.run`; there is no bookmaker-execution or automatic-promotion
+  handler;
+- bookmaker acquisition never logs in, places bets, or bypasses CAPTCHA;
 - no Streamlit supervision yet;
 - at-least-once, not exactly-once;
-- handlers that perform side effects must be idempotent (football ingestion
-  relies on snapshot READY reuse).
+- handlers that perform side effects must be idempotent (football and bookmaker
+  ingestion rely on snapshot READY reuse).
 
 
 ## Football ingestion handler
@@ -403,6 +405,28 @@ integrity conflicts, and similar failures map to `PermanentJobError`.
 Snapshot READY reuse makes identical source-content reprocessing idempotent at
 the snapshot layer. No SQLite transaction remains open during download, CSV
 parsing, or Parquet writing.
+
+## Bookmaker current-odds handler
+
+Registered job type: `ingest.bookmaker-current-odds`
+
+Payload keys:
+
+- required: `provider_id`, `sport`
+- optional: `observed_at_utc`, `acquisition_cycle_id`
+- forbidden control keys rejected (`url`, `cookies`, `credentials`, selectors,
+  proxies, etc.)
+- unknown keys rejected; unknown provider / unsupported sport rejected
+
+The handler opens a disposable visible browser context for fixed provider routes,
+writes minimized raw captures, parses observations, reconciles identities,
+publishes `current-bookmaker-odds`, and records run/status/fallback evidence in
+migration `0005` tables. Blocked providers cool down; stale last-valid snapshots
+may be preserved but are never labelled current.
+
+When `bookmakers.enabled` is true, `run_local.py` also starts
+`python -m sports_analytics.bookmakers.scheduler` beside the worker (skipped for
+`--worker-once`).
 
 ## Operational handlers
 
