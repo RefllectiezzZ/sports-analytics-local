@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sports_analytics.artifact_schemas import validate_cross_dataset_integrity
-from sports_analytics.artifacts import load_typed_analytical_artifact
+from sports_analytics.artifacts import TypedAnalyticalArtifact, load_typed_analytical_artifact
 from sports_analytics.combinations.builder import CombinationBuildResult, build_combinations
 from sports_analytics.combinations.contracts import CombinationRules
 from sports_analytics.combinations.evidence import CombinationEvidenceMode
@@ -29,6 +29,20 @@ def load_eligible_opportunities_from_analysis_artifact(
         expected_schema_version=ANALYSIS_ARTIFACT_SCHEMA,
         expected_checksum=expected_checksum,
     )
+    return opportunities_from_typed_artifact(
+        artifact,
+        eligible_only=True,
+        filter_config_id=filter_config_id,
+    )
+
+
+def opportunities_from_typed_artifact(
+    artifact: TypedAnalyticalArtifact,
+    *,
+    eligible_only: bool = True,
+    filter_config_id: str | None = None,
+) -> tuple[Opportunity, ...]:
+    """Project verified typed rows into domain opportunities for interactive validation."""
     datasets = {dataset.name: dataset.rows for dataset in artifact.datasets}
     validate_cross_dataset_integrity(datasets)
     opportunity_rows = {row["opportunity_id"]: row for row in datasets["opportunities"]}
@@ -39,11 +53,20 @@ def load_eligible_opportunities_from_analysis_artifact(
         if row.get("eligible") is True
         and (filter_config_id is None or row.get("filter_config_id") == filter_config_id)
     }
+    selected_ids = (
+        eligible_ids
+        if eligible_only
+        else {
+            row["opportunity_id"]
+            for row in decisions
+            if filter_config_id is None or row.get("filter_config_id") == filter_config_id
+        }
+    )
     opportunities: list[Opportunity] = []
-    for opportunity_id in sorted(eligible_ids, key=str):
+    for opportunity_id in sorted(selected_ids, key=str):
         row = opportunity_rows.get(opportunity_id)
         if row is None:
-            raise ArtifactError(f"eligible opportunity row is missing: {opportunity_id}")
+            raise ArtifactError(f"decided opportunity row is missing: {opportunity_id}")
         opportunity = _opportunity_from_row(dict(row))
         verify_opportunity_identity(opportunity)
         opportunities.append(opportunity)

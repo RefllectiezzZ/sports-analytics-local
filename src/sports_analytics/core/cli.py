@@ -29,7 +29,7 @@ SUCCESS_EXIT: Final[int] = 0
 CONFIG_ERROR_EXIT: Final[int] = 2
 
 _PLACEHOLDER_MESSAGES: Final[dict[str, str]] = {
-    "app": "Streamlit application is not implemented yet.",
+    "app": "Streamlit interface ready; launch it with `streamlit run app.py`.",
     "scraper": "Data ingestion coordinator is not implemented yet.",
     "engine": "Analytics engine is not implemented yet.",
     "worker": "Background worker is not implemented yet.",

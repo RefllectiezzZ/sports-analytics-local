@@ -115,7 +115,7 @@ def test_normal_placeholder_execution(
     assert code == 0
     captured = capsys.readouterr()
     if module_name == "app":
-        assert "not implemented" in captured.out.lower()
+        assert "streamlit interface ready" in captured.out.lower()
     elif module_name == "scraper":
         source_lines = captured.out.splitlines()
         assert source_lines == [EXPECTED_SOURCE_LINE]
