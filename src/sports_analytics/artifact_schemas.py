@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final, cast
 
@@ -585,17 +585,33 @@ def _validate_prediction_row(row: dict[str, JsonValue]) -> None:
         )
         if lineage["feature_row_id"] != row["canonical_event_id"]:
             raise ArtifactError("prediction feature_row_id must match canonical_event_id")
-        require_canonical_utc_timestamp_string(
+        trained_through_date = require_date_string(
+            lineage.get("trained_through_date"),
+            field="lineage.trained_through_date",
+        )
+        calibrated_through_date = require_date_string(
+            lineage.get("calibrated_through_date"),
+            field="lineage.calibrated_through_date",
+        )
+        event_start_utc = require_canonical_utc_timestamp_string(
             row.get("event_start_utc"),
             field="event_start_utc",
         )
-        require_canonical_utc_timestamp_string(
+        predicted_at_utc = require_canonical_utc_timestamp_string(
             row.get("predicted_at_utc"),
             field="predicted_at_utc",
         )
-        require_canonical_utc_timestamp_string(
+        feature_available_at_utc = require_canonical_utc_timestamp_string(
             row.get("feature_available_at_utc"),
             field="feature_available_at_utc",
+        )
+        _validate_prediction_chronology(
+            provenance=provenance,
+            event_start_utc=event_start_utc,
+            predicted_at_utc=predicted_at_utc,
+            feature_available_at_utc=feature_available_at_utc,
+            trained_through_date=trained_through_date,
+            calibrated_through_date=calibrated_through_date,
         )
         quality = require_dict(row.get("quality"), field="quality")
         for quality_field in (
@@ -618,6 +634,39 @@ def _validate_prediction_row(row: dict[str, JsonValue]) -> None:
         ZeroDivisionError,
     ) as exc:
         raise ArtifactError("prediction row validation failed") from exc
+
+
+def _validate_prediction_chronology(
+    *,
+    provenance: str,
+    event_start_utc: datetime,
+    predicted_at_utc: datetime,
+    feature_available_at_utc: datetime,
+    trained_through_date: date,
+    calibrated_through_date: date,
+) -> None:
+    from sports_analytics.data.codec import format_utc_timestamp
+    from sports_analytics.predictions.replay import derive_historical_replay_cutoff_utc
+
+    if trained_through_date > calibrated_through_date:
+        raise ArtifactError("trained_through_date must not follow calibrated_through_date")
+    event_date = event_start_utc.date()
+    if trained_through_date >= event_date:
+        raise ArtifactError("trained_through_date must be before event start date")
+    if calibrated_through_date >= event_date:
+        raise ArtifactError("calibrated_through_date must be before event start date")
+    if feature_available_at_utc > predicted_at_utc:
+        raise ArtifactError("feature_available_at_utc must not follow predicted_at_utc")
+    if predicted_at_utc >= event_start_utc:
+        raise ArtifactError("predicted_at_utc must be strictly before event_start_utc")
+    if provenance == "historical-replay":
+        replay_cutoff = derive_historical_replay_cutoff_utc(event_start_utc)
+        if format_utc_timestamp(predicted_at_utc) != format_utc_timestamp(replay_cutoff):
+            raise ArtifactError("historical replay predicted_at_utc must equal replay cutoff")
+        if format_utc_timestamp(feature_available_at_utc) != format_utc_timestamp(predicted_at_utc):
+            raise ArtifactError(
+                "historical replay feature_available_at_utc must equal predicted_at_utc"
+            )
 
 
 def _validate_market_evaluation_row(row: dict[str, JsonValue]) -> None:
