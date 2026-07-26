@@ -10,12 +10,12 @@ CREATE TABLE bookmaker_acquisition_runs (
     acquisition_cycle_id TEXT NOT NULL,
     adapter_version TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
-        status IN ('succeeded', 'blocked', 'failed')
+        status IN ('succeeded', 'blocked', 'failed', 'retryable')
     ),
     observed_at TEXT NOT NULL,
     started_at TEXT NOT NULL,
     finished_at TEXT NOT NULL,
-    snapshot_id TEXT,
+    snapshot_id TEXT REFERENCES snapshots(id),
     block_reason TEXT,
     failure_classification TEXT NOT NULL,
     warnings_json TEXT NOT NULL,
@@ -42,13 +42,23 @@ CREATE TABLE bookmaker_acquisition_attempts (
 );
 
 CREATE TABLE bookmaker_provider_status (
-    provider_id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL,
+    sport TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
-        status IN ('healthy', 'blocked', 'degraded', 'unknown')
+        status IN (
+            'operational',
+            'partial',
+            'stale',
+            'blocked',
+            'unavailable',
+            'drift-detected',
+            'disabled',
+            'unknown'
+        )
     ),
     last_attempted_at TEXT,
     last_successful_at TEXT,
-    last_valid_snapshot_id TEXT,
+    last_valid_snapshot_id TEXT REFERENCES snapshots(id),
     snapshot_age_seconds INTEGER CHECK (
         snapshot_age_seconds IS NULL
         OR (typeof(snapshot_age_seconds) = 'integer' AND snapshot_age_seconds >= 0)
@@ -69,11 +79,12 @@ CREATE TABLE bookmaker_provider_status (
     block_failure_classification TEXT,
     next_eligible_at TEXT,
     adapter_version TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (provider_id, sport)
 );
 
 CREATE TABLE bookmaker_snapshot_registrations (
-    snapshot_id TEXT PRIMARY KEY,
+    snapshot_id TEXT PRIMARY KEY REFERENCES snapshots(id),
     provider_id TEXT NOT NULL,
     sport TEXT NOT NULL,
     schema_version TEXT NOT NULL,
@@ -91,13 +102,21 @@ CREATE TABLE bookmaker_snapshot_registrations (
 CREATE INDEX idx_bookmaker_snapshot_registrations_provider_observed
 ON bookmaker_snapshot_registrations (provider_id, observed_at, snapshot_id);
 
+CREATE TABLE bookmaker_scheduler_anchors (
+    provider_id TEXT NOT NULL,
+    sport TEXT NOT NULL,
+    first_due_at TEXT NOT NULL,
+    anchor_set_at TEXT NOT NULL,
+    PRIMARY KEY (provider_id, sport)
+);
+
 CREATE TABLE bookmaker_scheduler_cycles (
     id TEXT PRIMARY KEY,
     provider_id TEXT NOT NULL,
     sport TEXT NOT NULL,
     scheduled_for TEXT NOT NULL,
     enqueued_at TEXT NOT NULL,
-    job_id TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES jobs(id),
     suppressed_duplicate INTEGER NOT NULL CHECK (
         typeof(suppressed_duplicate) = 'integer'
         AND suppressed_duplicate IN (0, 1)

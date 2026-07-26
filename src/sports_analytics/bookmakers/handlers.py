@@ -63,6 +63,8 @@ def ingest_bookmaker_current_odds_handler(
             actor="worker",
             correlation_id=context.job_id,
             checkpoint=context.checkpoint,
+            attempt_number=context.attempt,
+            maximum_attempts=context.maximum_attempts,
         )
         context.logger.info(
             "bookmaker acquisition complete job_id=%s provider=%s sport=%s "

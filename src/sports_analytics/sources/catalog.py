@@ -91,7 +91,7 @@ _BETANO_DESCRIPTOR: Final[SourceDescriptor] = SourceDescriptor(
     allowed_hostnames=tuple(sorted(BETANO_ALLOWED_HOSTNAMES)),
     supported_market_definition_ids=tuple(sorted(BETANO_MARKET_DEFINITION_IDS)),
     pre_match_only=True,
-    acquisition_status="implemented",
+    acquisition_status="experimental-unverified",
 )
 
 _BETCLIC_DESCRIPTOR: Final[SourceDescriptor] = SourceDescriptor(
@@ -113,7 +113,7 @@ _BETCLIC_DESCRIPTOR: Final[SourceDescriptor] = SourceDescriptor(
     allowed_hostnames=tuple(sorted(BETCLIC_ALLOWED_HOSTNAMES)),
     supported_market_definition_ids=tuple(sorted(BETCLIC_MARKET_DEFINITION_IDS)),
     pre_match_only=True,
-    acquisition_status="implemented",
+    acquisition_status="experimental-unverified",
 )
 
 _DESCRIPTORS: Final[tuple[SourceDescriptor, ...]] = tuple(

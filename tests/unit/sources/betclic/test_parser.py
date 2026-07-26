@@ -10,10 +10,8 @@ from typing import Any
 
 from sports_analytics.markets.contracts import MarketStatus
 from sports_analytics.sources.betclic.catalog import ADAPTER_VERSION, PROVIDER_ID
-from sports_analytics.sources.betclic.parser import (
-    parse_betclic_acquisition,
-    parse_betclic_payloads,
-)
+from sports_analytics.sources.betclic.parser import parse_betclic_acquisition
+from sports_analytics.sources.betclic.synthetic import parse_betclic_synthetic_payloads
 from sports_analytics.sources.bookmaker_contracts import (
     ProviderAcquisitionBundle,
     ProviderEventState,
@@ -38,7 +36,7 @@ def _load(name: str) -> dict[str, Any]:
 
 
 def _parse(payload: dict[str, Any], *, sport: str = "football") -> ProviderAcquisitionBundle:
-    return parse_betclic_payloads(
+    return parse_betclic_synthetic_payloads(
         [payload],
         provider_id=PROVIDER_ID,
         adapter_version=ADAPTER_VERSION,

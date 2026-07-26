@@ -27,6 +27,18 @@ from sports_analytics.sources.browser.contracts import (
     BrowserPageObservation,
     BrowserResponseObservation,
 )
+from sports_analytics.sources.browser.errors import (
+    classify_browser_crash,
+    classify_missing_chromium_error,
+    classify_navigation_timeout,
+    classify_playwright_import_error,
+    raise_for_classified_error,
+)
+from sports_analytics.sources.browser.readiness import (
+    classify_readiness_block,
+    readiness_predicate_for_provider,
+    wait_for_readiness,
+)
 from sports_analytics.sources.browser.safety import (
     classify_block_signals,
     validate_provider_navigation_url,
@@ -95,20 +107,24 @@ class PlaywrightBrowserSession:
             from playwright.sync_api import Error as PlaywrightError
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            msg = (
-                "Playwright is not installed. Install the package and run "
-                "`python -m playwright install chromium` locally."
-            )
-            raise PermanentSourceError(msg) from exc
+            raise_for_classified_error(classify_playwright_import_error(exc))
 
         pages: list[BrowserPageObservation] = []
         responses: list[BrowserResponseObservation] = []
         warnings: list[str] = []
         block_reason: BrowserBlockReason | None = None
 
+        current_route_id = "unknown"
+
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=False)
+                try:
+                    browser = playwright.chromium.launch(headless=False)
+                except PlaywrightError as exc:
+                    message = str(exc)
+                    if "executable" in message.lower() or "chromium" in message.lower():
+                        raise_for_classified_error(classify_missing_chromium_error(message))
+                    raise_for_classified_error(classify_browser_crash(message))
                 context = browser.new_context(locale="pt-PT")
                 try:
                     if browser_mode is BrowserMode.VISIBLE_MINIMIZED:
@@ -117,8 +133,10 @@ class PlaywrightBrowserSession:
                         except PlaywrightError:
                             warnings.append("unable to prepare minimized visible window")
                     page = context.new_page()
+                    readiness_predicate = readiness_predicate_for_provider(provider_id)
 
                     def _on_response(response: object) -> None:
+                        nonlocal current_route_id
                         try:
                             response_url = str(getattr(response, "url", ""))
                             validate_provider_navigation_url(
@@ -138,7 +156,7 @@ class PlaywrightBrowserSession:
                                 warnings.append("json-response-truncated")
                                 return
                             status_code = int(getattr(response, "status", 0))
-                            route_id = start_urls[0][0] if start_urls else "unknown"
+                            route_id = current_route_id
                             responses.append(
                                 BrowserResponseObservation(
                                     provider_id=provider_id,
@@ -160,6 +178,7 @@ class PlaywrightBrowserSession:
                     page.on("response", _on_response)
 
                     for page_route_id, url in start_urls:
+                        current_route_id = page_route_id
                         approved = validate_provider_navigation_url(
                             url,
                             allowed_hostnames=allowed_hostnames,
@@ -170,10 +189,16 @@ class PlaywrightBrowserSession:
                                 wait_until="domcontentloaded",
                                 timeout=self._navigation_timeout_ms,
                             )
+                            wait_for_readiness(
+                                page,
+                                predicate=readiness_predicate,
+                                page_route_id=page_route_id,
+                            )
+                        except RetryableSourceError as exc:
+                            raise_for_classified_error(classify_navigation_timeout(str(exc)))
                         except PlaywrightError as exc:
-                            raise RetryableSourceError(
-                                f"incomplete page load for {page_route_id}: {exc}"
-                            ) from exc
+                            message = f"incomplete page load for {page_route_id}: {exc}"
+                            raise RetryableSourceError(message) from exc
                         final_url = page.url
                         validate_provider_navigation_url(
                             final_url,
@@ -184,7 +209,10 @@ class PlaywrightBrowserSession:
                             body_text = page.inner_text("body")
                         except PlaywrightError:
                             body_text = None
-                        detected = classify_block_signals(title=title, body_text=body_text)
+                        detected = classify_readiness_block(page) or classify_block_signals(
+                            title=title,
+                            body_text=body_text,
+                        )
                         fragment = None
                         if body_text is not None:
                             fragment = body_text[:8_192]
@@ -211,8 +239,7 @@ class PlaywrightBrowserSession:
         except PermanentSourceError:
             raise
         except Exception as exc:
-            msg = f"browser process failure: {exc}"
-            raise RetryableSourceError(msg) from exc
+            raise_for_classified_error(classify_browser_crash(f"browser process failure: {exc}"))
 
         return BrowserAcquisitionResult(
             provider_id=provider_id,

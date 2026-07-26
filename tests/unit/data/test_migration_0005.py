@@ -21,7 +21,7 @@ EXPECTED_PREVIOUS = {
     3: "84fda02807a42e9e951d4fad4e8bedeecd1a2fda675be929762394ac5cc2ec94",
     4: "8559eecc1565808578ab402250481e94f15d31a49b7714ff43c4b413702ef11d",
 }
-MIGRATION_0005_CHECKSUM = "d886ae59adfbfa9ad1fd0e024869c53f58c0a683efcc67ea979cf0b516ea030a"
+MIGRATION_0005_CHECKSUM = "05ab73e8d6fb2489ed21ee82eaa2b6b84c428d27b69beae593d2efa20b2d73ff"
 
 
 def test_migration_0005_checksum_pinned_from_discover() -> None:
@@ -51,6 +51,7 @@ def test_empty_database_upgrades_to_5_and_repeated_is_noop(tmp_path: Path) -> No
         "bookmaker_acquisition_attempts",
         "bookmaker_provider_status",
         "bookmaker_snapshot_registrations",
+        "bookmaker_scheduler_anchors",
         "bookmaker_scheduler_cycles",
         "bookmaker_fallback_decisions",
         "bookmaker_drift_findings",
@@ -120,6 +121,18 @@ def test_foreign_keys_and_unique_constraints(tmp_path: Path) -> None:
                     """
                 )
         with transaction(connection):
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    id, job_type, payload_json, status, priority, attempts,
+                    maximum_attempts, available_at, created_at, updated_at, version
+                ) VALUES (
+                    'job-1', 'ingest.bookmaker-current-odds', '{}', 'pending', 0, 0,
+                    2, '2026-07-26T12:00:00.000000Z',
+                    '2026-07-26T12:00:00.000000Z', '2026-07-26T12:00:00.000000Z', 1
+                )
+                """
+            )
             connection.execute(
                 """
                 INSERT INTO bookmaker_scheduler_cycles (

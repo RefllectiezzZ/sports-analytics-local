@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from sports_analytics.bookmakers.enqueue import enqueue_bookmaker_acquisition
-from sports_analytics.bookmakers.schemas import bookmaker_snapshot_suite
+from sports_analytics.bookmakers.loader import load_bookmaker_snapshot
 from sports_analytics.bookmakers.types import (
     DEFAULT_BOOKMAKER_INGESTION_MAXIMUM_ATTEMPTS,
     PROVIDER_BETANO_PT,
@@ -29,9 +29,7 @@ from sports_analytics.core.validation import (
 from sports_analytics.data.cli import inspect_database_status
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.repositories.bookmakers import BookmakerRepository
-from sports_analytics.data.repositories.snapshots import SnapshotRepository
-from sports_analytics.data.types import DEFAULT_JOB_PRIORITY, SnapshotStatus, normalize_uuid
-from sports_analytics.snapshots.reader import verify_snapshot_directory
+from sports_analytics.data.types import DEFAULT_JOB_PRIORITY, normalize_uuid
 from sports_analytics.sources.betano.catalog import (
     BETANO_CATALOG,
 )
@@ -156,48 +154,24 @@ def verify_bookmaker_snapshot(
     except RepositoryError as exc:
         raise SnapshotVerificationError(f"invalid snapshot id: {snapshot_id}") from exc
     with connect_database(paths.sqlite_path, read_only=True) as connection:
-        registration = BookmakerRepository(connection).get_snapshot_registration(normalized_id)
-        record = SnapshotRepository(connection).get_snapshot(normalized_id)
-    if registration is None and record is None:
-        raise SnapshotVerificationError(f"bookmaker snapshot not found: {normalized_id}")
-
-    if record is not None:
-        if record.status is not SnapshotStatus.READY:
-            raise SnapshotVerificationError(
-                f"snapshot {normalized_id} is not READY (status={record.status.value})"
+        try:
+            loaded = load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=paths.snapshots_directory,
+                raw_directory=paths.raw_directory,
+                snapshot_id=normalized_id,
             )
-        sport_code = "football"
-        if registration is not None:
-            sport_code = str(registration["sport"])
-        result = verify_snapshot_directory(
-            snapshots_directory=paths.snapshots_directory,
-            relative_manifest_path=record.relative_path,
-            suite=bookmaker_snapshot_suite(sport_code=sport_code),
-            expected_snapshot=record,
-        )
-        payload = {
-            "snapshot_id": normalized_id,
-            "verified": True,
-            "relative_path": record.relative_path,
-            "checksum_sha256": result.manifest_checksum_sha256,
-            "schema_version": result.schema_version,
-            "snapshot_type": result.snapshot_type,
-            "provider_id": (None if registration is None else registration.get("provider_id")),
-            "sport": sport_code,
-        }
-        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-        return SUCCESS_EXIT
-
-    assert registration is not None
+        except SnapshotVerificationError:
+            raise
     payload = {
-        "snapshot_id": normalized_id,
-        "verified": True,
-        "relative_path": registration["relative_path"],
-        "checksum_sha256": registration["checksum_sha256"],
-        "schema_version": registration["schema_version"],
-        "provider_id": registration["provider_id"],
-        "sport": registration["sport"],
-        "registration_only": True,
+        "snapshot_id": loaded.snapshot_id,
+        "verified": loaded.verified,
+        "relative_path": loaded.relative_path,
+        "checksum_sha256": loaded.checksum_sha256,
+        "schema_version": loaded.schema_version,
+        "provider_id": loaded.provider_id,
+        "sport": loaded.sport,
+        "registration_only": loaded.registration_only,
     }
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return SUCCESS_EXIT

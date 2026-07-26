@@ -423,8 +423,11 @@ class BookmakersSettings(_FrozenModel):
     @field_validator("selection_mode")
     @classmethod
     def _supported_selection_mode(cls, value: str) -> str:
-        if value != "preferred-unless-better":
-            msg = f"bookmakers.selection_mode must be 'preferred-unless-better', got {value!r}"
+        from sports_analytics.bookmakers.types import SelectionMode
+
+        allowed = {mode.value for mode in SelectionMode}
+        if value not in allowed:
+            msg = f"bookmakers.selection_mode must be one of {sorted(allowed)}, got {value!r}"
             raise ValueError(msg)
         return value
 

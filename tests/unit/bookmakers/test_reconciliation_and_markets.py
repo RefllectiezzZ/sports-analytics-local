@@ -20,9 +20,9 @@ from sports_analytics.bookmakers.reconciliation import (
 )
 from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION as BETANO_ADAPTER
-from sports_analytics.sources.betano.parser import parse_betano_payloads
+from sports_analytics.sources.betano.synthetic import parse_betano_synthetic_payloads
 from sports_analytics.sources.betclic.catalog import ADAPTER_VERSION as BETCLIC_ADAPTER
-from sports_analytics.sources.betclic.parser import parse_betclic_payloads
+from sports_analytics.sources.betclic.synthetic import parse_betclic_synthetic_payloads
 from sports_analytics.sources.bookmaker_contracts import (
     ProviderMarketObservation,
     ProviderSelectionObservation,
@@ -51,7 +51,7 @@ def test_participant_identity_scope_is_competition_independent() -> None:
 
 
 def test_cross_provider_exact_event_reconciliation() -> None:
-    betano = parse_betano_payloads(
+    betano = parse_betano_synthetic_payloads(
         [json.loads((BETANO_FIXTURES / "football.json").read_text(encoding="utf-8"))],
         provider_id="betano-pt",
         adapter_version=BETANO_ADAPTER,
@@ -77,7 +77,7 @@ def test_cross_provider_exact_event_reconciliation() -> None:
             "normalized_name": "southport athletic",
         },
     ]
-    betclic = parse_betclic_payloads(
+    betclic = parse_betclic_synthetic_payloads(
         [betclic_payload],
         provider_id="betclic-pt",
         adapter_version=BETCLIC_ADAPTER,
@@ -97,7 +97,7 @@ def test_cross_provider_exact_event_reconciliation() -> None:
 
 
 def test_incompatible_competitions_do_not_merge() -> None:
-    betano = parse_betano_payloads(
+    betano = parse_betano_synthetic_payloads(
         [json.loads((BETANO_FIXTURES / "football.json").read_text(encoding="utf-8"))],
         provider_id="betano-pt",
         adapter_version=BETANO_ADAPTER,
@@ -108,7 +108,7 @@ def test_incompatible_competitions_do_not_merge() -> None:
     betclic_payload = json.loads((BETCLIC_FIXTURES / "football.json").read_text(encoding="utf-8"))
     betclic_payload["events"][0]["competition_display_name"] = "Other Cup Synthetic"
     betclic_payload["events"][0]["source_competition_id"] = "other-cup"
-    betclic = parse_betclic_payloads(
+    betclic = parse_betclic_synthetic_payloads(
         [betclic_payload],
         provider_id="betclic-pt",
         adapter_version=BETCLIC_ADAPTER,

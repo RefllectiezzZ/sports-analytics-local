@@ -6,10 +6,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sports_analytics.bookmakers.normalization import (
-    EMPTY_SOURCE_FILE_SHA256,
-    normalize_bookmaker_bundles,
+from sports_analytics.bookmakers.admission import (
+    AdmissionDecision,
+    AdmissionOutcome,
+    evaluate_admission,
 )
+from sports_analytics.bookmakers.normalization import normalize_bookmaker_bundles
 from sports_analytics.bookmakers.reconciliation import reconcile_bookmaker_bundles
 from sports_analytics.bookmakers.snapshots import (
     build_bookmaker_source_version,
@@ -21,6 +23,7 @@ from sports_analytics.bookmakers.types import (
     PROVIDER_BETCLIC_PT,
     BookmakerIngestionResult,
     FailureClassification,
+    ProviderStatusCode,
 )
 from sports_analytics.core.exceptions import (
     NormalizationError,
@@ -37,11 +40,16 @@ from sports_analytics.data.codec import format_utc_timestamp
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.repositories.bookmakers import BookmakerRepository
 from sports_analytics.data.types import JsonValue, normalize_uuid, validate_identifier
-from sports_analytics.snapshots.spec import RawArtifactReference
 from sports_analytics.sources.betano.adapter import acquire_betano_current_odds
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION as BETANO_ADAPTER_VERSION
 from sports_analytics.sources.betclic.adapter import acquire_betclic_current_odds
 from sports_analytics.sources.betclic.catalog import ADAPTER_VERSION as BETCLIC_ADAPTER_VERSION
+from sports_analytics.sources.bookmaker_capture import (
+    build_capture_manifest,
+    manifest_to_raw_artifact,
+    persist_capture_manifest,
+    verify_capture_manifest,
+)
 from sports_analytics.sources.bookmaker_catalog import (
     SUPPORTED_BOOKMAKER_SPORTS,
     reject_forbidden_job_controls,
@@ -49,6 +57,7 @@ from sports_analytics.sources.bookmaker_catalog import (
 from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult, BrowserMode
 from sports_analytics.sources.browser.playwright_runtime import BrowserSession
+from sports_analytics.sources.raw_capture import BookmakerRawCapture
 
 
 class BookmakerIngestionService:
@@ -81,6 +90,8 @@ class BookmakerIngestionService:
         actor: str = "bookmaker-ingestion-service",
         correlation_id: str | None = None,
         checkpoint: Callable[[], None] | None = None,
+        attempt_number: int = 1,
+        maximum_attempts: int = 2,
     ) -> BookmakerIngestionResult:
         """Validate, acquire, normalize, publish, and persist operational state."""
 
@@ -103,6 +114,9 @@ class BookmakerIngestionService:
         if not provider_settings.enabled:
             msg = f"bookmaker provider {provider} is disabled"
             raise PermanentJobError(msg)
+        if attempt_number < 1 or attempt_number > maximum_attempts:
+            msg = "attempt_number exceeds maximum_attempts"
+            raise PermanentJobError(msg)
 
         started_at = self._normalize_utc(self._clock())
         observed_at = (
@@ -116,9 +130,17 @@ class BookmakerIngestionService:
         adapter_version = self._adapter_version(provider)
         browser_mode = self._browser_mode()
 
+        existing_run = self._get_existing_run(provider, sport_code, cycle_id)
+        if existing_run is not None and existing_run["status"] in {
+            "succeeded",
+            "blocked",
+            "failed",
+        }:
+            return self._result_from_run(existing_run)
+
         _checkpoint()
         try:
-            browser_result, bundle, capture_paths = self._acquire(
+            browser_result, bundle, captures = self._acquire(
                 provider_id=provider,
                 sport=sport_code,
                 acquisition_cycle_id=cycle_id,
@@ -127,7 +149,7 @@ class BookmakerIngestionService:
             )
         except RetryableSourceError as exc:
             finished_at = self._normalize_utc(self._clock())
-            self._persist_failure(
+            self._persist_retryable(
                 provider_id=provider,
                 sport=sport_code,
                 acquisition_cycle_id=cycle_id,
@@ -135,9 +157,23 @@ class BookmakerIngestionService:
                 observed_at=observed_at,
                 started_at=started_at,
                 finished_at=finished_at,
+                attempt_number=attempt_number,
                 failure_classification="retryable-source-error",
+                detail_code="retryable-source-error",
                 warnings=[],
             )
+            if attempt_number >= maximum_attempts:
+                self._finalize_terminal_failure(
+                    provider_id=provider,
+                    sport=sport_code,
+                    acquisition_cycle_id=cycle_id,
+                    adapter_version=adapter_version,
+                    observed_at=observed_at,
+                    finished_at=finished_at,
+                    failure_classification="retry-exhausted",
+                    warnings=[],
+                )
+                raise PermanentJobError("retry attempts exhausted") from exc
             raise RetryableJobError(str(exc)) from exc
         except PermanentSourceError as exc:
             finished_at = self._normalize_utc(self._clock())
@@ -149,6 +185,7 @@ class BookmakerIngestionService:
                 observed_at=observed_at,
                 started_at=started_at,
                 finished_at=finished_at,
+                attempt_number=attempt_number,
                 failure_classification="permanent-source-error",
                 warnings=[],
             )
@@ -168,6 +205,7 @@ class BookmakerIngestionService:
                 observed_at=observed_at,
                 started_at=started_at,
                 finished_at=finished_at,
+                attempt_number=attempt_number,
                 block_reason=classification,
                 failure_classification=classification,
                 warnings=warnings,
@@ -209,32 +247,80 @@ class BookmakerIngestionService:
                 observed_at=observed_at,
                 started_at=started_at,
                 finished_at=finished_at,
+                attempt_number=attempt_number,
                 failure_classification="normalize-error",
                 warnings=[warning.code for warning in bundle.warnings],
             )
             raise PermanentJobError(str(exc)) from exc
 
-        _checkpoint()
-        raw_sha = EMPTY_SOURCE_FILE_SHA256
-        raw_artifact = RawArtifactReference(
-            relative_path=(capture_paths[0] if capture_paths else "raw/bookmakers/empty.txt"),
-            checksum_sha256=raw_sha,
-            byte_count=0,
-            encoding="utf-8",
+        native_recognized = _native_payload_recognized(bundle)
+        admission = evaluate_admission(
+            browser_result=browser_result,
+            bundle=bundle,
+            normalized=normalized,
+            valid_quote_count=len(normalized.market_quotes),
+            unresolved_event_count=len(reconciliations.unresolved_event_reconciliations),
+            native_payload_recognized=native_recognized,
         )
+        if not admission.may_publish:
+            finished_at = self._normalize_utc(self._clock())
+            status = _ingestion_status_for_admission(admission)
+            self._persist_rejected(
+                provider_id=provider,
+                sport=sport_code,
+                acquisition_cycle_id=cycle_id,
+                adapter_version=adapter_version,
+                observed_at=observed_at,
+                started_at=started_at,
+                finished_at=finished_at,
+                attempt_number=attempt_number,
+                admission=admission,
+                provider_status=_provider_status_for_admission(admission),
+                warnings=list(admission.warnings),
+                drift_codes=list(bundle.drift_codes),
+                blocked_cooldown_seconds=provider_settings.blocked_cooldown_seconds,
+            )
+            return BookmakerIngestionResult(
+                provider_id=provider,
+                sport=sport_code,
+                acquisition_cycle_id=cycle_id,
+                adapter_version=adapter_version,
+                status=status,
+                observed_at_utc=format_utc_timestamp(observed_at),
+                snapshot_id=None,
+                snapshot_reused=False,
+                block_reason=admission.reason_code if status == "blocked" else None,
+                failure_classification=admission.reason_code,
+                events_observed=len(bundle.events),
+                valid_quotes_observed=len(normalized.market_quotes),
+                unresolved_events=len(reconciliations.unresolved_event_reconciliations),
+                rejected_markets=len(normalized.unknown_markets),
+                warnings=admission.warnings,
+                drift_codes=tuple(bundle.drift_codes),
+            )
+
+        _checkpoint()
+        manifest = build_capture_manifest(
+            provider_id=provider,
+            acquisition_cycle_id=cycle_id,
+            captures=captures,
+        )
+        manifest = persist_capture_manifest(raw_directory=self._raw_directory, manifest=manifest)
+        verify_capture_manifest(raw_directory=self._raw_directory, manifest=manifest)
+        raw_artifact = manifest_to_raw_artifact(manifest)
         source_version = build_bookmaker_source_version(
             sport_code=sport_code,
             acquisition_cycle_id=cycle_id,
-            raw_sha256=raw_sha,
+            raw_sha256=manifest.checksum_sha256,
         )
         status_record = build_provider_status(
             provider_id=provider,
             adapter_version=adapter_version,
             observed_at_utc=observed_at,
             last_attempted_acquisition_utc=started_at,
-            last_successful_acquisition_utc=None,
+            last_successful_acquisition_utc=started_at,
             last_valid_snapshot_id=None,
-            snapshot_age_seconds=None,
+            snapshot_age_seconds=0,
             events_observed=len(bundle.events),
             valid_quotes_observed=len(normalized.market_quotes),
             unresolved_events=len(reconciliations.unresolved_event_reconciliations),
@@ -243,7 +329,7 @@ class BookmakerIngestionService:
             current_block_or_failure_classification=FailureClassification.NONE,
             next_eligible_attempt_utc=None,
             drift_detected=bool(bundle.drift_codes),
-            acquisition_partial=bool(reconciliations.unresolved_event_reconciliations),
+            acquisition_partial=admission.outcome is AdmissionOutcome.PARTIAL,
         )
         try:
             publication = publish_bookmaker_snapshot(
@@ -257,10 +343,14 @@ class BookmakerIngestionService:
                 raw_artifact=raw_artifact,
                 actor=actor,
                 correlation_id=correlation_id,
+                domain_metadata={
+                    "capture_manifest_relative_path": manifest.relative_path,
+                    "capture_manifest_checksum_sha256": manifest.checksum_sha256,
+                },
             )
         except SnapshotBusyError as exc:
             finished_at = self._normalize_utc(self._clock())
-            self._persist_failure(
+            self._persist_retryable(
                 provider_id=provider,
                 sport=sport_code,
                 acquisition_cycle_id=cycle_id,
@@ -268,7 +358,9 @@ class BookmakerIngestionService:
                 observed_at=observed_at,
                 started_at=started_at,
                 finished_at=finished_at,
+                attempt_number=attempt_number,
                 failure_classification="snapshot-busy",
+                detail_code="snapshot-busy",
                 warnings=[warning.code for warning in bundle.warnings],
             )
             raise RetryableJobError(str(exc)) from exc
@@ -282,6 +374,7 @@ class BookmakerIngestionService:
                 observed_at=observed_at,
                 started_at=started_at,
                 finished_at=finished_at,
+                attempt_number=attempt_number,
                 failure_classification="snapshot-publish-error",
                 warnings=[warning.code for warning in bundle.warnings],
             )
@@ -299,6 +392,7 @@ class BookmakerIngestionService:
             observed_at=observed_at,
             started_at=started_at,
             finished_at=finished_at,
+            attempt_number=attempt_number,
             snapshot_id=published.snapshot_id,
             relative_path=published.snapshot_relative_path,
             checksum_sha256=published.manifest_checksum_sha256,
@@ -310,6 +404,11 @@ class BookmakerIngestionService:
             warnings=warning_codes,
             drift_codes=list(bundle.drift_codes),
             acquisition_interval_seconds=provider_settings.acquisition_interval_seconds,
+            provider_status_code=(
+                ProviderStatusCode.PARTIAL.value
+                if admission.outcome is AdmissionOutcome.PARTIAL
+                else ProviderStatusCode.OPERATIONAL.value
+            ),
         )
         return BookmakerIngestionResult(
             provider_id=provider,
@@ -338,7 +437,11 @@ class BookmakerIngestionService:
         acquisition_cycle_id: str,
         observed_at_utc: datetime,
         browser_mode: BrowserMode,
-    ) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[str, ...]]:
+    ) -> tuple[
+        BrowserAcquisitionResult,
+        ProviderAcquisitionBundle,
+        tuple[BookmakerRawCapture, ...],
+    ]:
         if provider_id == PROVIDER_BETANO_PT:
             return acquire_betano_current_odds(
                 sport=sport,
@@ -359,6 +462,44 @@ class BookmakerIngestionService:
             )
         msg = f"unsupported bookmaker provider: {provider_id}"
         raise PermanentJobError(msg)
+
+    def _get_existing_run(
+        self,
+        provider_id: str,
+        sport: str,
+        cycle_id: str,
+    ) -> dict[str, JsonValue] | None:
+        with connect_database(self._database_path, read_only=True) as connection:
+            return BookmakerRepository(connection).get_acquisition_run(
+                provider_id=provider_id,
+                sport=sport,
+                acquisition_cycle_id=cycle_id,
+            )
+
+    def _result_from_run(self, run: dict[str, JsonValue]) -> BookmakerIngestionResult:
+        warnings = run.get("warnings")
+        if isinstance(warnings, list):
+            warning_tuple: tuple[str, ...] = tuple(str(item) for item in warnings)
+        else:
+            warning_tuple = ()
+        return BookmakerIngestionResult(
+            provider_id=str(run["provider_id"]),
+            sport=str(run["sport"]),
+            acquisition_cycle_id=str(run["acquisition_cycle_id"]),
+            adapter_version=str(run["adapter_version"]),
+            status=str(run["status"]),
+            observed_at_utc=str(run["observed_at_utc"]),
+            snapshot_id=(None if run.get("snapshot_id") is None else str(run["snapshot_id"])),
+            snapshot_reused=False,
+            block_reason=(None if run.get("block_reason") is None else str(run["block_reason"])),
+            failure_classification=str(run["failure_classification"]),
+            events_observed=0,
+            valid_quotes_observed=0,
+            unresolved_events=0,
+            rejected_markets=0,
+            warnings=warning_tuple,
+            drift_codes=(),
+        )
 
     def _provider_settings(self, provider_id: str) -> BookmakerProviderSettings:
         if provider_id == PROVIDER_BETANO_PT:
@@ -396,6 +537,38 @@ class BookmakerIngestionService:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
 
+    def _ensure_run(
+        self,
+        *,
+        repo: BookmakerRepository,
+        provider_id: str,
+        sport: str,
+        acquisition_cycle_id: str,
+        adapter_version: str,
+        observed_at: datetime,
+        started_at: datetime,
+        status: str,
+    ) -> str:
+        existing = repo.get_acquisition_run(
+            provider_id=provider_id,
+            sport=sport,
+            acquisition_cycle_id=acquisition_cycle_id,
+        )
+        if existing is not None:
+            return str(existing["id"])
+        return repo.insert_acquisition_run(
+            provider_id=provider_id,
+            sport=sport,
+            acquisition_cycle_id=acquisition_cycle_id,
+            adapter_version=adapter_version,
+            status=status,
+            observed_at=observed_at,
+            started_at=started_at,
+            finished_at=started_at,
+            failure_classification="",
+            warnings=self._warnings_json([]),
+        )
+
     def _persist_blocked(
         self,
         *,
@@ -406,6 +579,7 @@ class BookmakerIngestionService:
         observed_at: datetime,
         started_at: datetime,
         finished_at: datetime,
+        attempt_number: int,
         block_reason: str,
         failure_classification: str,
         warnings: list[str],
@@ -415,31 +589,36 @@ class BookmakerIngestionService:
         with connect_database(self._database_path) as connection:
             with transaction(connection, immediate=True):
                 repo = BookmakerRepository(connection)
-                run_id = repo.insert_acquisition_run(
+                run_id = self._ensure_run(
+                    repo=repo,
                     provider_id=provider_id,
                     sport=sport,
                     acquisition_cycle_id=acquisition_cycle_id,
                     adapter_version=adapter_version,
-                    status="blocked",
                     observed_at=observed_at,
                     started_at=started_at,
-                    finished_at=finished_at,
-                    failure_classification=failure_classification,
-                    warnings=self._warnings_json(warnings),
-                    block_reason=block_reason,
+                    status="blocked",
                 )
                 repo.insert_acquisition_attempt(
                     run_id=run_id,
-                    attempt_number=1,
+                    attempt_number=attempt_number,
                     started_at=started_at,
                     finished_at=finished_at,
                     outcome="blocked",
                     failure_classification=failure_classification,
                     detail_code=block_reason,
                 )
+                repo.update_acquisition_run_status(
+                    run_id=run_id,
+                    status="blocked",
+                    finished_at=finished_at,
+                    failure_classification=failure_classification,
+                    block_reason=block_reason,
+                )
                 repo.upsert_provider_status(
                     provider_id=provider_id,
-                    status="blocked",
+                    sport=sport,
+                    status=ProviderStatusCode.BLOCKED.value,
                     updated_at=finished_at,
                     last_attempted_at=finished_at,
                     warnings=self._warnings_json(warnings),
@@ -460,35 +639,41 @@ class BookmakerIngestionService:
         observed_at: datetime,
         started_at: datetime,
         finished_at: datetime,
+        attempt_number: int,
         failure_classification: str,
         warnings: list[str],
     ) -> None:
         with connect_database(self._database_path) as connection:
             with transaction(connection, immediate=True):
                 repo = BookmakerRepository(connection)
-                run_id = repo.insert_acquisition_run(
+                run_id = self._ensure_run(
+                    repo=repo,
                     provider_id=provider_id,
                     sport=sport,
                     acquisition_cycle_id=acquisition_cycle_id,
                     adapter_version=adapter_version,
-                    status="failed",
                     observed_at=observed_at,
                     started_at=started_at,
-                    finished_at=finished_at,
-                    failure_classification=failure_classification,
-                    warnings=self._warnings_json(warnings),
+                    status="failed",
                 )
                 repo.insert_acquisition_attempt(
                     run_id=run_id,
-                    attempt_number=1,
+                    attempt_number=attempt_number,
                     started_at=started_at,
                     finished_at=finished_at,
                     outcome="failed",
                     failure_classification=failure_classification,
                 )
+                repo.update_acquisition_run_status(
+                    run_id=run_id,
+                    status="failed",
+                    finished_at=finished_at,
+                    failure_classification=failure_classification,
+                )
                 repo.upsert_provider_status(
                     provider_id=provider_id,
-                    status="degraded",
+                    sport=sport,
+                    status=ProviderStatusCode.UNAVAILABLE.value,
                     updated_at=finished_at,
                     last_attempted_at=finished_at,
                     warnings=self._warnings_json(warnings),
@@ -496,6 +681,181 @@ class BookmakerIngestionService:
                     adapter_version=adapter_version,
                     preserve_last_valid_snapshot=True,
                 )
+
+    def _finalize_terminal_failure(
+        self,
+        *,
+        provider_id: str,
+        sport: str,
+        acquisition_cycle_id: str,
+        adapter_version: str,
+        observed_at: datetime,
+        finished_at: datetime,
+        failure_classification: str,
+        warnings: list[str],
+    ) -> None:
+        with connect_database(self._database_path) as connection:
+            with transaction(connection, immediate=True):
+                repo = BookmakerRepository(connection)
+                existing = repo.get_acquisition_run(
+                    provider_id=provider_id,
+                    sport=sport,
+                    acquisition_cycle_id=acquisition_cycle_id,
+                )
+                if existing is None:
+                    return
+                repo.update_acquisition_run_status(
+                    run_id=str(existing["id"]),
+                    status="failed",
+                    finished_at=finished_at,
+                    failure_classification=failure_classification,
+                )
+                repo.upsert_provider_status(
+                    provider_id=provider_id,
+                    sport=sport,
+                    status=ProviderStatusCode.UNAVAILABLE.value,
+                    updated_at=finished_at,
+                    last_attempted_at=finished_at,
+                    warnings=self._warnings_json(warnings),
+                    adapter_version=adapter_version,
+                    preserve_last_valid_snapshot=True,
+                )
+
+    def _persist_retryable(
+        self,
+        *,
+        provider_id: str,
+        sport: str,
+        acquisition_cycle_id: str,
+        adapter_version: str,
+        observed_at: datetime,
+        started_at: datetime,
+        finished_at: datetime,
+        attempt_number: int,
+        failure_classification: str,
+        detail_code: str,
+        warnings: list[str],
+    ) -> None:
+        with connect_database(self._database_path) as connection:
+            with transaction(connection, immediate=True):
+                repo = BookmakerRepository(connection)
+                run_id = self._ensure_run(
+                    repo=repo,
+                    provider_id=provider_id,
+                    sport=sport,
+                    acquisition_cycle_id=acquisition_cycle_id,
+                    adapter_version=adapter_version,
+                    observed_at=observed_at,
+                    started_at=started_at,
+                    status="retryable",
+                )
+                repo.insert_acquisition_attempt(
+                    run_id=run_id,
+                    attempt_number=attempt_number,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    outcome="retryable",
+                    failure_classification=failure_classification,
+                    detail_code=detail_code,
+                )
+                repo.update_acquisition_run_status(
+                    run_id=run_id,
+                    status="retryable",
+                    finished_at=finished_at,
+                    failure_classification=failure_classification,
+                )
+                repo.upsert_provider_status(
+                    provider_id=provider_id,
+                    sport=sport,
+                    status=ProviderStatusCode.UNAVAILABLE.value,
+                    updated_at=finished_at,
+                    last_attempted_at=finished_at,
+                    warnings=self._warnings_json(warnings),
+                    adapter_version=adapter_version,
+                    preserve_last_valid_snapshot=True,
+                )
+
+    def _persist_rejected(
+        self,
+        *,
+        provider_id: str,
+        sport: str,
+        acquisition_cycle_id: str,
+        adapter_version: str,
+        observed_at: datetime,
+        started_at: datetime,
+        finished_at: datetime,
+        attempt_number: int,
+        admission: AdmissionDecision,
+        provider_status: str,
+        warnings: list[str],
+        drift_codes: list[str],
+        blocked_cooldown_seconds: int,
+    ) -> None:
+        run_status = _run_status_for_admission(admission)
+        next_eligible = (
+            finished_at + timedelta(seconds=blocked_cooldown_seconds)
+            if admission.outcome is AdmissionOutcome.BLOCKED
+            else None
+        )
+        with connect_database(self._database_path) as connection:
+            with transaction(connection, immediate=True):
+                repo = BookmakerRepository(connection)
+                run_id = self._ensure_run(
+                    repo=repo,
+                    provider_id=provider_id,
+                    sport=sport,
+                    acquisition_cycle_id=acquisition_cycle_id,
+                    adapter_version=adapter_version,
+                    observed_at=observed_at,
+                    started_at=started_at,
+                    status=run_status,
+                )
+                repo.insert_acquisition_attempt(
+                    run_id=run_id,
+                    attempt_number=attempt_number,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    outcome=run_status if run_status != "retryable" else "failed",
+                    failure_classification=admission.reason_code,
+                    detail_code=admission.reason_code,
+                )
+                repo.update_acquisition_run_status(
+                    run_id=run_id,
+                    status=run_status,
+                    finished_at=finished_at,
+                    failure_classification=admission.reason_code,
+                    block_reason=(
+                        admission.reason_code
+                        if admission.outcome is AdmissionOutcome.BLOCKED
+                        else None
+                    ),
+                )
+                repo.upsert_provider_status(
+                    provider_id=provider_id,
+                    sport=sport,
+                    status=provider_status,
+                    updated_at=finished_at,
+                    last_attempted_at=finished_at,
+                    warnings=self._warnings_json(warnings),
+                    block_failure_classification=(
+                        admission.reason_code
+                        if admission.outcome is AdmissionOutcome.BLOCKED
+                        else None
+                    ),
+                    next_eligible_at=next_eligible,
+                    adapter_version=adapter_version,
+                    preserve_last_valid_snapshot=True,
+                )
+                for code in drift_codes:
+                    repo.insert_drift_finding(
+                        provider_id=provider_id,
+                        run_id=run_id,
+                        code=code,
+                        severity="warning",
+                        message=f"parser drift observed: {code}",
+                        observed_at=observed_at,
+                    )
 
     def _persist_success(
         self,
@@ -507,6 +867,7 @@ class BookmakerIngestionService:
         observed_at: datetime,
         started_at: datetime,
         finished_at: datetime,
+        attempt_number: int,
         snapshot_id: str,
         relative_path: str,
         checksum_sha256: str,
@@ -518,30 +879,35 @@ class BookmakerIngestionService:
         warnings: list[str],
         drift_codes: list[str],
         acquisition_interval_seconds: int,
+        provider_status_code: str,
     ) -> None:
         next_eligible = finished_at + timedelta(seconds=acquisition_interval_seconds)
         with connect_database(self._database_path) as connection:
             with transaction(connection, immediate=True):
                 repo = BookmakerRepository(connection)
-                run_id = repo.insert_acquisition_run(
+                run_id = self._ensure_run(
+                    repo=repo,
                     provider_id=provider_id,
                     sport=sport,
                     acquisition_cycle_id=acquisition_cycle_id,
                     adapter_version=adapter_version,
-                    status="succeeded",
                     observed_at=observed_at,
                     started_at=started_at,
-                    finished_at=finished_at,
-                    failure_classification="",
-                    warnings=self._warnings_json(warnings),
-                    snapshot_id=snapshot_id,
+                    status="succeeded",
                 )
                 repo.insert_acquisition_attempt(
                     run_id=run_id,
-                    attempt_number=1,
+                    attempt_number=attempt_number,
                     started_at=started_at,
                     finished_at=finished_at,
                     outcome="succeeded",
+                )
+                repo.update_acquisition_run_status(
+                    run_id=run_id,
+                    status="succeeded",
+                    finished_at=finished_at,
+                    failure_classification="",
+                    snapshot_id=snapshot_id,
                 )
                 repo.register_snapshot(
                     snapshot_id=snapshot_id,
@@ -557,7 +923,8 @@ class BookmakerIngestionService:
                 age = max(0, int((finished_at - observed_at).total_seconds()))
                 repo.upsert_provider_status(
                     provider_id=provider_id,
-                    status="healthy",
+                    sport=sport,
+                    status=provider_status_code,
                     updated_at=finished_at,
                     last_attempted_at=finished_at,
                     last_successful_at=finished_at,
@@ -581,6 +948,42 @@ class BookmakerIngestionService:
                         message=f"parser drift observed: {code}",
                         observed_at=observed_at,
                     )
+
+
+def _native_payload_recognized(bundle: ProviderAcquisitionBundle) -> bool:
+    rejected = frozenset({"synthetic-schema-rejected", "no-native-payload", "unknown-schema"})
+    if any(code in rejected for code in bundle.drift_codes):
+        return False
+    return len(bundle.events) > 0
+
+
+def _ingestion_status_for_admission(admission: AdmissionDecision) -> str:
+    if admission.outcome is AdmissionOutcome.BLOCKED:
+        return "blocked"
+    if admission.outcome is AdmissionOutcome.DRIFT_DETECTED:
+        return "drift-detected"
+    if admission.outcome is AdmissionOutcome.PARTIAL:
+        return "partial"
+    if admission.outcome is AdmissionOutcome.UNAVAILABLE:
+        return "unavailable"
+    return "failed"
+
+
+def _run_status_for_admission(admission: AdmissionDecision) -> str:
+    if admission.outcome is AdmissionOutcome.BLOCKED:
+        return "blocked"
+    return "failed"
+
+
+def _provider_status_for_admission(admission: AdmissionDecision) -> str:
+    mapping = {
+        AdmissionOutcome.BLOCKED: ProviderStatusCode.BLOCKED.value,
+        AdmissionOutcome.DRIFT_DETECTED: ProviderStatusCode.DRIFT_DETECTED.value,
+        AdmissionOutcome.PARTIAL: ProviderStatusCode.PARTIAL.value,
+        AdmissionOutcome.UNAVAILABLE: ProviderStatusCode.UNAVAILABLE.value,
+        AdmissionOutcome.FAILED: ProviderStatusCode.UNAVAILABLE.value,
+    }
+    return mapping.get(admission.outcome, ProviderStatusCode.UNKNOWN.value)
 
 
 def validate_bookmaker_ingest_payload(

@@ -31,7 +31,7 @@ from sports_analytics.snapshots.reader import verify_snapshot_directory
 from sports_analytics.snapshots.spec import MANIFEST_FILENAME
 from sports_analytics.snapshots.writer import discard_prepared_snapshot
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION as BETANO_ADAPTER
-from sports_analytics.sources.betano.parser import parse_betano_payloads
+from sports_analytics.sources.betano.synthetic import parse_betano_synthetic_payloads
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "betano"
 OBSERVED_AT = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
@@ -39,7 +39,7 @@ OBSERVED_AT = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 
 def _normalized_bundle() -> NormalizedBookmakerBundle:
     payload = json.loads((FIXTURES / "football.json").read_text(encoding="utf-8"))
-    bundle = parse_betano_payloads(
+    bundle = parse_betano_synthetic_payloads(
         [payload],
         provider_id="betano-pt",
         adapter_version=BETANO_ADAPTER,

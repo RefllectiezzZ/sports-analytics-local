@@ -178,6 +178,14 @@ class BookmakerScheduler:
         with connect_database(self._database_path) as connection:
             with transaction(connection, immediate=True):
                 repo = BookmakerRepository(connection)
+                anchor = repo.get_scheduler_anchor(provider_id=provider_id, sport=sport)
+                if anchor is None:
+                    repo.upsert_scheduler_anchor(
+                        provider_id=provider_id,
+                        sport=sport,
+                        first_due_at=scheduled_for,
+                        anchor_set_at=now,
+                    )
                 _cycle_id, inserted = repo.insert_scheduler_cycle(
                     provider_id=provider_id,
                     sport=sport,
@@ -214,10 +222,12 @@ class BookmakerScheduler:
         with connect_database(self._database_path, read_only=True) as connection:
             repo = BookmakerRepository(connection)
             latest = repo.latest_scheduler_cycle(provider_id=provider_id, sport=sport)
-            status = repo.get_provider_status(provider_id)
+            anchor = repo.get_scheduler_anchor(provider_id=provider_id, sport=sport)
+            status = repo.get_provider_status(provider_id, sport)
 
         if latest is None:
-            # First cycle after process start: honor initial delay.
+            if anchor is not None:
+                return parse_utc_timestamp(str(anchor["first_due_at_utc"]))
             return now + timedelta(seconds=provider_settings.initial_delay_seconds)
 
         last_scheduled = parse_utc_timestamp(str(latest["scheduled_for_utc"]))

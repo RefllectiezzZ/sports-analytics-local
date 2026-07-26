@@ -10,7 +10,8 @@ from typing import Any
 
 from sports_analytics.markets.contracts import MarketStatus
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION, PROVIDER_ID
-from sports_analytics.sources.betano.parser import parse_betano_acquisition, parse_betano_payloads
+from sports_analytics.sources.betano.parser import parse_betano_acquisition
+from sports_analytics.sources.betano.synthetic import parse_betano_synthetic_payloads
 from sports_analytics.sources.bookmaker_contracts import (
     ProviderAcquisitionBundle,
     ProviderEventState,
@@ -35,7 +36,7 @@ def _load(name: str) -> dict[str, Any]:
 
 
 def _parse(payload: dict[str, Any], *, sport: str = "football") -> ProviderAcquisitionBundle:
-    return parse_betano_payloads(
+    return parse_betano_synthetic_payloads(
         [payload],
         provider_id=PROVIDER_ID,
         adapter_version=ADAPTER_VERSION,

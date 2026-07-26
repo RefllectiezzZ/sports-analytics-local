@@ -1,0 +1,58 @@
+{
+  "schema": "betano-offering-v1",
+  "events": [
+    {
+      "eventId": "native-evt-football-1",
+      "competitionId": "native-liga-1",
+      "competitionName": "Synthetic Portugal Liga",
+      "sportCode": "FOOT",
+      "startTimeUtc": "2026-08-15T18:00:00Z",
+      "state": "NOT_STARTED",
+      "sourcePageRouteId": "football-prematch",
+      "participants": [
+        {
+          "participantId": "betano-club-northbridge",
+          "name": "Northbridge FC",
+          "role": "HOME",
+          "normalizedName": "northbridge fc"
+        },
+        {
+          "participantId": "betano-club-southport",
+          "name": "Southport Athletic",
+          "role": "AWAY",
+          "normalizedName": "southport athletic"
+        }
+      ],
+      "markets": [
+        {
+          "marketId": "betano-mkt-1x2",
+          "marketTypeCode": "MRES",
+          "name": "Match Result",
+          "status": "OPEN",
+          "period": "FT",
+          "selections": [
+            {
+              "selectionId": "betano-sel-home",
+              "name": "Home",
+              "price": 1.85,
+              "status": "ACTIVE"
+            },
+            {
+              "selectionId": "betano-sel-draw",
+              "name": "Draw",
+              "price": 3.4,
+              "status": "ACTIVE"
+            },
+            {
+              "selectionId": "betano-sel-away",
+              "name": "Away",
+              "price": 4.2,
+              "status": "ACTIVE"
+            }
+          ]
+        }
+      ],
+      "unsupportedMarkets": []
+    }
+  ]
+}

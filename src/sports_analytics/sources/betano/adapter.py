@@ -15,7 +15,7 @@ from sports_analytics.sources.browser.playwright_runtime import (
     BrowserSession,
     PlaywrightBrowserSession,
 )
-from sports_analytics.sources.raw_capture import BookmakerRawCaptureStore
+from sports_analytics.sources.raw_capture import BookmakerRawCapture, BookmakerRawCaptureStore
 
 
 def acquire_betano_current_odds(
@@ -27,7 +27,7 @@ def acquire_betano_current_odds(
     browser_mode: BrowserMode = BrowserMode.VISIBLE,
     session: BrowserSession | None = None,
     maximum_capture_bytes: int = 2_097_152,
-) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[str, ...]]:
+) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[BookmakerRawCapture, ...]]:
     """Acquire Betano pre-match fixtures/odds via ordinary visible browser automation."""
     catalog = BETANO_CATALOG
     routes = catalog.routes_for_sport(sport)
@@ -42,7 +42,7 @@ def acquire_betano_current_odds(
         browser_mode=browser_mode,
     )
     store = BookmakerRawCaptureStore(raw_directory)
-    capture_paths: list[str] = []
+    captures: list[BookmakerRawCapture] = []
     for index, response in enumerate(result.responses):
         artifact = store.store_text(
             source_name=PROVIDER_ID,
@@ -53,7 +53,7 @@ def acquire_betano_current_odds(
             maximum_bytes=maximum_capture_bytes,
             source_url=response.response_url,
         )
-        capture_paths.append(artifact.relative_path)
+        captures.append(artifact)
         del index
     for page in result.pages:
         if page.sanitized_dom_fragment:
@@ -66,9 +66,9 @@ def acquire_betano_current_odds(
                 maximum_bytes=maximum_capture_bytes,
                 source_url=page.final_url,
             )
-            capture_paths.append(artifact.relative_path)
+            captures.append(artifact)
     bundle = parse_betano_acquisition(result, adapter_version=ADAPTER_VERSION)
-    return result, bundle, tuple(capture_paths)
+    return result, bundle, tuple(captures)
 
 
 def reject_arbitrary_betano_controls(payload: dict[str, object]) -> None:

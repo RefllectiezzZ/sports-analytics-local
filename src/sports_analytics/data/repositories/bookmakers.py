@@ -33,6 +33,44 @@ class BookmakerRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
+    def update_acquisition_run_status(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        finished_at: datetime,
+        failure_classification: str,
+        snapshot_id: str | None = None,
+        block_reason: str | None = None,
+    ) -> None:
+        """Update terminal fields on an existing acquisition run."""
+        require_active_transaction(
+            self._connection,
+            operation="BookmakerRepository.update_acquisition_run_status",
+        )
+        normalized_run = normalize_uuid(run_id)
+        status_value = validate_identifier(status, field_name="status")
+        classification = validate_plain_text(
+            failure_classification,
+            field_name="failure_classification",
+        )
+        finished = format_utc_timestamp(require_utc(finished_at, field_name="finished_at"))
+        snap = None if snapshot_id is None else normalize_uuid(snapshot_id)
+        block = (
+            None
+            if block_reason is None
+            else validate_identifier(block_reason, field_name="block_reason")
+        )
+        self._connection.execute(
+            """
+            UPDATE bookmaker_acquisition_runs
+            SET status = ?, finished_at = ?, failure_classification = ?,
+                snapshot_id = COALESCE(?, snapshot_id), block_reason = ?
+            WHERE id = ?
+            """,
+            (status_value, finished, classification, snap, block, normalized_run),
+        )
+
     def insert_acquisition_run(
         self,
         *,
@@ -206,10 +244,103 @@ class BookmakerRepository:
             raise DatabaseIntegrityError("bookmaker acquisition attempt insert conflict") from exc
         return normalized_id
 
+    def upsert_scheduler_anchor(
+        self,
+        *,
+        provider_id: str,
+        sport: str,
+        first_due_at: datetime,
+        anchor_set_at: datetime,
+    ) -> None:
+        """Persist a restart-stable first-cycle due time for one provider/sport."""
+        require_active_transaction(
+            self._connection,
+            operation="BookmakerRepository.upsert_scheduler_anchor",
+        )
+        provider = validate_identifier(provider_id, field_name="provider_id")
+        sport_code = validate_identifier(sport, field_name="sport")
+        first_due = format_utc_timestamp(require_utc(first_due_at, field_name="first_due_at"))
+        set_at = format_utc_timestamp(require_utc(anchor_set_at, field_name="anchor_set_at"))
+        self._connection.execute(
+            """
+            INSERT INTO bookmaker_scheduler_anchors (
+                provider_id, sport, first_due_at, anchor_set_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(provider_id, sport) DO NOTHING
+            """,
+            (provider, sport_code, first_due, set_at),
+        )
+
+    def get_scheduler_anchor(
+        self,
+        *,
+        provider_id: str,
+        sport: str,
+    ) -> dict[str, JsonValue] | None:
+        """Return the persisted scheduler anchor for one provider/sport."""
+        provider = validate_identifier(provider_id, field_name="provider_id")
+        sport_code = validate_identifier(sport, field_name="sport")
+        row = self._connection.execute(
+            """
+            SELECT provider_id, sport, first_due_at, anchor_set_at
+            FROM bookmaker_scheduler_anchors
+            WHERE provider_id = ? AND sport = ?
+            """,
+            (provider, sport_code),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "provider_id": str(row["provider_id"]),
+            "sport": str(row["sport"]),
+            "first_due_at_utc": str(row["first_due_at"]),
+            "anchor_set_at_utc": str(row["anchor_set_at"]),
+        }
+
+    def get_acquisition_run(
+        self,
+        *,
+        provider_id: str,
+        sport: str,
+        acquisition_cycle_id: str,
+    ) -> dict[str, JsonValue] | None:
+        """Return one acquisition run by natural key."""
+        provider = validate_identifier(provider_id, field_name="provider_id")
+        sport_code = validate_identifier(sport, field_name="sport")
+        cycle = validate_identifier(acquisition_cycle_id, field_name="acquisition_cycle_id")
+        row = self._connection.execute(
+            """
+            SELECT id, provider_id, sport, acquisition_cycle_id, adapter_version,
+                   status, observed_at, started_at, finished_at, snapshot_id,
+                   block_reason, failure_classification, warnings_json
+            FROM bookmaker_acquisition_runs
+            WHERE provider_id = ? AND sport = ? AND acquisition_cycle_id = ?
+            """,
+            (provider, sport_code, cycle),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "provider_id": str(row["provider_id"]),
+            "sport": str(row["sport"]),
+            "acquisition_cycle_id": str(row["acquisition_cycle_id"]),
+            "adapter_version": str(row["adapter_version"]),
+            "status": str(row["status"]),
+            "observed_at_utc": str(row["observed_at"]),
+            "started_at_utc": str(row["started_at"]),
+            "finished_at_utc": str(row["finished_at"]),
+            "snapshot_id": (None if row["snapshot_id"] is None else str(row["snapshot_id"])),
+            "block_reason": (None if row["block_reason"] is None else str(row["block_reason"])),
+            "failure_classification": str(row["failure_classification"]),
+            "warnings": loads_canonical_json(str(row["warnings_json"])),
+        }
+
     def upsert_provider_status(
         self,
         *,
         provider_id: str,
+        sport: str,
         status: str,
         updated_at: datetime,
         last_attempted_at: datetime | None = None,
@@ -232,6 +363,7 @@ class BookmakerRepository:
             operation="BookmakerRepository.upsert_provider_status",
         )
         provider = validate_identifier(provider_id, field_name="provider_id")
+        sport_code = validate_identifier(sport, field_name="sport")
         status_value = validate_identifier(status, field_name="status")
         updated = format_utc_timestamp(require_utc(updated_at, field_name="updated_at"))
         warnings_json = dumps_canonical_json([] if warnings is None else warnings)
@@ -285,7 +417,7 @@ class BookmakerRepository:
         snapshot = (
             None if last_valid_snapshot_id is None else normalize_uuid(last_valid_snapshot_id)
         )
-        existing = self.get_provider_status(provider)
+        existing = self.get_provider_status(provider, sport_code)
         if preserve_last_valid_snapshot and existing is not None:
             existing_snap = existing.get("last_valid_snapshot_id")
             if isinstance(existing_snap, str) and existing_snap:
@@ -297,13 +429,13 @@ class BookmakerRepository:
         self._connection.execute(
             """
             INSERT INTO bookmaker_provider_status (
-                provider_id, status, last_attempted_at, last_successful_at,
+                provider_id, sport, status, last_attempted_at, last_successful_at,
                 last_valid_snapshot_id, snapshot_age_seconds, events_observed,
                 valid_quotes_observed, unresolved_events, rejected_markets,
                 warnings_json, block_failure_classification, next_eligible_at,
                 adapter_version, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(provider_id) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_id, sport) DO UPDATE SET
                 status = excluded.status,
                 last_attempted_at = excluded.last_attempted_at,
                 last_successful_at = COALESCE(
@@ -333,6 +465,7 @@ class BookmakerRepository:
             """,
             (
                 provider,
+                sport_code,
                 status_value,
                 attempted,
                 successful,
@@ -349,7 +482,7 @@ class BookmakerRepository:
                 updated,
             ),
         )
-        status_row = self.get_provider_status(provider)
+        status_row = self.get_provider_status(provider, sport_code)
         if status_row is None:
             raise RepositoryError("provider status upsert did not persist")
         return status_row
@@ -584,23 +717,28 @@ class BookmakerRepository:
             raise DatabaseIntegrityError("bookmaker drift finding insert conflict") from exc
         return normalized_id
 
-    def get_provider_status(self, provider_id: str) -> dict[str, JsonValue] | None:
-        """Return current provider status as a JSON-compatible mapping."""
+    def get_provider_status(
+        self,
+        provider_id: str,
+        sport: str,
+    ) -> dict[str, JsonValue] | None:
+        """Return current provider/sport status as a JSON-compatible mapping."""
         provider = validate_identifier(provider_id, field_name="provider_id")
+        sport_code = validate_identifier(sport, field_name="sport")
         row = self._connection.execute(
-            "SELECT * FROM bookmaker_provider_status WHERE provider_id = ?",
-            (provider,),
+            "SELECT * FROM bookmaker_provider_status WHERE provider_id = ? AND sport = ?",
+            (provider, sport_code),
         ).fetchone()
         if row is None:
             return None
         return self._provider_status_from_row(row)
 
     def list_provider_statuses(self) -> tuple[dict[str, JsonValue], ...]:
-        """Return all provider statuses in deterministic provider_id order."""
+        """Return all provider/sport statuses in deterministic order."""
         rows = self._connection.execute(
             """
             SELECT * FROM bookmaker_provider_status
-            ORDER BY provider_id
+            ORDER BY provider_id, sport
             """
         ).fetchall()
         return tuple(self._provider_status_from_row(row) for row in rows)
@@ -709,6 +847,7 @@ class BookmakerRepository:
         warnings_raw = loads_canonical_json(str(row["warnings_json"]))
         return {
             "provider_id": str(row["provider_id"]),
+            "sport": str(row["sport"]),
             "status": str(row["status"]),
             "last_attempted_at_utc": (
                 None if row["last_attempted_at"] is None else str(row["last_attempted_at"])
