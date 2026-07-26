@@ -222,6 +222,7 @@ class VerifiedAggregatePerformance:
 
     sample_size: int
     completed_result_count: int
+    bet_count: int = 0
     log_loss: float | None = None
     multiclass_brier_score: float | None = None
     calibration_error: float | None = None
@@ -235,6 +236,10 @@ class VerifiedAggregatePerformance:
             0 <= self.completed_result_count <= self.sample_size
         ):
             raise MonitoringError("aggregate completed_result_count is invalid")
+        if type(self.bet_count) is not int or self.bet_count < 0:
+            raise MonitoringError("aggregate bet_count must be a non-negative integer")
+        if (self.hit_rate is not None or self.roi is not None) and self.bet_count <= 0:
+            raise MonitoringError("hit rate and ROI require a positive bet_count")
         for field_name in (
             "log_loss",
             "multiclass_brier_score",
@@ -553,13 +558,13 @@ def evaluate_monitoring(
             aggregate.hit_rate,
             None,
             None,
-            0 if aggregate.hit_rate is None else aggregate.completed_result_count,
+            0 if aggregate.hit_rate is None else aggregate.bet_count,
         )
         values["roi"] = (
             aggregate.roi,
             None,
             None,
-            0 if aggregate.roi is None else aggregate.completed_result_count,
+            0 if aggregate.roi is None else aggregate.bet_count,
         )
         calibration_sample = (
             0

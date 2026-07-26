@@ -351,11 +351,10 @@ def _metric_from_json(
         number("value"),
     )
     sample = require_int(raw.get("sample_size"), field="sample_size")
-    if (
-        sample < 0
-        or (denominator is not None and denominator < 0)
-        or (numerator is not None and numerator < 0)
-    ):
+    name = require_str(raw.get("metric_name"), field="metric_name")
+    if sample < 0 or (denominator is not None and denominator < 0):
+        raise MonitoringError("monitoring report metric population is invalid")
+    if numerator is not None and numerator < 0 and name != "roi":
         raise MonitoringError("monitoring report metric population is invalid")
     if denominator is not None:
         if (
@@ -365,14 +364,13 @@ def _metric_from_json(
             or not math.isclose(metric_value, numerator / denominator, abs_tol=1e-12)
         ):
             raise MonitoringError("monitoring report metric ratio is invalid")
-        if raw.get("metric_name") in {
+        if name in {
             "result_coverage",
             "settlement_coverage",
             "probability_completeness",
         } and sample != int(denominator):
             raise MonitoringError("monitoring report metric sample size is inconsistent")
     status = MetricStatus(require_str(raw.get("status"), field="status"))
-    name = require_str(raw.get("metric_name"), field="metric_name")
     policy = MonitoringPolicy(
         require_str(raw.get("policy_id"), field="policy_id"),
         require_str(raw.get("policy_version"), field="policy_version"),

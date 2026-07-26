@@ -7,6 +7,7 @@ SQLite state into that model, so callers never get to assert health metrics.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -107,7 +108,7 @@ def build_monitoring_inputs(
     quality_flag_failure_count = 0
     source_times: list[datetime] = []
     analytical_event_ids: set[str] = set()
-    position_keys: set[tuple[str, str, str]] = set()
+    positions: dict[tuple[str, str, str], tuple[str, ...]] = {}
 
     for raw in references:
         item = require_dict(raw, field="evidence[]")
@@ -162,10 +163,9 @@ def build_monitoring_inputs(
                 for field in _QUALITY_FLAG_FIELDS
             ):
                 quality_flag_failure_count += 1
-        opportunity_ids = {
-            require_str(row.get("opportunity_id"), field="opportunity_id") for row in opportunities
-        }
+        opportunity_event_by_id: dict[str, str] = {}
         for row in opportunities:
+            opportunity_id = require_str(row.get("opportunity_id"), field="opportunity_id")
             observed = require_canonical_utc_timestamp_string(
                 row.get("source_observed_at_utc"),
                 field="opportunity.source_observed_at_utc",
@@ -182,23 +182,22 @@ def build_monitoring_inputs(
             source_times.append(observed)
             event_id = require_str(row.get("canonical_event_id"), field="canonical_event_id")
             analytical_event_ids.add(event_id)
-            position = (
-                artifact.artifact_id,
-                "single",
-                require_str(row.get("opportunity_id"), field="opportunity_id"),
-            )
-            if position in position_keys:
+            opportunity_event_by_id[opportunity_id] = event_id
+            position = (artifact.artifact_id, "single", opportunity_id)
+            if position in positions:
                 raise MonitoringError("monitoring evidence contains duplicate position identities")
-            position_keys.add(position)
+            positions[position] = (event_id,)
         for row in artifact.dataset("combinations").rows:
             combination_id = require_str(row.get("combination_id"), field="combination_id")
             legs = tuple(require_str_list(row.get("opportunity_ids"), field="opportunity_ids"))
-            if any(opportunity_id not in opportunity_ids for opportunity_id in legs):
+            if any(opportunity_id not in opportunity_event_by_id for opportunity_id in legs):
                 raise MonitoringError("combination references a missing persisted opportunity")
             position = (artifact.artifact_id, "combination", combination_id)
-            if position in position_keys:
+            if position in positions:
                 raise MonitoringError("monitoring evidence contains duplicate position identities")
-            position_keys.add(position)
+            positions[position] = tuple(
+                opportunity_event_by_id[opportunity_id] for opportunity_id in legs
+            )
 
     window_start_text = format_utc_timestamp(window_start_utc)
     as_of_text = format_utc_timestamp(as_of_utc)
@@ -245,39 +244,26 @@ def build_monitoring_inputs(
     available_result_count = sum(
         1 for event_id in analytical_event_ids if event_id in verified_by_event
     )
-    settlement_candidate_count = len(position_keys)
+    settlement_candidate_count = len(positions)
+    settlement_states = _settlement_states_as_of(
+        connection=connection,
+        as_of_utc=as_of_utc,
+        position_keys=set(positions),
+    )
     settled_count = 0
-    unfinished_as_of: list[datetime] = []
-    if position_keys:
-        current_rows = connection.execute(
-            """
-            SELECT c.source_artifact_id, c.position_type, c.position_id,
-                   c.status, s.as_of_utc
-            FROM current_analytical_settlements c
-            JOIN analytical_settlements s ON s.id = c.settlement_id
-            """
-        ).fetchall()
-        current_by_key: dict[tuple[str, str, str], sqlite3.Row] = {
-            (
-                str(row["source_artifact_id"]),
-                str(row["position_type"]),
-                str(row["position_id"]),
-            ): row
-            for row in current_rows
-        }
-        for position_key in sorted(position_keys):
-            current = current_by_key.get(position_key)
-            if current is None:
-                continue
-            status = str(current["status"])
-            if status in _FINAL_SETTLEMENT_STATUSES:
-                settled_count += 1
-            elif status in {"pending", "unresolved"}:
-                unfinished_as_of.append(
-                    require_canonical_utc_timestamp_string(
-                        current["as_of_utc"], field="settlement.as_of_utc"
-                    )
-                )
+    settlement_ready_completions: list[datetime] = []
+    for position_key in sorted(positions):
+        status = settlement_states.get(position_key)
+        if status in _FINAL_SETTLEMENT_STATUSES:
+            settled_count += 1
+            continue
+        completion = _settlement_ready_completion_utc(
+            event_ids=positions[position_key],
+            verified_by_event=verified_by_event,
+            as_of_utc=as_of_utc,
+        )
+        if completion is not None:
+            settlement_ready_completions.append(completion)
 
     performance, calibration_error, aggregate_performance = _derive_performance(
         admitted=admitted,
@@ -296,7 +282,9 @@ def build_monitoring_inputs(
         available_result_count=available_result_count,
         settlement_candidate_count=settlement_candidate_count,
         settled_count=settled_count,
-        oldest_unsettled_completion_utc=(min(unfinished_as_of) if unfinished_as_of else None),
+        oldest_unsettled_completion_utc=(
+            min(settlement_ready_completions) if settlement_ready_completions else None
+        ),
         prediction_count=prediction_count,
         eligible_opportunity_count=eligible,
         rejected_opportunity_count=rejected,
@@ -343,6 +331,68 @@ def _registration_metadata(row: sqlite3.Row) -> _RegisteredSnapshotMetadata:
         raise MonitoringError("result snapshot registration metadata is contradictory") from exc
 
 
+def _settlement_states_as_of(
+    *,
+    connection: sqlite3.Connection,
+    as_of_utc: datetime,
+    position_keys: set[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], str]:
+    """Reconstruct analytical settlement status from immutable history at as_of_utc."""
+    if not position_keys:
+        return {}
+    rows = connection.execute(
+        """
+        SELECT id, source_artifact_id, position_type, position_id, status, as_of_utc
+        FROM analytical_settlements
+        WHERE as_of_utc <= ?
+        ORDER BY source_artifact_id ASC, position_type ASC, position_id ASC,
+                 as_of_utc DESC, id ASC
+        """,
+        (format_utc_timestamp(as_of_utc),),
+    ).fetchall()
+    by_key: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        key = (
+            str(row["source_artifact_id"]),
+            str(row["position_type"]),
+            str(row["position_id"]),
+        )
+        if key not in position_keys:
+            continue
+        by_key.setdefault(key, []).append(row)
+    states: dict[tuple[str, str, str], str] = {}
+    for key, candidates in by_key.items():
+        max_as_of = max(str(row["as_of_utc"]) for row in candidates)
+        at_max = [row for row in candidates if str(row["as_of_utc"]) == max_as_of]
+        statuses = {str(row["status"]) for row in at_max}
+        settlement_ids = {str(row["id"]) for row in at_max}
+        if len(statuses) != 1 or len(settlement_ids) != 1:
+            raise MonitoringError("contradictory analytical settlement history at monitoring as-of")
+        states[key] = next(iter(statuses))
+    return states
+
+
+def _settlement_ready_completion_utc(
+    *,
+    event_ids: tuple[str, ...],
+    verified_by_event: dict[str, VerifiedResultSnapshot],
+    as_of_utc: datetime,
+) -> datetime | None:
+    """Earliest settlement-ready time is the latest required completed-result timestamp."""
+    if not event_ids:
+        return None
+    completions: list[datetime] = []
+    for event_id in event_ids:
+        snapshot = verified_by_event.get(event_id)
+        if snapshot is None:
+            return None
+        completed = snapshot.result.result_timestamp_utc
+        if completed is None or completed > as_of_utc:
+            return None
+        completions.append(completed)
+    return max(completions)
+
+
 def _compare_registration_to_snapshot(
     registration: _RegisteredSnapshotMetadata,
     snapshot: VerifiedResultSnapshot,
@@ -361,6 +411,98 @@ def _compare_registration_to_snapshot(
         raise MonitoringError("result snapshot observation time conflicts with registration")
 
 
+def _backtest_event_population(artifact: TypedAnalyticalArtifact) -> frozenset[str]:
+    return frozenset(
+        require_str(row.get("canonical_event_id"), field="canonical_event_id")
+        for row in artifact.dataset("predictions").rows
+    )
+
+
+def _observations_from_backtest(
+    *,
+    artifact: TypedAnalyticalArtifact,
+    verified_by_event: dict[str, VerifiedResultSnapshot],
+) -> list[PerformanceObservation]:
+    observations: list[PerformanceObservation] = []
+    predictions = {
+        require_str(row.get("prediction_id"), field="prediction_id"): row
+        for row in artifact.dataset("predictions").rows
+    }
+    opportunities = list(artifact.dataset("opportunities").rows)
+    by_prediction: dict[str, list[dict]] = {}
+    for row in opportunities:
+        prediction_id = require_str(row.get("prediction_id"), field="prediction_id")
+        by_prediction.setdefault(prediction_id, []).append(row)
+    settlements = list(artifact.dataset("settlements").rows)
+    settlement_by_opportunity: dict[str, dict] = {}
+    for row in settlements:
+        if require_str(row.get("kind"), field="kind") != "single":
+            continue
+        opportunity_ids = require_str_list(row.get("opportunity_ids"), field="opportunity_ids")
+        if len(opportunity_ids) != 1:
+            continue
+        settlement_by_opportunity[opportunity_ids[0]] = row
+    for prediction_id, prediction in sorted(predictions.items()):
+        event_id = require_str(prediction.get("canonical_event_id"), field="canonical_event_id")
+        snapshot = verified_by_event.get(event_id)
+        if snapshot is None:
+            continue
+        probabilities_raw = require_list(prediction.get("probabilities"), field="probabilities")
+        ordered_ids = require_str_list(
+            prediction.get("ordered_selection_ids"), field="ordered_selection_ids"
+        )
+        probability_by_id: dict[str, float] = {}
+        for index, item in enumerate(probabilities_raw):
+            raw = require_dict(item, field=f"probabilities[{index}]")
+            selection_id = require_str(raw.get("selection_id"), field="selection_id")
+            probability_by_id[selection_id] = require_finite_number(
+                raw.get("probability"), field="probability"
+            )
+        try:
+            probabilities = tuple(probability_by_id[selection_id] for selection_id in ordered_ids)
+        except KeyError as exc:
+            raise MonitoringError("prediction probability vector is incomplete") from exc
+        winners = [
+            item.selection.selection_id
+            for item in snapshot.result.market_outcomes
+            if item.result == "win"
+        ]
+        if len(winners) != 1 or winners[0] not in ordered_ids:
+            continue
+        actual_index = ordered_ids.index(winners[0])
+        related = by_prediction.get(prediction_id, [])
+        settled_rows = [
+            settlement_by_opportunity[
+                require_str(row.get("opportunity_id"), field="opportunity_id")
+            ]
+            for row in related
+            if require_str(row.get("opportunity_id"), field="opportunity_id")
+            in settlement_by_opportunity
+        ]
+        settled = bool(settled_rows)
+        won: bool | None = None
+        profit_units: float | None = None
+        if settled:
+            wins = [require_str(row.get("result"), field="result") == "win" for row in settled_rows]
+            profits = [
+                float(require_decimal_string(row.get("profit_units"), field="profit_units"))
+                for row in settled_rows
+            ]
+            won = any(wins)
+            profit_units = sum(profits)
+        observations.append(
+            PerformanceObservation(
+                observation_id=f"{artifact.artifact_id}:{prediction_id}",
+                probabilities=probabilities,
+                actual_index=actual_index,
+                settled=settled,
+                won=won,
+                profit_units=profit_units,
+            )
+        )
+    return observations
+
+
 def _derive_performance(
     *,
     admitted: list[TypedAnalyticalArtifact],
@@ -370,104 +512,101 @@ def _derive_performance(
     float | None,
     VerifiedAggregatePerformance | None,
 ]:
-    observations: list[PerformanceObservation] = []
-    aggregate: VerifiedAggregatePerformance | None = None
-    calibration_error: float | None = None
-    backtests = [item for item in admitted if item.artifact_kind == "backtest"]
+    backtests = sorted(
+        [item for item in admitted if item.artifact_kind == "backtest"],
+        key=lambda item: item.artifact_id,
+    )
     if not backtests:
         return (), None, None
+    per_event_bundles: list[tuple[frozenset[str], list[PerformanceObservation]]] = []
+    aggregate_bundles: list[tuple[frozenset[str], VerifiedAggregatePerformance]] = []
     for artifact in backtests:
-        predictions = {
-            require_str(row.get("prediction_id"), field="prediction_id"): row
-            for row in artifact.dataset("predictions").rows
-        }
-        opportunities = list(artifact.dataset("opportunities").rows)
-        by_prediction: dict[str, list[dict]] = {}
-        for row in opportunities:
-            prediction_id = require_str(row.get("prediction_id"), field="prediction_id")
-            by_prediction.setdefault(prediction_id, []).append(row)
-        settlements = list(artifact.dataset("settlements").rows)
-        settlement_by_opportunity: dict[str, dict] = {}
-        for row in settlements:
-            if require_str(row.get("kind"), field="kind") != "single":
-                continue
-            opportunity_ids = require_str_list(row.get("opportunity_ids"), field="opportunity_ids")
-            if len(opportunity_ids) != 1:
-                continue
-            settlement_by_opportunity[opportunity_ids[0]] = row
-        for prediction_id, prediction in sorted(predictions.items()):
-            event_id = require_str(prediction.get("canonical_event_id"), field="canonical_event_id")
-            snapshot = verified_by_event.get(event_id)
-            if snapshot is None:
-                continue
-            probabilities_raw = require_list(prediction.get("probabilities"), field="probabilities")
-            ordered_ids = require_str_list(
-                prediction.get("ordered_selection_ids"), field="ordered_selection_ids"
-            )
-            probability_by_id: dict[str, float] = {}
-            for index, item in enumerate(probabilities_raw):
-                raw = require_dict(item, field=f"probabilities[{index}]")
-                selection_id = require_str(raw.get("selection_id"), field="selection_id")
-                probability_by_id[selection_id] = require_finite_number(
-                    raw.get("probability"), field="probability"
-                )
-            try:
-                probabilities = tuple(
-                    probability_by_id[selection_id] for selection_id in ordered_ids
-                )
-            except KeyError as exc:
-                raise MonitoringError("prediction probability vector is incomplete") from exc
-            winners = [
-                item.selection.selection_id
-                for item in snapshot.result.market_outcomes
-                if item.result == "win"
-            ]
-            if len(winners) != 1 or winners[0] not in ordered_ids:
-                continue
-            actual_index = ordered_ids.index(winners[0])
-            related = by_prediction.get(prediction_id, [])
-            settled_rows = [
-                settlement_by_opportunity[
-                    require_str(row.get("opportunity_id"), field="opportunity_id")
-                ]
-                for row in related
-                if require_str(row.get("opportunity_id"), field="opportunity_id")
-                in settlement_by_opportunity
-            ]
-            settled = bool(settled_rows)
-            won: bool | None = None
-            profit_units: float | None = None
-            if settled:
-                wins = [
-                    require_str(row.get("result"), field="result") == "win" for row in settled_rows
-                ]
-                profits = [
-                    float(require_decimal_string(row.get("profit_units"), field="profit_units"))
-                    for row in settled_rows
-                ]
-                won = any(wins)
-                profit_units = sum(profits)
-            observations.append(
-                PerformanceObservation(
-                    observation_id=f"{artifact.artifact_id}:{prediction_id}",
-                    probabilities=probabilities,
-                    actual_index=actual_index,
-                    settled=settled,
-                    won=won,
-                    profit_units=profit_units,
-                )
-            )
+        population = _backtest_event_population(artifact)
+        observations = _observations_from_backtest(
+            artifact=artifact,
+            verified_by_event=verified_by_event,
+        )
         if observations:
+            per_event_bundles.append((population, observations))
             continue
         aggregate_rows = artifact.dataset("aggregate_metrics").rows
         if len(aggregate_rows) != 1:
             raise MonitoringError("backtest aggregate metric selection is missing or ambiguous")
-        aggregate = _aggregate_from_verified_row(aggregate_rows[0])
-        if aggregate.calibration_error is not None:
-            calibration_error = aggregate.calibration_error
-    if observations:
-        return tuple(sorted(observations, key=lambda item: item.observation_id)), None, None
-    return (), calibration_error, aggregate
+        aggregate_bundles.append((population, _aggregate_from_verified_row(aggregate_rows[0])))
+    if per_event_bundles and aggregate_bundles:
+        raise MonitoringError(
+            "ambiguous mixture of per-event and aggregate backtest performance evidence"
+        )
+    if per_event_bundles:
+        seen_events: set[str] = set()
+        merged: list[PerformanceObservation] = []
+        for population, observations in per_event_bundles:
+            overlap = seen_events & set(population)
+            if overlap:
+                raise MonitoringError("overlapping backtest event populations")
+            seen_events |= set(population)
+            merged.extend(observations)
+        observation_ids = [item.observation_id for item in merged]
+        if len(observation_ids) != len(set(observation_ids)):
+            raise MonitoringError("duplicate backtest performance observations")
+        return tuple(sorted(merged, key=lambda item: item.observation_id)), None, None
+    if not aggregate_bundles:
+        return (), None, None
+    seen_events = set()
+    aggregates: list[VerifiedAggregatePerformance] = []
+    for population, aggregate in aggregate_bundles:
+        if len(aggregate_bundles) > 1 and not population:
+            raise MonitoringError("ambiguous aggregate backtest populations")
+        overlap = seen_events & set(population)
+        if overlap:
+            raise MonitoringError("overlapping backtest event populations")
+        seen_events |= set(population)
+        aggregates.append(aggregate)
+    combined = _combine_verified_aggregates(aggregates)
+    return (), combined.calibration_error, combined
+
+
+def _combine_verified_aggregates(
+    aggregates: list[VerifiedAggregatePerformance],
+) -> VerifiedAggregatePerformance:
+    if len(aggregates) == 1:
+        return aggregates[0]
+    signatures = {
+        (
+            item.log_loss is not None,
+            item.multiclass_brier_score is not None,
+            item.calibration_error is not None,
+            item.hit_rate is not None,
+            item.roi is not None,
+        )
+        for item in aggregates
+    }
+    if len(signatures) != 1:
+        raise MonitoringError("ambiguous aggregate performance metric coverage")
+
+    def weighted(field_name: str, *, weight_field: str) -> float | None:
+        if getattr(aggregates[0], field_name) is None:
+            return None
+        weights = [getattr(item, weight_field) for item in aggregates]
+        if any(weight <= 0 for weight in weights):
+            raise MonitoringError(f"ambiguous aggregate {field_name} sample weights")
+        total = sum(weights)
+        combined = math.fsum(
+            float(getattr(item, field_name)) * float(weight)
+            for item, weight in zip(aggregates, weights, strict=True)
+        )
+        return float(combined / total)
+
+    return VerifiedAggregatePerformance(
+        sample_size=sum(item.sample_size for item in aggregates),
+        completed_result_count=sum(item.completed_result_count for item in aggregates),
+        bet_count=sum(item.bet_count for item in aggregates),
+        log_loss=weighted("log_loss", weight_field="sample_size"),
+        multiclass_brier_score=weighted("multiclass_brier_score", weight_field="sample_size"),
+        calibration_error=weighted("calibration_error", weight_field="sample_size"),
+        hit_rate=weighted("hit_rate", weight_field="bet_count"),
+        roi=weighted("roi", weight_field="bet_count"),
+    )
 
 
 def _aggregate_from_verified_row(row: dict) -> VerifiedAggregatePerformance:
@@ -480,6 +619,7 @@ def _aggregate_from_verified_row(row: dict) -> VerifiedAggregatePerformance:
     return VerifiedAggregatePerformance(
         sample_size=sample_size,
         completed_result_count=sample_size,
+        bet_count=bet_count,
         log_loss=(
             None
             if log_loss_raw is None
