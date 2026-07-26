@@ -88,6 +88,8 @@ def test_monitoring_worker_rejects_caller_declared_health_metrics(tmp_path) -> N
     )
     object.__setattr__(context, "_database_path", database)
     object.__setattr__(context, "_exports_directory", exports)
+    object.__setattr__(context, "_snapshots_directory", tmp_path / "storage" / "snapshots")
+    (tmp_path / "storage" / "snapshots").mkdir(parents=True, exist_ok=True)
     payload = {
         "policy": {
             "policy_id": "worker-monitoring",

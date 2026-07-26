@@ -164,7 +164,11 @@ def settle_analysis_handler(context: JobExecutionContext, payload: JsonValue) ->
 
 def run_monitoring_handler(context: JobExecutionContext, payload: JsonValue) -> JsonValue:
     """Evaluate and persist an immutable monitoring report without external calls."""
-    if context._database_path is None or context._exports_directory is None:
+    if (
+        context._database_path is None
+        or context._exports_directory is None
+        or context._snapshots_directory is None
+    ):
         raise PermanentJobError("monitoring handler requires runtime path binding")
     try:
         request = require_dict(payload, field="payload")
@@ -184,6 +188,7 @@ def run_monitoring_handler(context: JobExecutionContext, payload: JsonValue) -> 
         with connect_database(context._database_path, read_only=True) as connection:
             inputs = build_monitoring_inputs(
                 exports_root=context._exports_directory,
+                snapshots_root=context._snapshots_directory,
                 connection=connection,
                 evidence_payload=request["evidence"],
                 window_start_utc=start,
@@ -201,20 +206,22 @@ def run_monitoring_handler(context: JobExecutionContext, payload: JsonValue) -> 
             request["output_relative_directory"],
             field="output_relative_directory",
         )
-        try:
-            artifact = publish_monitoring_report(
-                root=context._exports_directory,
-                relative_directory=output,
-                report=report,
-            )
-        except ArtifactError:
-            existing = load_monitoring_report(
-                root=context._exports_directory,
-                relative_directory=output,
-            )
-            if existing.report.run_id != report.run_id:
-                raise MonitoringError("existing monitoring output conflicts with replay") from None
-            artifact = existing.artifact
+        artifact = publish_monitoring_report(
+            root=context._exports_directory,
+            relative_directory=output,
+            report=report,
+        )
+        reused = load_monitoring_report(
+            root=context._exports_directory,
+            relative_directory=output,
+            expected_checksum=artifact.checksum_sha256,
+            expected_run_id=report.run_id,
+        )
+        if reused.report.run_id != report.run_id:
+            raise MonitoringError("existing monitoring output conflicts with replay")
+        if reused.checksum_sha256 != artifact.checksum_sha256:
+            raise MonitoringError("existing monitoring checksum conflicts with replay")
+        artifact = reused.artifact
         context.checkpoint()
         with connect_database(context._database_path) as connection:
             with transaction(connection, immediate=True):

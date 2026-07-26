@@ -217,6 +217,37 @@ class PerformanceObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedAggregatePerformance:
+    """Proper-score evidence derived exclusively from a verified backtest aggregate."""
+
+    sample_size: int
+    completed_result_count: int
+    log_loss: float | None = None
+    multiclass_brier_score: float | None = None
+    calibration_error: float | None = None
+    hit_rate: float | None = None
+    roi: float | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.sample_size) is not int or self.sample_size < 0:
+            raise MonitoringError("aggregate sample size must be a non-negative integer")
+        if type(self.completed_result_count) is not int or not (
+            0 <= self.completed_result_count <= self.sample_size
+        ):
+            raise MonitoringError("aggregate completed_result_count is invalid")
+        for field_name in (
+            "log_loss",
+            "multiclass_brier_score",
+            "calibration_error",
+            "hit_rate",
+            "roi",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not math.isfinite(value):
+                raise MonitoringError(f"{field_name} must be finite when present")
+
+
+@dataclass(frozen=True, slots=True)
 class MonitoringInputs:
     """Persisted evidence summary; absent values explicitly mean unavailable evidence."""
 
@@ -240,6 +271,7 @@ class MonitoringInputs:
     quality_flag_failure_count: int | None = None
     calibration_error: float | None = None
     performance: tuple[PerformanceObservation, ...] = ()
+    aggregate_performance: VerifiedAggregatePerformance | None = None
 
     def __post_init__(self) -> None:
         if len({item.evidence_id for item in self.evidence}) != len(self.evidence):
@@ -282,6 +314,12 @@ class MonitoringInputs:
                 )
             if not item.settled and (item.won is not None or item.profit_units is not None):
                 raise MonitoringError("unsettled performance observations cannot carry outcomes")
+        if self.performance and self.aggregate_performance is not None:
+            raise MonitoringError(
+                "monitoring inputs cannot carry both per-event and aggregate performance evidence"
+            )
+        if self.calibration_error is not None and not math.isfinite(self.calibration_error):
+            raise MonitoringError("calibration_error must be finite when present")
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,6 +501,7 @@ def evaluate_monitoring(
         inputs.prediction_count,
     )
     completed = inputs.performance
+    aggregate = inputs.aggregate_performance
     if completed:
         log_loss = math.fsum(
             -math.log(max(item.probabilities[item.actual_index], 1e-15)) for item in completed
@@ -496,14 +535,49 @@ def evaluate_monitoring(
             None if not profits else float(len(profits)),
             len(profits),
         )
+        calibration_sample = len(completed) if inputs.calibration_error is not None else 0
+    elif aggregate is not None:
+        values["log_loss"] = (
+            aggregate.log_loss,
+            None,
+            None,
+            0 if aggregate.log_loss is None else aggregate.sample_size,
+        )
+        values["multiclass_brier_score"] = (
+            aggregate.multiclass_brier_score,
+            None,
+            None,
+            0 if aggregate.multiclass_brier_score is None else aggregate.sample_size,
+        )
+        values["hit_rate"] = (
+            aggregate.hit_rate,
+            None,
+            None,
+            0 if aggregate.hit_rate is None else aggregate.completed_result_count,
+        )
+        values["roi"] = (
+            aggregate.roi,
+            None,
+            None,
+            0 if aggregate.roi is None else aggregate.completed_result_count,
+        )
+        calibration_sample = (
+            0
+            if aggregate.calibration_error is None and inputs.calibration_error is None
+            else aggregate.sample_size
+        )
     else:
         for name in ("log_loss", "multiclass_brier_score", "hit_rate", "roi"):
             values[name] = (None, None, None, 0)
+        calibration_sample = 0
+    calibration_value = inputs.calibration_error
+    if calibration_value is None and aggregate is not None:
+        calibration_value = aggregate.calibration_error
     values["calibration_error"] = (
-        inputs.calibration_error,
+        calibration_value,
         None,
         None,
-        len(completed) if inputs.calibration_error is not None else 0,
+        calibration_sample if calibration_value is not None else 0,
     )
     metrics = tuple(
         _metric(

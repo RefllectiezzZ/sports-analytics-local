@@ -30,7 +30,6 @@ from sports_analytics.data.repositories.operations import (
 )
 from sports_analytics.data.types import JsonValue
 from sports_analytics.governance.contracts import (
-    ModelEvaluationEvidence,
     ModelRole,
     PromotionPolicy,
     evaluate_challenger,
@@ -38,19 +37,12 @@ from sports_analytics.governance.contracts import (
 from sports_analytics.governance.evidence import build_model_evaluation_evidence
 from sports_analytics.governance.repository import ModelGovernanceRepository
 from sports_analytics.monitoring.artifacts import (
-    load_monitoring_report,
+    MonitoringReportTrust,
     publish_monitoring_report,
+    verify_monitoring_report_trust,
 )
 from sports_analytics.monitoring.builders import build_monitoring_inputs, parse_monitoring_policy
-from sports_analytics.monitoring.contracts import (
-    EvidenceReference,
-    MetricDirection,
-    MetricThreshold,
-    MonitoringInputs,
-    MonitoringPolicy,
-    PerformanceObservation,
-    evaluate_monitoring,
-)
+from sports_analytics.monitoring.contracts import evaluate_monitoring
 from sports_analytics.results.snapshots import load_result_snapshot
 from sports_analytics.services.analysis import ANALYSIS_ARTIFACT_SCHEMA
 from sports_analytics.services.training import verify_model_artifact
@@ -84,6 +76,7 @@ def add_operational_arguments(parser: argparse.ArgumentParser, mode: Any) -> Non
         choices=[ModelRole.CHAMPION.value, ModelRole.CHALLENGER.value],
         default=ModelRole.CHALLENGER.value,
     )
+    parser.add_argument("--expected-run-id", default=None, metavar="RUN_ID")
 
 
 def operational_mode_values(args: argparse.Namespace) -> tuple[bool, ...]:
@@ -171,15 +164,22 @@ def run_operational_mode(args: argparse.Namespace) -> int | None:
         return _monitor(args)
     if args.verify_monitoring_report is not None:
         _, paths = validate_configuration(config_path=args.config, env_file=args.env_file)
-        artifact = load_monitoring_report(
+        if args.checksum is None:
+            raise ConfigurationError("external monitoring verification requires --checksum")
+        artifact, trust = verify_monitoring_report_trust(
             root=paths.exports_directory,
             relative_directory=args.verify_monitoring_report,
             expected_checksum=args.checksum,
+            expected_run_id=args.expected_run_id,
         )
+        if trust is not MonitoringReportTrust.EXTERNALLY_VERIFIED:
+            raise ConfigurationError("monitoring report is not externally verified")
         _print(
             {
                 "artifact_id": artifact.artifact_id,
                 "checksum_sha256": artifact.checksum_sha256,
+                "run_id": artifact.report.run_id,
+                "trust_level": trust.value,
                 "verified": True,
             }
         )
@@ -343,6 +343,7 @@ def _monitor(args: argparse.Namespace) -> int:
     with connect_database(runtime.database_path, read_only=True) as connection:
         inputs = build_monitoring_inputs(
             exports_root=runtime.paths.exports_directory,
+            snapshots_root=runtime.paths.snapshots_directory,
             connection=connection,
             evidence_payload=request.get("evidence"),
             window_start_utc=start,
@@ -474,155 +475,6 @@ def _optional_checksum(payload: dict[str, JsonValue], field: str) -> str | None:
     return None if value is None else require_sha256_checksum(value, field=field)
 
 
-def _policy(payload: dict[str, JsonValue]) -> MonitoringPolicy:
-    _exact_fields(payload, {"policy_id", "policy_version", "thresholds"}, "monitoring policy")
-    thresholds: list[tuple[str, MetricThreshold]] = []
-    for raw in require_list(payload.get("thresholds"), field="thresholds"):
-        item = require_dict(raw, field="thresholds[]")
-        _exact_fields(
-            item,
-            {"metric_name", "warning", "critical", "direction"},
-            "monitoring threshold",
-        )
-        thresholds.append(
-            (
-                _text(item, "metric_name"),
-                MetricThreshold(
-                    warning=require_finite_number(item.get("warning"), field="warning"),
-                    critical=require_finite_number(item.get("critical"), field="critical"),
-                    direction=MetricDirection(_text(item, "direction")),
-                ),
-            )
-        )
-    return MonitoringPolicy(
-        policy_id=_text(payload, "policy_id"),
-        policy_version=_text(payload, "policy_version"),
-        thresholds=tuple(sorted(thresholds)),
-    )
-
-
-def _monitoring_inputs(payload: dict[str, JsonValue]) -> MonitoringInputs:
-    allowed_fields = {
-        "evidence",
-        "performance",
-        "latest_source_observed_at_utc",
-        "oldest_unsettled_completion_utc",
-        "expected_snapshot_count",
-        "valid_snapshot_count",
-        "artifact_failure_count",
-        "unresolved_mapping_count",
-        "incomplete_market_count",
-        "duplicate_identity_count",
-        "expected_result_count",
-        "available_result_count",
-        "settlement_candidate_count",
-        "settled_count",
-        "prediction_count",
-        "eligible_opportunity_count",
-        "rejected_opportunity_count",
-        "probability_complete_count",
-        "quality_flag_failure_count",
-        "calibration_error",
-    }
-    if "evidence" not in payload or set(payload) - allowed_fields:
-        raise ConfigurationError("monitoring inputs contain missing or unknown fields")
-    evidence = tuple(
-        EvidenceReference(
-            evidence_type=_text(item, "evidence_type"),
-            evidence_id=_text(item, "evidence_id"),
-            checksum_sha256=require_sha256_checksum(
-                item.get("checksum_sha256"),
-                field="checksum_sha256",
-            ),
-        )
-        for item in (
-            require_dict(raw, field="evidence[]")
-            for raw in require_list(payload.get("evidence"), field="evidence")
-        )
-    )
-    for item in (
-        require_dict(raw, field="evidence[]")
-        for raw in require_list(payload.get("evidence"), field="evidence")
-    ):
-        _exact_fields(
-            item,
-            {"evidence_type", "evidence_id", "checksum_sha256"},
-            "monitoring evidence",
-        )
-    performance = tuple(
-        PerformanceObservation(
-            observation_id=_text(item, "observation_id"),
-            probabilities=tuple(
-                require_finite_number(value, field="probabilities[]")
-                for value in require_list(item.get("probabilities"), field="probabilities")
-            ),
-            actual_index=require_int(item.get("actual_index"), field="actual_index"),
-            settled=require_bool(item.get("settled"), field="settled"),
-            won=(None if item.get("won") is None else require_bool(item.get("won"), field="won")),
-            profit_units=(
-                None
-                if item.get("profit_units") is None
-                else require_finite_number(item.get("profit_units"), field="profit_units")
-            ),
-        )
-        for item in (
-            require_dict(raw, field="performance[]")
-            for raw in require_list(payload.get("performance", []), field="performance")
-        )
-    )
-    for item in (
-        require_dict(raw, field="performance[]")
-        for raw in require_list(payload.get("performance", []), field="performance")
-    ):
-        _exact_fields(
-            item,
-            {
-                "observation_id",
-                "probabilities",
-                "actual_index",
-                "settled",
-                "won",
-                "profit_units",
-            },
-            "performance observation",
-        )
-    timestamp_fields = {
-        "latest_source_observed_at_utc",
-        "oldest_unsettled_completion_utc",
-    }
-    count_fields = {
-        "expected_snapshot_count",
-        "valid_snapshot_count",
-        "artifact_failure_count",
-        "unresolved_mapping_count",
-        "incomplete_market_count",
-        "duplicate_identity_count",
-        "expected_result_count",
-        "available_result_count",
-        "settlement_candidate_count",
-        "settled_count",
-        "prediction_count",
-        "eligible_opportunity_count",
-        "rejected_opportunity_count",
-        "probability_complete_count",
-        "quality_flag_failure_count",
-    }
-    kwargs: dict[str, object] = {"evidence": evidence, "performance": performance}
-    for field in timestamp_fields:
-        value = payload.get(field)
-        kwargs[field] = None if value is None else _timestamp(value, field)
-    for field in count_fields:
-        value = payload.get(field)
-        kwargs[field] = None if value is None else require_int(value, field=field)
-    calibration = payload.get("calibration_error")
-    kwargs["calibration_error"] = (
-        None
-        if calibration is None
-        else require_finite_number(calibration, field="calibration_error")
-    )
-    return MonitoringInputs(**kwargs)  # type: ignore[arg-type]
-
-
 def _promotion_policy(payload: dict[str, JsonValue]) -> PromotionPolicy:
     _exact_fields(
         payload,
@@ -666,65 +518,6 @@ def _promotion_policy(payload: dict[str, JsonValue]) -> PromotionPolicy:
             field="require_calibration",
         ),
     )
-
-
-def _model_evidence(payload: dict[str, JsonValue]) -> ModelEvaluationEvidence:
-    _exact_fields(
-        payload,
-        {
-            "evidence_artifact_id",
-            "evidence_checksum_sha256",
-            "model_artifact_id",
-            "sport_code",
-            "market_key",
-            "evaluation_mode",
-            "window_start_utc",
-            "window_end_utc",
-            "event_population_id",
-            "sample_size",
-            "completed_result_count",
-            "coverage",
-            "log_loss",
-            "multiclass_brier_score",
-            "calibration_error",
-            "hit_rate",
-            "roi",
-        },
-        "model evaluation evidence",
-    )
-    return ModelEvaluationEvidence(
-        evidence_artifact_id=_text(payload, "evidence_artifact_id"),
-        evidence_checksum_sha256=require_sha256_checksum(
-            payload.get("evidence_checksum_sha256"),
-            field="evidence_checksum_sha256",
-        ),
-        model_artifact_id=_text(payload, "model_artifact_id"),
-        sport_code=_text(payload, "sport_code"),
-        market_key=_text(payload, "market_key"),
-        evaluation_mode=_text(payload, "evaluation_mode"),
-        window_start_utc=_timestamp(payload.get("window_start_utc"), "window_start_utc"),
-        window_end_utc=_timestamp(payload.get("window_end_utc"), "window_end_utc"),
-        event_population_id=_text(payload, "event_population_id"),
-        sample_size=require_int(payload.get("sample_size"), field="sample_size"),
-        completed_result_count=require_int(
-            payload.get("completed_result_count"),
-            field="completed_result_count",
-        ),
-        coverage=require_finite_number(payload.get("coverage"), field="coverage"),
-        log_loss=require_finite_number(payload.get("log_loss"), field="log_loss"),
-        multiclass_brier_score=require_finite_number(
-            payload.get("multiclass_brier_score"),
-            field="multiclass_brier_score",
-        ),
-        calibration_error=_optional_number(payload, "calibration_error"),
-        hit_rate=_optional_number(payload, "hit_rate"),
-        roi=_optional_number(payload, "roi"),
-    )
-
-
-def _optional_number(payload: dict[str, JsonValue], field: str) -> float | None:
-    value = payload.get(field)
-    return None if value is None else require_finite_number(value, field=field)
 
 
 def _entry_json(entry: object) -> dict[str, JsonValue]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Final, cast
 
@@ -42,6 +43,13 @@ from sports_analytics.monitoring.contracts import (
 MONITORING_ARTIFACT_TYPE: Final[str] = "operational-monitoring-report"
 
 
+class MonitoringReportTrust(StrEnum):
+    """Explicit trust boundary for a reconstructed monitoring report."""
+
+    INTERNALLY_CONSISTENT = "internally_consistent"
+    EXTERNALLY_VERIFIED = "externally_verified"
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedMonitoringReport:
     """A strict artifact envelope paired with its parsed monitoring report."""
@@ -77,6 +85,8 @@ def publish_monitoring_report(
         existing = load_monitoring_report(
             root=root,
             relative_directory=relative_directory,
+            expected_checksum=None,
+            expected_run_id=report.run_id,
         )
         if existing.artifact.payload != payload:
             raise MonitoringError("existing monitoring report conflicts with replay") from None
@@ -88,6 +98,7 @@ def load_monitoring_report(
     root: Path,
     relative_directory: str,
     expected_checksum: str | None = None,
+    expected_run_id: str | None = None,
 ) -> VerifiedMonitoringReport:
     try:
         artifact = load_analytical_artifact(
@@ -121,9 +132,34 @@ def load_monitoring_report(
         raise MonitoringError("monitoring report fields are not exact")
     if artifact.payload["schema_version"] != MONITORING_REPORT_SCHEMA_VERSION:
         raise MonitoringError("monitoring report schema version mismatch")
-    return VerifiedMonitoringReport(
-        artifact=artifact, report=_verify_report_payload(artifact.payload)
+    report = _verify_report_payload(artifact.payload)
+    if expected_run_id is not None and report.run_id != expected_run_id:
+        raise MonitoringError("monitoring report run identity does not match expected run")
+    return VerifiedMonitoringReport(artifact=artifact, report=report)
+
+
+def verify_monitoring_report_trust(
+    *,
+    root: Path,
+    relative_directory: str,
+    expected_checksum: str | None = None,
+    expected_run_id: str | None = None,
+) -> tuple[VerifiedMonitoringReport, MonitoringReportTrust]:
+    """Classify a report as internally consistent or externally verified.
+
+    Nested content addressing alone does not prevent complete malicious rewriting
+    of all identities. External verification therefore requires an expected
+    checksum supplied by the caller.
+    """
+    verified = load_monitoring_report(
+        root=root,
+        relative_directory=relative_directory,
+        expected_checksum=expected_checksum,
+        expected_run_id=expected_run_id,
     )
+    if expected_checksum is None:
+        return verified, MonitoringReportTrust.INTERNALLY_CONSISTENT
+    return verified, MonitoringReportTrust.EXTERNALLY_VERIFIED
 
 
 def _verify_report_payload(payload: dict) -> MonitoringReport:
