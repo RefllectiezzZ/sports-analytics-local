@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import FrameType
 from typing import Final
 
@@ -54,7 +55,7 @@ class BookmakerScheduler:
         self,
         *,
         settings: Settings,
-        database_path,
+        database_path: Path,
         clock: Clock | None = None,
         sleeper: Sleeper | None = None,
         poll_interval_seconds: float = 5.0,

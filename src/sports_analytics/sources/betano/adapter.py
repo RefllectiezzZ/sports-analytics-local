@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -12,7 +11,10 @@ from sports_analytics.sources.betano.parser import parse_betano_acquisition
 from sports_analytics.sources.bookmaker_catalog import reject_forbidden_job_controls
 from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult, BrowserMode
-from sports_analytics.sources.browser.playwright_runtime import BrowserSession, PlaywrightBrowserSession
+from sports_analytics.sources.browser.playwright_runtime import (
+    BrowserSession,
+    PlaywrightBrowserSession,
+)
 from sports_analytics.sources.raw_capture import BookmakerRawCaptureStore
 
 

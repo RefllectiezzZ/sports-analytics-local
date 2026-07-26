@@ -259,8 +259,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         parser.error("scraper modes cannot be combined with shared CLI modes")
     if enqueue_args and not args.enqueue_football_data and not args.enqueue_bookmaker_acquisition:
         parser.error(
-            "enqueue arguments require --enqueue-football-data or "
-            "--enqueue-bookmaker-acquisition"
+            "enqueue arguments require --enqueue-football-data or --enqueue-bookmaker-acquisition"
         )
     if args.enqueue_football_data and (args.competition is None or args.season is None):
         parser.error("--enqueue-football-data requires --competition and --season")

@@ -32,11 +32,12 @@ from sports_analytics.core.exceptions import (
     SnapshotBusyError,
     SnapshotIntegrityError,
 )
-from sports_analytics.core.settings import BookmakersSettings
+from sports_analytics.core.settings import BookmakerProviderSettings, BookmakersSettings
 from sports_analytics.data.codec import format_utc_timestamp
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.repositories.bookmakers import BookmakerRepository
-from sports_analytics.data.types import normalize_uuid, validate_identifier
+from sports_analytics.data.types import JsonValue, normalize_uuid, validate_identifier
+from sports_analytics.snapshots.spec import RawArtifactReference
 from sports_analytics.sources.betano.adapter import acquire_betano_current_odds
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION as BETANO_ADAPTER_VERSION
 from sports_analytics.sources.betclic.adapter import acquire_betclic_current_odds
@@ -46,9 +47,8 @@ from sports_analytics.sources.bookmaker_catalog import (
     reject_forbidden_job_controls,
 )
 from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
-from sports_analytics.sources.browser.contracts import BrowserMode
+from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult, BrowserMode
 from sports_analytics.sources.browser.playwright_runtime import BrowserSession
-from sports_analytics.snapshots.spec import RawArtifactReference
 
 
 class BookmakerIngestionService:
@@ -106,9 +106,7 @@ class BookmakerIngestionService:
 
         started_at = self._normalize_utc(self._clock())
         observed_at = (
-            self._normalize_utc(observed_at_utc)
-            if observed_at_utc is not None
-            else started_at
+            self._normalize_utc(observed_at_utc) if observed_at_utc is not None else started_at
         )
         cycle_id = (
             validate_identifier(acquisition_cycle_id, field_name="acquisition_cycle_id")
@@ -219,9 +217,7 @@ class BookmakerIngestionService:
         _checkpoint()
         raw_sha = EMPTY_SOURCE_FILE_SHA256
         raw_artifact = RawArtifactReference(
-            relative_path=(
-                capture_paths[0] if capture_paths else "raw/bookmakers/empty.txt"
-            ),
+            relative_path=(capture_paths[0] if capture_paths else "raw/bookmakers/empty.txt"),
             checksum_sha256=raw_sha,
             byte_count=0,
             encoding="utf-8",
@@ -243,8 +239,11 @@ class BookmakerIngestionService:
             valid_quotes_observed=len(normalized.market_quotes),
             unresolved_events=len(reconciliations.unresolved_event_reconciliations),
             rejected_markets=len(normalized.unknown_markets),
-            warnings=tuple(warning.code for warning in bundle.warnings),
+            warnings=tuple(sorted({warning.code for warning in bundle.warnings})),
             current_block_or_failure_classification=FailureClassification.NONE,
+            next_eligible_attempt_utc=None,
+            drift_detected=bool(bundle.drift_codes),
+            acquisition_partial=bool(reconciliations.unresolved_event_reconciliations),
         )
         try:
             publication = publish_bookmaker_snapshot(
@@ -339,7 +338,7 @@ class BookmakerIngestionService:
         acquisition_cycle_id: str,
         observed_at_utc: datetime,
         browser_mode: BrowserMode,
-    ) -> tuple[object, ProviderAcquisitionBundle, tuple[str, ...]]:
+    ) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[str, ...]]:
         if provider_id == PROVIDER_BETANO_PT:
             return acquire_betano_current_odds(
                 sport=sport,
@@ -361,13 +360,17 @@ class BookmakerIngestionService:
         msg = f"unsupported bookmaker provider: {provider_id}"
         raise PermanentJobError(msg)
 
-    def _provider_settings(self, provider_id: str):
+    def _provider_settings(self, provider_id: str) -> BookmakerProviderSettings:
         if provider_id == PROVIDER_BETANO_PT:
             return self._bookmakers.betano
         if provider_id == PROVIDER_BETCLIC_PT:
             return self._bookmakers.betclic
         msg = f"unsupported bookmaker provider: {provider_id}"
         raise PermanentJobError(msg)
+
+    @staticmethod
+    def _warnings_json(warnings: list[str]) -> JsonValue:
+        return list(warnings)
 
     def _browser_mode(self) -> BrowserMode:
         mode = self._bookmakers.browser_mode
@@ -422,7 +425,7 @@ class BookmakerIngestionService:
                     started_at=started_at,
                     finished_at=finished_at,
                     failure_classification=failure_classification,
-                    warnings=warnings,
+                    warnings=self._warnings_json(warnings),
                     block_reason=block_reason,
                 )
                 repo.insert_acquisition_attempt(
@@ -439,7 +442,7 @@ class BookmakerIngestionService:
                     status="blocked",
                     updated_at=finished_at,
                     last_attempted_at=finished_at,
-                    warnings=warnings,
+                    warnings=self._warnings_json(warnings),
                     block_failure_classification=failure_classification,
                     next_eligible_at=next_eligible,
                     adapter_version=adapter_version,
@@ -473,7 +476,7 @@ class BookmakerIngestionService:
                     started_at=started_at,
                     finished_at=finished_at,
                     failure_classification=failure_classification,
-                    warnings=warnings,
+                    warnings=self._warnings_json(warnings),
                 )
                 repo.insert_acquisition_attempt(
                     run_id=run_id,
@@ -488,7 +491,7 @@ class BookmakerIngestionService:
                     status="degraded",
                     updated_at=finished_at,
                     last_attempted_at=finished_at,
-                    warnings=warnings,
+                    warnings=self._warnings_json(warnings),
                     block_failure_classification=None,
                     adapter_version=adapter_version,
                     preserve_last_valid_snapshot=True,
@@ -530,7 +533,7 @@ class BookmakerIngestionService:
                     started_at=started_at,
                     finished_at=finished_at,
                     failure_classification="",
-                    warnings=warnings,
+                    warnings=self._warnings_json(warnings),
                     snapshot_id=snapshot_id,
                 )
                 repo.insert_acquisition_attempt(
@@ -564,7 +567,7 @@ class BookmakerIngestionService:
                     valid_quotes_observed=valid_quotes_observed,
                     unresolved_events=unresolved_events,
                     rejected_markets=rejected_markets,
-                    warnings=warnings,
+                    warnings=self._warnings_json(warnings),
                     block_failure_classification=None,
                     next_eligible_at=next_eligible,
                     adapter_version=adapter_version,

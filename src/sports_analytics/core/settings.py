@@ -424,10 +424,7 @@ class BookmakersSettings(_FrozenModel):
     @classmethod
     def _supported_selection_mode(cls, value: str) -> str:
         if value != "preferred-unless-better":
-            msg = (
-                "bookmakers.selection_mode must be 'preferred-unless-better', "
-                f"got {value!r}"
-            )
+            msg = f"bookmakers.selection_mode must be 'preferred-unless-better', got {value!r}"
             raise ValueError(msg)
         return value
 
@@ -448,10 +445,7 @@ class BookmakersSettings(_FrozenModel):
     @model_validator(mode="after")
     def _validate_bookmakers_relations(self) -> Self:
         if self.preferred_provider == self.comparison_provider:
-            msg = (
-                "bookmakers.preferred_provider and bookmakers.comparison_provider "
-                "must differ"
-            )
+            msg = "bookmakers.preferred_provider and bookmakers.comparison_provider must differ"
             raise ValueError(msg)
         return self
 

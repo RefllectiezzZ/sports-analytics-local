@@ -116,9 +116,7 @@ def test_scraper_lists_sources_without_bootstrapping_database(tmp_path: Path) ->
     lines = result.stdout.splitlines()
     assert lines == list(EXPECTED_SOURCE_LINES)
     football_line = next(line for line in lines if line.startswith("football-data-co-uk\t"))
-    source_id, display_name, role, adapter_version, capabilities, sports = football_line.split(
-        "\t"
-    )
+    source_id, display_name, role, adapter_version, capabilities, sports = football_line.split("\t")
     assert source_id == SOURCE_FOOTBALL_DATA_CO_UK
     assert display_name == "Football-Data.co.uk"
     assert role == SourceRole.HISTORICAL_DATA.value
@@ -142,6 +140,7 @@ def test_scraper_list_sources_includes_bookmaker_providers(tmp_path: Path) -> No
     assert SourceCapability.CURRENT_ODDS.value in lowered
     assert SourceCapability.CURRENT_FIXTURES.value in lowered
     assert SourceCapability.SETTLEMENT_RESULTS.value not in lowered
+
 
 def test_scraper_lists_competitions_without_bootstrapping_database(tmp_path: Path) -> None:
     result = _run_scraper(tmp_path, "--list-competitions")

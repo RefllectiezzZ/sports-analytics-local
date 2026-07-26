@@ -55,12 +55,12 @@ def test_database_cli_modes(
     assert code == SUCCESS_EXIT
     out = capsys.readouterr().out
     assert "database valid" in out
-    assert "current_version=4" in out
+    assert "current_version=5" in out
 
     code = module.main(["--config", str(config), "--migrate-database"])
     assert code == SUCCESS_EXIT
     out = capsys.readouterr().out
-    assert "previous_version=4" in out
+    assert "previous_version=5" in out
     assert "migrations_applied=(none)" in out
 
 

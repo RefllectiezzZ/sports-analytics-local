@@ -69,8 +69,10 @@ class BookmakerRepository:
         observed = format_utc_timestamp(require_utc(observed_at, field_name="observed_at"))
         started = format_utc_timestamp(require_utc(started_at, field_name="started_at"))
         finished = format_utc_timestamp(require_utc(finished_at, field_name="finished_at"))
-        block = None if block_reason is None else validate_identifier(
-            block_reason, field_name="block_reason"
+        block = (
+            None
+            if block_reason is None
+            else validate_identifier(block_reason, field_name="block_reason")
         )
         snap = None if snapshot_id is None else normalize_uuid(snapshot_id)
         existing = self._connection.execute(
@@ -148,12 +150,12 @@ class BookmakerRepository:
         classification = (
             None
             if failure_classification is None
-            else validate_plain_text(
-                failure_classification, field_name="failure_classification"
-            )
+            else validate_plain_text(failure_classification, field_name="failure_classification")
         )
-        detail = None if detail_code is None else validate_identifier(
-            detail_code, field_name="detail_code"
+        detail = (
+            None
+            if detail_code is None
+            else validate_identifier(detail_code, field_name="detail_code")
         )
         started = format_utc_timestamp(require_utc(started_at, field_name="started_at"))
         finished = format_utc_timestamp(require_utc(finished_at, field_name="finished_at"))
@@ -278,11 +280,11 @@ class BookmakerRepository:
         next_eligible = (
             None
             if next_eligible_at is None
-            else format_utc_timestamp(
-                require_utc(next_eligible_at, field_name="next_eligible_at")
-            )
+            else format_utc_timestamp(require_utc(next_eligible_at, field_name="next_eligible_at"))
         )
-        snapshot = None if last_valid_snapshot_id is None else normalize_uuid(last_valid_snapshot_id)
+        snapshot = (
+            None if last_valid_snapshot_id is None else normalize_uuid(last_valid_snapshot_id)
+        )
         existing = self.get_provider_status(provider)
         if preserve_last_valid_snapshot and existing is not None:
             existing_snap = existing.get("last_valid_snapshot_id")
@@ -381,9 +383,7 @@ class BookmakerRepository:
             raise RepositoryError(msg)
         cycle = validate_identifier(acquisition_cycle_id, field_name="acquisition_cycle_id")
         observed = format_utc_timestamp(require_utc(observed_at, field_name="observed_at"))
-        registered = format_utc_timestamp(
-            require_utc(registered_at, field_name="registered_at")
-        )
+        registered = format_utc_timestamp(require_utc(registered_at, field_name="registered_at"))
         existing = self._connection.execute(
             """
             SELECT snapshot_id, checksum_sha256, relative_path, acquisition_cycle_id
@@ -423,9 +423,7 @@ class BookmakerRepository:
                 ),
             )
         except sqlite3.IntegrityError as exc:
-            raise DatabaseIntegrityError(
-                "bookmaker snapshot registration insert conflict"
-            ) from exc
+            raise DatabaseIntegrityError("bookmaker snapshot registration insert conflict") from exc
         return snap
 
     def insert_scheduler_cycle(
@@ -451,9 +449,7 @@ class BookmakerRepository:
         normalized_id = normalize_uuid(cycle_id)
         provider = validate_identifier(provider_id, field_name="provider_id")
         sport_code = validate_identifier(sport, field_name="sport")
-        scheduled = format_utc_timestamp(
-            require_utc(scheduled_for, field_name="scheduled_for")
-        )
+        scheduled = format_utc_timestamp(require_utc(scheduled_for, field_name="scheduled_for"))
         enqueued = format_utc_timestamp(require_utc(enqueued_at, field_name="enqueued_at"))
         job = normalize_uuid(job_id)
         suppressed = 1 if suppressed_duplicate else 0
@@ -494,7 +490,7 @@ class BookmakerRepository:
                 (provider, sport_code, scheduled),
             ).fetchone()
             if again is None:
-                raise DatabaseIntegrityError("bookmaker scheduler cycle insert conflict")
+                raise DatabaseIntegrityError("bookmaker scheduler cycle insert conflict") from None
             return str(again["id"]), False
         return normalized_id, True
 
@@ -526,9 +522,7 @@ class BookmakerRepository:
         age = (
             None
             if cached_age_seconds is None
-            else validate_strict_int(
-                cached_age_seconds, field_name="cached_age_seconds", minimum=0
-            )
+            else validate_strict_int(cached_age_seconds, field_name="cached_age_seconds", minimum=0)
         )
         created = format_utc_timestamp(require_utc(created_at, field_name="created_at"))
         try:

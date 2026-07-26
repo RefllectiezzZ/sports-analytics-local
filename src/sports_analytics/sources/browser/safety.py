@@ -40,7 +40,11 @@ class ApprovedNavigation:
     path: str
 
 
-def classify_block_signals(*, title: str | None, body_text: str | None) -> BrowserBlockReason | None:
+def classify_block_signals(
+    *,
+    title: str | None,
+    body_text: str | None,
+) -> BrowserBlockReason | None:
     """Best-effort classification of CAPTCHA / access-denial pages.
 
     Stops acquisition; never attempts bypass.
@@ -58,7 +62,12 @@ def classify_block_signals(*, title: str | None, body_text: str | None) -> Brows
             return BrowserBlockReason.AUTHENTICATION_REQUIRED
     if "not available in your region" in haystack or "geo-restricted" in haystack:
         return BrowserBlockReason.REGIONAL_REFUSAL
-    if "bot detected" in haystack or "automated access" in haystack or "unusual traffic" in haystack:
+    anti_bot = (
+        "bot detected" in haystack
+        or "automated access" in haystack
+        or "unusual traffic" in haystack
+    )
+    if anti_bot:
         return BrowserBlockReason.ANTI_AUTOMATION
     return None
 

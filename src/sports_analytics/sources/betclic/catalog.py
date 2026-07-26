@@ -22,15 +22,9 @@ BETCLIC_CATALOG: Final[BookmakerProviderCatalog] = BookmakerProviderCatalog(
     starting_route_id="home",
     starting_url="https://www.betclic.pt/",
     sport_routes={
-        "football": (
-            ("football-prematch", "https://www.betclic.pt/futebol"),
-        ),
-        "basketball": (
-            ("basketball-prematch", "https://www.betclic.pt/basquetebol"),
-        ),
-        "tennis": (
-            ("tennis-prematch", "https://www.betclic.pt/tenis"),
-        ),
+        "football": (("football-prematch", "https://www.betclic.pt/futebol"),),
+        "basketball": (("basketball-prematch", "https://www.betclic.pt/basquetebol"),),
+        "tennis": (("tennis-prematch", "https://www.betclic.pt/tenis"),),
     },
 )
 

@@ -22,15 +22,9 @@ BETANO_CATALOG: Final[BookmakerProviderCatalog] = BookmakerProviderCatalog(
     starting_route_id="home",
     starting_url="https://www.betano.pt/",
     sport_routes={
-        "football": (
-            ("football-prematch", "https://www.betano.pt/sport/futebol/"),
-        ),
-        "basketball": (
-            ("basketball-prematch", "https://www.betano.pt/sport/basquetebol/"),
-        ),
-        "tennis": (
-            ("tennis-prematch", "https://www.betano.pt/sport/tenis/"),
-        ),
+        "football": (("football-prematch", "https://www.betano.pt/sport/futebol/"),),
+        "basketball": (("basketball-prematch", "https://www.betano.pt/sport/basquetebol/"),),
+        "tennis": (("tennis-prematch", "https://www.betano.pt/sport/tenis/"),),
     },
 )
 

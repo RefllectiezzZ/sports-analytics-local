@@ -34,10 +34,14 @@ from sports_analytics.data.types import DEFAULT_JOB_PRIORITY, SnapshotStatus, no
 from sports_analytics.snapshots.reader import verify_snapshot_directory
 from sports_analytics.sources.betano.catalog import (
     BETANO_CATALOG,
+)
+from sports_analytics.sources.betano.catalog import (
     SUPPORTED_MARKET_DEFINITION_IDS as BETANO_MARKETS,
 )
 from sports_analytics.sources.betclic.catalog import (
     BETCLIC_CATALOG,
+)
+from sports_analytics.sources.betclic.catalog import (
     SUPPORTED_MARKET_DEFINITION_IDS as BETCLIC_MARKETS,
 )
 from sports_analytics.sources.bookmaker_catalog import SUPPORTED_BOOKMAKER_SPORTS
@@ -178,9 +182,7 @@ def verify_bookmaker_snapshot(
             "checksum_sha256": result.manifest_checksum_sha256,
             "schema_version": result.schema_version,
             "snapshot_type": result.snapshot_type,
-            "provider_id": (
-                None if registration is None else registration.get("provider_id")
-            ),
+            "provider_id": (None if registration is None else registration.get("provider_id")),
             "sport": sport_code,
         }
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
