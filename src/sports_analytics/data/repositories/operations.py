@@ -178,7 +178,7 @@ class SettlementRepository:
             for settlement in report.settlements:
                 current = self._connection.execute(
                     """
-                    SELECT c.settlement_id, c.status, s.evidence_fingerprint
+                    SELECT c.settlement_id, c.status, s.evidence_fingerprint, s.as_of_utc
                     FROM current_analytical_settlements c
                     JOIN analytical_settlements s ON s.id = c.settlement_id
                     WHERE c.source_artifact_id = ?
@@ -195,9 +195,21 @@ class SettlementRepository:
                 if current is not None:
                     if str(current["settlement_id"]) == settlement.settlement_id:
                         continue
+                    current_as_of = str(current["as_of_utc"])
+                    candidate_as_of = format_utc_timestamp(settlement.settlement_as_of_utc)
                     if str(current["status"]) in {"win", "loss", "push", "void"}:
                         raise SettlementConflictError(
                             "contradictory settlement evidence rejected without overwrite"
+                        )
+                    if candidate_as_of <= current_as_of:
+                        raise SettlementConflictError(
+                            "stale settlement evidence rejected without overwrite"
+                        )
+                    if not _allowed_current_transition(
+                        current=str(current["status"]), candidate=settlement.status.value
+                    ):
+                        raise SettlementConflictError(
+                            "settlement state transition rejected without overwrite"
                         )
                 self._connection.execute(
                     """
@@ -319,11 +331,12 @@ class SettlementRepository:
         for settlement in report.settlements:
             current = self._connection.execute(
                 """
-                SELECT settlement_id, status
-                FROM current_analytical_settlements
-                WHERE source_artifact_id = ?
-                  AND position_type = ?
-                  AND position_id = ?
+                SELECT c.settlement_id, c.status, s.as_of_utc
+                FROM current_analytical_settlements c
+                JOIN analytical_settlements s ON s.id = c.settlement_id
+                WHERE c.source_artifact_id = ?
+                  AND c.position_type = ?
+                  AND c.position_id = ?
                 """,
                 (
                     settlement.source_artifact_id,
@@ -331,21 +344,29 @@ class SettlementRepository:
                     settlement.position_id,
                 ),
             ).fetchone()
-            if (
-                current is None
-                or str(current["settlement_id"]) == settlement.settlement_id
-                or str(current["status"]) not in {"win", "loss", "push", "void"}
-            ):
+            if current is None or str(current["settlement_id"]) == settlement.settlement_id:
                 continue
+            is_final = str(current["status"]) in {"win", "loss", "push", "void"}
+            candidate_as_of = format_utc_timestamp(settlement.settlement_as_of_utc)
+            stale = candidate_as_of <= str(current["as_of_utc"])
+            invalid_transition = not _allowed_current_transition(
+                current=str(current["status"]), candidate=settlement.status.value
+            )
+            if not is_final and not stale and not invalid_transition:
+                continue
+            event_type = (
+                "contradictory-evidence-rejected" if is_final else "stale-evidence-rejected"
+            )
             self._connection.execute(
                 """
                 INSERT OR IGNORE INTO settlement_audit_events (
                     id, settlement_id, event_type, actor, occurred_at, details_json
-                ) VALUES (?, ?, 'contradictory-evidence-rejected', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    f"conflict:{settlement.settlement_id}",
+                    f"rejected:{event_type}:{settlement.settlement_id}",
                     str(current["settlement_id"]),
+                    event_type,
                     normalized_actor,
                     format_utc_timestamp(timestamp),
                     dumps_canonical_json(
@@ -382,6 +403,18 @@ class SettlementRepository:
             }
             for row in rows
         )
+
+
+def _allowed_current_transition(*, current: str, candidate: str) -> bool:
+    """Allow only monotonic non-final settlement transitions."""
+    final = {"win", "loss", "push", "void"}
+    if current in final:
+        return False
+    if current == "pending":
+        return candidate in {"pending", "unresolved", *final}
+    if current == "unresolved":
+        return candidate in {"unresolved", *final}
+    return False
 
 
 class MonitoringRepository:

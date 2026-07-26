@@ -26,10 +26,10 @@ from sports_analytics.monitoring.artifacts import (
     load_monitoring_report,
     publish_monitoring_report,
 )
+from sports_analytics.monitoring.builders import build_monitoring_inputs, parse_monitoring_policy
 from sports_analytics.monitoring.contracts import evaluate_monitoring
 from sports_analytics.results.snapshots import load_result_snapshot
 from sports_analytics.services.analysis import ANALYSIS_ARTIFACT_SCHEMA
-from sports_analytics.services.operations_cli import _monitoring_inputs, _policy
 from sports_analytics.settlement.service import (
     load_settlement_report,
     publish_settlement_report,
@@ -170,7 +170,7 @@ def run_monitoring_handler(context: JobExecutionContext, payload: JsonValue) -> 
         request = require_dict(payload, field="payload")
         exact = {
             "policy",
-            "inputs",
+            "evidence",
             "as_of_utc",
             "window_start_utc",
             "window_end_utc",
@@ -178,15 +178,24 @@ def run_monitoring_handler(context: JobExecutionContext, payload: JsonValue) -> 
         }
         if set(request) != exact:
             raise PermanentJobError("monitoring job payload fields are not exact")
+        as_of = _timestamp(request["as_of_utc"], "as_of_utc")
+        start = _timestamp(request["window_start_utc"], "window_start_utc")
+        end = _timestamp(request["window_end_utc"], "window_end_utc")
+        with connect_database(context._database_path, read_only=True) as connection:
+            inputs = build_monitoring_inputs(
+                exports_root=context._exports_directory,
+                connection=connection,
+                evidence_payload=request["evidence"],
+                window_start_utc=start,
+                window_end_utc=end,
+                as_of_utc=as_of,
+            )
         report = evaluate_monitoring(
-            inputs=_monitoring_inputs(require_dict(request["inputs"], field="inputs")),
-            policy=_policy(require_dict(request["policy"], field="policy")),
-            as_of_utc=_timestamp(request["as_of_utc"], "as_of_utc"),
-            window_start_utc=_timestamp(
-                request["window_start_utc"],
-                "window_start_utc",
-            ),
-            window_end_utc=_timestamp(request["window_end_utc"], "window_end_utc"),
+            inputs=inputs,
+            policy=parse_monitoring_policy(request["policy"]),
+            as_of_utc=as_of,
+            window_start_utc=start,
+            window_end_utc=end,
         )
         output = require_str(
             request["output_relative_directory"],
@@ -199,13 +208,13 @@ def run_monitoring_handler(context: JobExecutionContext, payload: JsonValue) -> 
                 report=report,
             )
         except ArtifactError:
-            artifact = load_monitoring_report(
+            existing = load_monitoring_report(
                 root=context._exports_directory,
                 relative_directory=output,
             )
-            payload_object = require_dict(artifact.payload, field="monitoring_report")
-            if payload_object.get("run_id") != report.run_id:
+            if existing.report.run_id != report.run_id:
                 raise MonitoringError("existing monitoring output conflicts with replay") from None
+            artifact = existing.artifact
         context.checkpoint()
         with connect_database(context._database_path) as connection:
             with transaction(connection, immediate=True):
@@ -225,11 +234,9 @@ def run_monitoring_handler(context: JobExecutionContext, payload: JsonValue) -> 
 
 
 def _timestamp(value: object, field: str) -> datetime:
-    text = require_str(value, field=field)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise PermanentJobError(f"{field} must be an ISO UTC timestamp") from exc
-    if parsed.tzinfo is None:
-        raise PermanentJobError(f"{field} must be timezone-aware")
-    return parsed
+        from sports_analytics.artifact_strict import require_canonical_utc_timestamp_string
+
+        return require_canonical_utc_timestamp_string(value, field=field)
+    except Exception as exc:
+        raise PermanentJobError(f"{field} must be canonical UTC") from exc

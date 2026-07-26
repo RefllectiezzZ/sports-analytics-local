@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
+from sports_analytics.core.exceptions import PermanentJobError
 from sports_analytics.data.migrations import ensure_database_ready
 from sports_analytics.jobs.context import JobExecutionContext
 from sports_analytics.operations.handlers import run_monitoring_handler
@@ -69,7 +72,7 @@ def test_result_snapshot_cli_success_and_failure_exit_codes(
     assert "error:" in capsys.readouterr().err
 
 
-def test_monitoring_worker_handler_is_idempotent(tmp_path) -> None:
+def test_monitoring_worker_rejects_caller_declared_health_metrics(tmp_path) -> None:
     database = tmp_path / "storage" / "operational.sqlite3"
     exports = tmp_path / "storage" / "exports"
     exports.mkdir(parents=True)
@@ -114,6 +117,5 @@ def test_monitoring_worker_handler_is_idempotent(tmp_path) -> None:
         "window_end_utc": "2026-06-02T20:00:00.000000Z",
         "output_relative_directory": "monitoring/worker-replay",
     }
-    first = run_monitoring_handler(context, payload)
-    second = run_monitoring_handler(context, payload)
-    assert first == second
+    with pytest.raises(PermanentJobError, match="fields are not exact"):
+        run_monitoring_handler(context, payload)

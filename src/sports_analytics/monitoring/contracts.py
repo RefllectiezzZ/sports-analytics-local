@@ -264,6 +264,24 @@ class MonitoringInputs:
             value = getattr(self, field_name)
             if value is not None and (type(value) is not int or value < 0):
                 raise MonitoringError(f"{field_name} must be a non-negative integer or absent")
+        for actual, expected, label in (
+            (self.valid_snapshot_count, self.expected_snapshot_count, "valid snapshots"),
+            (self.available_result_count, self.expected_result_count, "available results"),
+            (self.settled_count, self.settlement_candidate_count, "settled positions"),
+            (self.probability_complete_count, self.prediction_count, "complete probabilities"),
+        ):
+            if actual is not None and expected is not None and actual > expected:
+                raise MonitoringError(f"{label} exceed their expected population")
+        observation_ids = [item.observation_id for item in self.performance]
+        if len(observation_ids) != len(set(observation_ids)):
+            raise MonitoringError("monitoring inputs contain duplicate performance observations")
+        for item in self.performance:
+            if item.settled and (item.won is None or item.profit_units is None):
+                raise MonitoringError(
+                    "settled performance observations require won and profit values"
+                )
+            if not item.settled and (item.won is not None or item.profit_units is not None):
+                raise MonitoringError("unsettled performance observations cannot carry outcomes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +402,8 @@ def evaluate_monitoring(
         ).total_seconds()
         / 3600
     )
+    if source_age is not None and source_age < 0:
+        raise MonitoringError("source observation cannot be later than monitoring as-of")
     values["source_observation_age_hours"] = (
         source_age,
         None,
@@ -426,6 +446,8 @@ def evaluate_monitoring(
         ).total_seconds()
         / 3600
     )
+    if lag is not None and lag < 0:
+        raise MonitoringError("unsettled completion cannot be later than monitoring as-of")
     values["settlement_lag_hours"] = (lag, None, None, 0 if lag is None else 1)
     values["settlement_coverage"] = _ratio(inputs.settled_count, inputs.settlement_candidate_count)
     for name in (
@@ -557,6 +579,16 @@ def _metric(
     status = (
         MetricStatus.UNKNOWN
         if value is None
+        else MetricStatus.UNKNOWN
+        if threshold is None
+        and name
+        in {
+            "artifact_failure_count",
+            "incomplete_market_count",
+            "duplicate_identity_count",
+            "quality_flag_failure_count",
+        }
+        and value > 0
         else MetricStatus.HEALTHY
         if threshold is None
         else threshold.status(value)

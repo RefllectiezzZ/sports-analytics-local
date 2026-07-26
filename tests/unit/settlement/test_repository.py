@@ -170,3 +170,30 @@ def test_pending_can_advance_and_final_conflict_is_audited_without_overwrite(
         ).fetchone()[0]
         assert (current["status"], current["version"]) == ("win", 2)
         assert audit_count == 1
+
+
+def test_current_nonfinal_state_advances_only_with_strictly_later_evidence(tmp_path) -> None:
+    database = tmp_path / "operational.sqlite3"
+    ensure_database_ready(database)
+    first = _report(tmp_path, _settlement(None, AS_OF - timedelta(hours=2)), "pending-t1")
+    second = _report(tmp_path, _settlement(None, AS_OF - timedelta(hours=1)), "pending-t2")
+    stale = _report(
+        tmp_path,
+        _settlement(None, AS_OF - timedelta(minutes=90)),
+        "pending-stale",
+    )
+    with connect_database(database) as connection:
+        repository = SettlementRepository(connection)
+        with transaction(connection):
+            repository.persist_report(report=first, actor="test", created_at=AS_OF)
+        with transaction(connection):
+            repository.persist_report(report=second, actor="test", created_at=AS_OF)
+        with pytest.raises(SettlementConflictError, match="stale"):
+            with transaction(connection):
+                repository.persist_report(report=stale, actor="test", created_at=AS_OF)
+        current = connection.execute(
+            "SELECT status, version FROM current_analytical_settlements"
+        ).fetchone()
+        assert current is not None
+        assert (current["status"], current["version"]) == ("pending", 2)
+        assert connection.execute("SELECT COUNT(*) FROM settlement_runs").fetchone()[0] == 2

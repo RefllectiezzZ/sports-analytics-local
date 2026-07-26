@@ -35,11 +35,13 @@ from sports_analytics.governance.contracts import (
     PromotionPolicy,
     evaluate_challenger,
 )
+from sports_analytics.governance.evidence import build_model_evaluation_evidence
 from sports_analytics.governance.repository import ModelGovernanceRepository
 from sports_analytics.monitoring.artifacts import (
     load_monitoring_report,
     publish_monitoring_report,
 )
+from sports_analytics.monitoring.builders import build_monitoring_inputs, parse_monitoring_policy
 from sports_analytics.monitoring.contracts import (
     EvidenceReference,
     MetricDirection,
@@ -57,6 +59,7 @@ from sports_analytics.settlement.service import (
     publish_settlement_report,
     settle_analysis_artifact,
 )
+from sports_analytics.snapshots.paths import resolve_under_root
 
 
 def add_operational_arguments(parser: argparse.ArgumentParser, mode: Any) -> None:
@@ -324,7 +327,7 @@ def _monitor(args: argparse.Namespace) -> int:
         request,
         {
             "policy",
-            "inputs",
+            "evidence",
             "as_of_utc",
             "window_start_utc",
             "window_end_utc",
@@ -333,14 +336,21 @@ def _monitor(args: argparse.Namespace) -> int:
         "monitoring request",
     )
     runtime = _runtime(args)
-    policy = _policy(require_dict(request.get("policy"), field="policy"))
-    inputs = _monitoring_inputs(require_dict(request.get("inputs"), field="inputs"))
+    policy = parse_monitoring_policy(request.get("policy"))
+    as_of = _timestamp(request.get("as_of_utc"), "as_of_utc")
+    start = _timestamp(request.get("window_start_utc"), "window_start_utc")
+    end = _timestamp(request.get("window_end_utc"), "window_end_utc")
+    with connect_database(runtime.database_path, read_only=True) as connection:
+        inputs = build_monitoring_inputs(
+            exports_root=runtime.paths.exports_directory,
+            connection=connection,
+            evidence_payload=request.get("evidence"),
+            window_start_utc=start,
+            window_end_utc=end,
+            as_of_utc=as_of,
+        )
     report = evaluate_monitoring(
-        inputs=inputs,
-        policy=policy,
-        as_of_utc=_timestamp(request.get("as_of_utc"), "as_of_utc"),
-        window_start_utc=_timestamp(request.get("window_start_utc"), "window_start_utc"),
-        window_end_utc=_timestamp(request.get("window_end_utc"), "window_end_utc"),
+        inputs=inputs, policy=policy, as_of_utc=as_of, window_start_utc=start, window_end_utc=end
     )
     artifact = publish_monitoring_report(
         root=runtime.paths.exports_directory,
@@ -372,8 +382,8 @@ def _evaluate(args: argparse.Namespace) -> int:
         {
             "champion_model_artifact_id",
             "challenger_model_artifact_id",
-            "champion_evidence",
-            "challenger_evidence",
+            "champion_evidence_reference",
+            "challenger_evidence_reference",
             "policy",
             "as_of_utc",
         },
@@ -390,11 +400,15 @@ def _evaluate(args: argparse.Namespace) -> int:
         decision = evaluate_challenger(
             champion=champion,
             challenger=challenger,
-            champion_evidence=_model_evidence(
-                require_dict(request.get("champion_evidence"), field="champion_evidence")
+            champion_evidence=build_model_evaluation_evidence(
+                paths=runtime.paths,
+                registry_entry=champion,
+                payload=request.get("champion_evidence_reference"),
             ),
-            challenger_evidence=_model_evidence(
-                require_dict(request.get("challenger_evidence"), field="challenger_evidence")
+            challenger_evidence=build_model_evaluation_evidence(
+                paths=runtime.paths,
+                registry_entry=challenger,
+                payload=request.get("challenger_evidence_reference"),
             ),
             policy=policy,
             as_of_utc=_timestamp(request.get("as_of_utc"), "as_of_utc"),
@@ -424,7 +438,15 @@ def _as_of(args: argparse.Namespace) -> datetime:
 
 
 def _request(path_text: str) -> dict[str, JsonValue]:
-    path = Path(path_text)
+    try:
+        path = resolve_under_root(
+            Path.cwd(),
+            path_text.replace("\\", "/"),
+            expect_file=True,
+            error_type=ConfigurationError,
+        )
+    except Exception as exc:
+        raise ConfigurationError("operation request path must remain under the local root") from exc
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -435,14 +457,12 @@ def _request(path_text: str) -> dict[str, JsonValue]:
 
 
 def _timestamp(value: object, field: str) -> datetime:
-    text = require_str(value, field=field)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ConfigurationError(f"{field} must be a timezone-aware ISO timestamp") from exc
-    if parsed.tzinfo is None:
-        raise ConfigurationError(f"{field} must be timezone-aware")
-    return parsed
+        from sports_analytics.artifact_strict import require_canonical_utc_timestamp_string
+
+        return require_canonical_utc_timestamp_string(value, field=field)
+    except Exception as exc:
+        raise ConfigurationError(f"{field} must be canonical UTC") from exc
 
 
 def _text(payload: dict[str, JsonValue], field: str) -> str:
