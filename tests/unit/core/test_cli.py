@@ -54,7 +54,7 @@ def test_invalid_configuration_returns_exit_code_2(
     assert code == CONFIG_ERROR_EXIT
 
 
-def test_normal_placeholder_execution(
+def test_normal_app_execution_reports_streamlit_ready(
     isolated_cwd: Path,
     clear_sports_analytics_env: None,
     capsys: pytest.CaptureFixture[str],
@@ -62,7 +62,7 @@ def test_normal_placeholder_execution(
     code = run_component("app", "test", argv=[])
     assert code == SUCCESS_EXIT
     captured = capsys.readouterr()
-    assert "not implemented" in captured.out.lower()
+    assert "streamlit interface ready" in captured.out.lower()
     reset_logging()
 
 
