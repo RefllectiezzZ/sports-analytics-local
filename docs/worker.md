@@ -375,8 +375,9 @@ added without colliding with handler-defined payloads.
 
 - one job at a time per worker process;
 - no cooperative running-job cancellation;
-- only one sports-domain handler (`ingest.football-data-csv`); no Betclic,
-  Betano, modelling, combination, or settlement handlers;
+- registered domain handlers are `ingest.football-data-csv`,
+  `settlement.settle-analysis`, and `monitoring.run`; there are no Betclic,
+  Betano, bookmaker-execution, or automatic-promotion handlers;
 - no Streamlit supervision yet;
 - at-least-once, not exactly-once;
 - handlers that perform side effects must be idempotent (football ingestion
@@ -402,3 +403,12 @@ integrity conflicts, and similar failures map to `PermanentJobError`.
 Snapshot READY reuse makes identical source-content reprocessing idempotent at
 the snapshot layer. No SQLite transaction remains open during download, CSV
 parsing, or Parquet writing.
+
+## Operational handlers
+
+`settlement.settle-analysis` accepts only verified analysis and result snapshot
+references plus an explicit as-of timestamp and output directory.
+`monitoring.run` accepts a complete typed policy/evidence request with an
+explicit as-of timestamp and window. Both publish immutable reports before a
+short transactional SQLite registration, verify compatible existing output on
+replay, and reject unknown payload keys.

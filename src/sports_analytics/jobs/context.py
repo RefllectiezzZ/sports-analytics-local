@@ -43,6 +43,8 @@ class JobExecutionContext:
     _database_path: Path | None = field(default=None, init=False, repr=False, compare=False)
     _raw_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
     _snapshots_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
+    _exports_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
+    _models_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
     _scraping: ScrapingSettings | None = field(default=None, init=False, repr=False, compare=False)
     _http_transport: HttpTransport | None = field(
         default=None, init=False, repr=False, compare=False
@@ -83,6 +85,8 @@ class JobExecutionContext:
         object.__setattr__(self, "_database_path", runtime.database_path)
         object.__setattr__(self, "_raw_directory", runtime.paths.raw_directory)
         object.__setattr__(self, "_snapshots_directory", runtime.paths.snapshots_directory)
+        object.__setattr__(self, "_exports_directory", runtime.paths.exports_directory)
+        object.__setattr__(self, "_models_directory", runtime.paths.models_directory)
         object.__setattr__(self, "_scraping", runtime.settings.scraping)
 
     def bind_test_dependencies(
