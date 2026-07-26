@@ -8,6 +8,12 @@ from sports_analytics.ingestion.handlers import ingest_football_data_csv_handler
 from sports_analytics.ingestion.types import INGEST_FOOTBALL_DATA_CSV_JOB_TYPE
 from sports_analytics.jobs.handlers import JobHandler, system_noop_handler
 from sports_analytics.jobs.types import SYSTEM_NOOP_JOB_TYPE
+from sports_analytics.operations.handlers import (
+    RUN_MONITORING_JOB_TYPE,
+    SETTLE_ANALYSIS_JOB_TYPE,
+    run_monitoring_handler,
+    settle_analysis_handler,
+)
 
 
 class HandlerRegistry:
@@ -64,5 +70,7 @@ def build_default_registry() -> HandlerRegistry:
     registry = HandlerRegistry()
     registry.register(SYSTEM_NOOP_JOB_TYPE, system_noop_handler)
     registry.register(INGEST_FOOTBALL_DATA_CSV_JOB_TYPE, ingest_football_data_csv_handler)
+    registry.register(SETTLE_ANALYSIS_JOB_TYPE, settle_analysis_handler)
+    registry.register(RUN_MONITORING_JOB_TYPE, run_monitoring_handler)
     registry.freeze()
     return registry

@@ -309,7 +309,7 @@ Implemented:
 - deterministic seeding;
 - shared runtime bootstrap and CLI options;
 - SQLite connection/transaction foundation;
-- forward-only migrations through schema version 3;
+- forward-only migrations through schema version 4;
 - typed repositories for metadata, jobs, snapshots, and audit events;
 - database status / migrate CLI modes;
 - durable worker claiming, lease heartbeats, recovery, and static handler
@@ -334,6 +334,12 @@ Implemented:
   content-addressed analytical artifacts;
 - read-only Streamlit artifact catalogue, opportunity, accumulator-preview,
   backtest, and audit pages wired to strict typed artifact verification.
+- canonical result contracts and immutable verified result snapshots;
+- deterministic flat-unit analytical settlement for persisted football 1X2
+  opportunities and exact persisted combinations;
+- persisted-evidence operational/model monitoring with explicit unknown states;
+- verified champion–challenger registry, immutable evaluation decisions, atomic
+  promotion application, and audited rollback.
 
 Explicitly **not** implemented yet:
 
@@ -343,6 +349,6 @@ Explicitly **not** implemented yet:
 - additional sports;
 - markets beyond production 1X2 plus the synthetic contract proof;
 - production current-price opportunity discovery and accumulators;
-- staking, operational settlement, and bankroll management;
+- bookmaker settlement, staking, and bankroll management;
 - cross-source fuzzy resolution;
 - Streamlit child process spawning in `run_local.py`.

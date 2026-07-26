@@ -39,10 +39,14 @@ def test_default_registry_contains_frozen_system_noop_handler() -> None:
     registry = build_default_registry()
     assert registry.list_job_types() == (
         "ingest.football-data-csv",
+        "monitoring.run",
+        "settlement.settle-analysis",
         SYSTEM_NOOP_JOB_TYPE,
     )
     handler = registry.get(SYSTEM_NOOP_JOB_TYPE)
     assert callable(handler)
     assert callable(registry.get("ingest.football-data-csv"))
+    assert callable(registry.get("monitoring.run"))
+    assert callable(registry.get("settlement.settle-analysis"))
     with pytest.raises(JobRegistryError, match="frozen"):
         registry.register("demo.job", _handler)

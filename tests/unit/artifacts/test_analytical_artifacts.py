@@ -152,7 +152,10 @@ def test_artifact_is_atomic_content_addressed_and_deterministic(tmp_path: Path) 
         _write(tmp_path / "one")
 
 
-def test_artifact_rejects_extras_and_symlinks(tmp_path: Path) -> None:
+def test_artifact_rejects_extras_and_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     artifact = _write(tmp_path)
     directory = tmp_path / artifact.relative_directory
     (directory / "extra.json").write_text("{}\n", encoding="utf-8")
@@ -165,9 +168,12 @@ def test_artifact_rejects_extras_and_symlinks(tmp_path: Path) -> None:
         )
     (directory / "extra.json").unlink()
     checksum = directory / "manifest_checksum.sha256"
-    real = tmp_path / "real.sha256"
-    checksum.rename(real)
-    checksum.symlink_to(real)
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: self == checksum or original_is_symlink(self),
+    )
     with pytest.raises(ArtifactError, match="symlink"):
         load_analytical_artifact(
             root=tmp_path,

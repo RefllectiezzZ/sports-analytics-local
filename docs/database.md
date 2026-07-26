@@ -176,6 +176,8 @@ Current packaged migrations:
 | --- | --- | --- |
 | 1 | `0001_initial.sql` | `404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de` |
 | 2 | `0002_worker_runtime.sql` | `94af0d6d9df740ac0c578c815015fe3981acfc48f5faa3cfb1ba3bc1a719b55d` |
+| 3 | `0003_snapshot_source_deduplication.sql` | `84fda02807a42e9e951d4fad4e8bedeecd1a2fda675be929762394ac5cc2ec94` |
+| 4 | `0004_settlement_monitoring_governance.sql` | `8559eecc1565808578ab402250481e94f15d31a49b7714ff43c4b413702ef11d` |
 
 Migration `0001_initial.sql` is unchanged. Schema version `2` adds the durable
 worker runtime metadata and queue lease integrity described below.
@@ -250,8 +252,9 @@ After installing the lease triggers, migration `0002` validates every existing
 running job with a NULL lease aborts the migration atomically (`DatabaseMigrationError`),
 leaving schema version 1 and no `worker_instances` objects behind.
 
-No sports-domain SQLite tables exist. Analytical sports data lives in immutable
-Parquet snapshots; SQLite stores only snapshot metadata.
+At schema version 2 no sports-domain SQLite tables existed. Migration 0004 keeps
+analytical datasets in immutable artifacts while adding only minimal operational
+result, settlement, monitoring, and model-role state.
 
 ### Job priority
 
@@ -368,13 +371,12 @@ manual database manipulation. Do not edit applied migration history by hand.
 
 ## Current limitations
 
-- No sports-domain SQLite tables: analytical sports data lives in Parquet
-  snapshots under `sports_analytics.snapshots`, with metadata only in the
-  `snapshots` table.
+- Analytical datasets remain in immutable snapshots/artifacts; SQLite stores
+  only operational registrations, indexes, audit state, and current model roles.
 - Sports-domain job handlers live outside this package (`ingest.football-data-csv`
   in `sports_analytics.ingestion`); SQLite only records job and snapshot
   metadata.
-- No modelling, betting, settlement, bankroll, or Streamlit UI logic.
+- No bookmaker execution, staking, bankroll, or Streamlit mutation logic.
 - No paid API or external AI runtime dependency.
 
 
@@ -392,3 +394,13 @@ Adds operational indexes only. No sports-domain SQLite tables are created.
 
 Failed snapshots are excluded from the unique key so replacements can proceed.
 Migrations `0001` and `0002` remain immutable.
+
+## Migration 0004
+
+`0004_settlement_monitoring_governance.sql` adds minimal operational tables for
+verified result snapshot registration, immutable analytical settlement
+runs/evidence/audit events, monitoring run/finding indexes, verified model
+registry state, immutable promotion decisions, and audited role transitions.
+Partial uniqueness enforces one active champion per exact sport/market scope.
+Decimal unit values are stored as text. Migrations `0001`–`0003` remain
+byte-for-byte unchanged.

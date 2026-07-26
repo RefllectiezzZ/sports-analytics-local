@@ -143,3 +143,23 @@ class BacktestError(SportsAnalyticsError):
 
 class ArtifactError(SportsAnalyticsError):
     """Raised when an analytical artifact fails publication or strict verification."""
+
+
+class ResultError(SportsAnalyticsError):
+    """Raised when canonical result evidence is invalid or untrusted."""
+
+
+class SettlementError(SportsAnalyticsError):
+    """Raised when analytical settlement cannot be performed deterministically."""
+
+
+class SettlementConflictError(SettlementError):
+    """Raised when final settlement evidence conflicts with a persisted position."""
+
+
+class MonitoringError(SportsAnalyticsError):
+    """Raised when monitoring evidence or policy is invalid."""
+
+
+class GovernanceError(SportsAnalyticsError):
+    """Raised when model registry or promotion governance rules are violated."""

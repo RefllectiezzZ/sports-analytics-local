@@ -63,6 +63,11 @@ from sports_analytics.services.combinations_trusted import (
     build_combinations_from_analysis_artifact,
 )
 from sports_analytics.services.historical_analysis import publish_historical_analysis_with_paths
+from sports_analytics.services.operations_cli import (
+    add_operational_arguments,
+    operational_mode_values,
+    run_operational_mode,
+)
 from sports_analytics.services.training import (
     FeatureBuildRequest,
     TrainRequest,
@@ -308,6 +313,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         metavar="VERSION",
         help="Expected analytical artifact schema version for verification.",
     )
+    add_operational_arguments(parser, mode)
     return parser
 
 
@@ -320,6 +326,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         common_exit = handle_common_modes(args)
         if common_exit is not None:
             return common_exit
+        operational_exit = run_operational_mode(args)
+        if operational_exit is not None:
+            return operational_exit
 
         if args.build_football_1x2_features:
             return _build_features(args)
@@ -403,6 +412,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.run_backtest is not None,
         args.publish_analysis is not None,
         args.publish_historical_analysis is not None,
+        *operational_mode_values(args),
     ]
     if sum(1 for enabled in engine_modes if enabled) > 1:
         parser.error("engine modes are mutually exclusive")
@@ -428,6 +438,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             args.selection_maximum_odds,
             args.model_checksum,
             args.feature_checksum,
+            args.as_of_utc,
             args.artifact_type,
             args.artifact_schema,
         )

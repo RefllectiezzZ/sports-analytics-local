@@ -25,8 +25,7 @@ This repository is in **pre-alpha** state.
 Implemented now:
 
 - packaging, typed configuration, local runtime bootstrap, and logging;
-- SQLite operational persistence with forward-only migrations `0001`, `0002`, and
-  `0003`;
+- SQLite operational persistence with forward-only migrations `0001`–`0004`;
 - durable local job worker infrastructure and a worker-only supervisor;
 - one Football-Data.co.uk **ingestion adapter** covering two competitions
   (`eng-premier-league`, `prt-primeira-liga`), with allowlisted HTTPS retrieval,
@@ -36,8 +35,8 @@ Implemented now:
   and event reconciliation;
 - a generic canonical market quote contract, with historical 1X2 mapped into it;
 - immutable generic Parquet snapshots;
-- worker job integration: the `ingest.football-data-csv` handler is registered in
-  the frozen default registry;
+- worker job integration for `ingest.football-data-csv`,
+  `settlement.settle-analysis`, and `monitoring.run` in the frozen registry;
 - snapshot listing and verification through `scraper.py`;
 - leakage-safe football full-match 1X2 feature engineering
   (`football-1x2-prematch-features-v1`);
@@ -51,12 +50,14 @@ Implemented now:
 - a read-only Streamlit interface for verified analysis/backtest artifact
   selection, data status, opportunity browsing, single audit, dependency-safe
   manual previews, persisted combinations, and backtest/audit views;
+- canonical result snapshots, deterministic analytical settlement,
+  persisted-evidence monitoring, and explicit champion–challenger governance;
 - documentation, linting, typing, and tests.
 
 **Not implemented**: Betclic; Betano; current bookmaker prices; browser scraping
 or automation; additional sports; markets beyond production 1X2 plus a synthetic
 contract proof; player/lineup/injury features; Kelly staking; bet
-recommendations; production accumulators; operational settlement; bankroll
+recommendations; production accumulators; real bookmaker settlement; bankroll
 management; live automatic bet building; cross-source fuzzy resolution.
 
 ## Supported Python version
@@ -496,6 +497,10 @@ pipeline. `scrapers` remains reserved.
   snapshots.
 
 See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
+See
+[docs/settlement-monitoring-governance.md](docs/settlement-monitoring-governance.md)
+for canonical result evidence, analytical settlement, monitoring, and explicit
+champion–challenger operations.
 
 ## Current limitations
 
@@ -508,15 +513,16 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 - Cross-source resolution is limited to exact canonical identity. There is no
   fuzzy or machine-learning matching and no silent alias merge; unresolved source
   events stay in `source_events` and are excluded from downstream-safe datasets.
-- No current-price production opportunity feed, operational settlement, staking,
-  correlation model, or bankroll management.
-- No sports-domain SQLite schemas: analytical data lives in Parquet snapshots and
-  SQLite stores only snapshot metadata.
+- No current-price production opportunity feed, bookmaker settlement, staking,
+  correlation model, or bankroll management. Deterministic flat-unit analytical
+  settlement of verified persisted positions is implemented.
+- Analytical datasets remain immutable artifacts. SQLite additionally stores
+  minimal operational result, settlement, monitoring, and model-role indexes.
 - No browser automation and no HTML scraping.
 - `run_local.py` supervises only the worker; it does not start the implemented
   Streamlit interface, which is launched explicitly.
-- `system.noop` remains infrastructure-only; `ingest.football-data-csv` is the
-  only sports-domain job handler.
+- `system.noop` remains infrastructure-only. Durable handlers include ingestion,
+  deterministic analytical settlement, and persisted-evidence monitoring.
 - `app.py` exposes a read-only interface over verified typed analytical
   artifacts.
 

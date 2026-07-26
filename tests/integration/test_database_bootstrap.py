@@ -20,7 +20,7 @@ def test_normal_bootstrap_migrates_and_reports_schema(tmp_path: Path) -> None:
         base_directory=tmp_path,
         overrides={"logging": {"file_enabled": False}},
     )
-    assert context.schema_version == 3
+    assert context.schema_version == 4
     assert context.database_path.is_file()
     assert context.paths.sqlite_path.is_file()
     # RuntimeContext must not retain an open connection attribute beyond path metadata.
@@ -31,7 +31,7 @@ def test_normal_bootstrap_migrates_and_reports_schema(tmp_path: Path) -> None:
         base_directory=tmp_path,
         overrides={"logging": {"file_enabled": False}},
     )
-    assert second.schema_version == 3
+    assert second.schema_version == 4
     reset_logging()
     context.paths.sqlite_path.unlink()
     wal = Path(str(context.paths.sqlite_path) + "-wal")

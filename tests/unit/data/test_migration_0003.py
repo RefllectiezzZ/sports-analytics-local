@@ -27,7 +27,7 @@ READY_CHECKSUM = "a" * 64
 def test_migration_0003_discovered_with_expected_checksum() -> None:
     migrations = discover_migrations()
 
-    assert [migration.version for migration in migrations] == [1, 2, 3]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4]
     assert migrations[0].checksum == CHECKSUM_0001
     assert migrations[1].checksum == CHECKSUM_0002
     assert migrations[2].filename == "0003_snapshot_source_deduplication.sql"
@@ -46,8 +46,8 @@ def test_fresh_migration_reaches_version_3(tmp_path: Path) -> None:
     readiness = ensure_database_ready(tmp_path / "ops.sqlite3")
 
     assert readiness.previous_version == 0
-    assert readiness.schema_version == 3
-    assert [migration.version for migration in readiness.migrations_applied] == [1, 2, 3]
+    assert readiness.schema_version == 4
+    assert [migration.version for migration in readiness.migrations_applied] == [1, 2, 3, 4]
 
 
 def test_version_2_database_upgrades_to_version_3(tmp_path: Path) -> None:
@@ -59,8 +59,8 @@ def test_version_2_database_upgrades_to_version_3(tmp_path: Path) -> None:
 
     upgraded = apply_migrations(db, migrations=migrations)
     assert upgraded.previous_version == 2
-    assert upgraded.schema_version == 3
-    assert [migration.version for migration in upgraded.migrations_applied] == [3]
+    assert upgraded.schema_version == 4
+    assert [migration.version for migration in upgraded.migrations_applied] == [3, 4]
 
     with connect_database(db, read_only=True) as connection:
         indexes = {
@@ -78,9 +78,9 @@ def test_migration_0003_is_idempotent(tmp_path: Path) -> None:
     first = ensure_database_ready(db)
     second = ensure_database_ready(db)
 
-    assert first.schema_version == 3
-    assert second.previous_version == 3
-    assert second.schema_version == 3
+    assert first.schema_version == 4
+    assert second.previous_version == 4
+    assert second.schema_version == 4
     assert second.migrations_applied == ()
 
 
@@ -213,7 +213,7 @@ def test_package_discovery_is_cwd_independent(
 
     migrations = discover_migrations()
 
-    assert [migration.version for migration in migrations] == [1, 2, 3]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4]
     assert migrations[2].checksum == CHECKSUM_0003
 
 

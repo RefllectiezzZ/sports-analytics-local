@@ -51,15 +51,17 @@ def test_migration_discovery_deterministic_and_from_package() -> None:
     first = discover_migrations()
     second = discover_migrations()
     assert first == second
-    assert [migration.version for migration in first] == [1, 2, 3]
+    assert [migration.version for migration in first] == [1, 2, 3, 4]
     assert [migration.filename for migration in first] == [
         "0001_initial.sql",
         "0002_worker_runtime.sql",
         "0003_snapshot_source_deduplication.sql",
+        "0004_settlement_monitoring_governance.sql",
     ]
     assert first[0].checksum == ("404e1c0b36390ff7a42de901f344edcb60b9cee248b741116bc9d47a17cf48de")
     assert first[1].checksum == ("94af0d6d9df740ac0c578c815015fe3981acfc48f5faa3cfb1ba3bc1a719b55d")
     assert first[2].checksum == ("84fda02807a42e9e951d4fad4e8bedeecd1a2fda675be929762394ac5cc2ec94")
+    assert first[3].checksum == ("8559eecc1565808578ab402250481e94f15d31a49b7714ff43c4b413702ef11d")
     packaged = resources.files("sports_analytics.data.sql.migrations").joinpath("0001_initial.sql")
     assert packaged.is_file()
     text = packaged.read_text(encoding="utf-8")
@@ -125,17 +127,17 @@ def test_malformed_duplicate_gap_and_prohibited(
 def test_fresh_database_migrates_and_is_idempotent(tmp_path: Path) -> None:
     db = tmp_path / "ops.sqlite3"
     first = ensure_database_ready(db)
-    assert first.schema_version == 3
+    assert first.schema_version == 4
     assert first.previous_version == 0
-    assert [migration.version for migration in first.migrations_applied] == [1, 2, 3]
+    assert [migration.version for migration in first.migrations_applied] == [1, 2, 3, 4]
     second = ensure_database_ready(db)
-    assert second.schema_version == 3
-    assert second.previous_version == 3
+    assert second.schema_version == 4
+    assert second.previous_version == 4
     assert second.migrations_applied == ()
     status = get_migration_status(db)
     assert status.is_up_to_date
     assert status.checksums_valid
-    assert status.current_version == 3
+    assert status.current_version == 4
     assert status.pending == ()
 
 
@@ -262,7 +264,7 @@ def test_database_newer_and_missing_packaged_rejected(tmp_path: Path) -> None:
         with transaction(connection):
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, checksum, applied_at, "
-                "execution_time_ms) VALUES (4, 'future', ?, "
+                "execution_time_ms) VALUES (5, 'future', ?, "
                 "'2026-07-24T00:00:00.000000Z', 1)",
                 ("c" * 64,),
             )
@@ -334,14 +336,14 @@ def test_simultaneous_migration_attempts(tmp_path: Path) -> None:
         thread.join(timeout=30)
     assert not any(thread.is_alive() for thread in threads)
     assert len(results) + len(errors) == 2
-    # Busy errors are acceptable; successful completions must report version 3 once each.
-    assert all(version == 3 for version in results)
+    # Busy errors are acceptable; successful completions must report version 4 once each.
+    assert all(version == 4 for version in results)
     if results:
         status = get_migration_status(db)
-        assert status.current_version == 3
+        assert status.current_version == 4
         with connect_database(db, read_only=True) as connection:
             count = connection.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()
-            assert count is not None and int(count["c"]) == 3
+            assert count is not None and int(count["c"]) == 4
 
 
 def test_split_sql_and_cwd_independence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
