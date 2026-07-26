@@ -49,3 +49,23 @@ maximum_download_bytes = 26214400
 enabled = false
 default_random_seed = 42
 minimum_training_samples = 100
+
+[bookmakers]
+enabled = false
+preferred_provider = "betano-pt"
+comparison_provider = "betclic-pt"
+selection_mode = "preferred-unless-better"
+browser_mode = "visible"
+quote_maximum_age_seconds = 300
+
+[bookmakers.betano]
+enabled = true
+acquisition_interval_seconds = 300
+initial_delay_seconds = 30
+blocked_cooldown_seconds = 900
+
+[bookmakers.betclic]
+enabled = true
+acquisition_interval_seconds = 300
+initial_delay_seconds = 45
+blocked_cooldown_seconds = 900

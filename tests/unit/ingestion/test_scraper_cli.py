@@ -28,6 +28,19 @@ EXPECTED_SOURCE_LINE = (
     "football-data-co-uk-adapter-v1\t"
     "historical-odds,historical-results,historical-statistics\tfootball"
 )
+EXPECTED_BETANO_SOURCE_LINE = (
+    "betano-pt\tBetano Portugal\tbookmaker\tbetano-pt-adapter-v1\t"
+    "current-fixtures,current-odds\tbasketball,football,tennis"
+)
+EXPECTED_BETCLIC_SOURCE_LINE = (
+    "betclic-pt\tBetclic Portugal\tbookmaker\tbetclic-pt-adapter-v1\t"
+    "current-fixtures,current-odds\tbasketball,football,tennis"
+)
+EXPECTED_SOURCE_LINES = (
+    EXPECTED_BETANO_SOURCE_LINE,
+    EXPECTED_BETCLIC_SOURCE_LINE,
+    EXPECTED_SOURCE_LINE,
+)
 EXPECTED_VERIFY_ROW_COUNTS = (
     "competitions=1 seasons=1 participants=2 source_participants=2 "
     "participant_reconciliations=2 events=1 source_events=1 "
@@ -101,8 +114,11 @@ def test_scraper_lists_sources_without_bootstrapping_database(tmp_path: Path) ->
     assert result.returncode == 0
     assert result.stderr == ""
     lines = result.stdout.splitlines()
-    assert lines == [EXPECTED_SOURCE_LINE]
-    source_id, display_name, role, adapter_version, capabilities, sports = lines[0].split("\t")
+    assert lines == list(EXPECTED_SOURCE_LINES)
+    football_line = next(line for line in lines if line.startswith("football-data-co-uk\t"))
+    source_id, display_name, role, adapter_version, capabilities, sports = football_line.split(
+        "\t"
+    )
     assert source_id == SOURCE_FOOTBALL_DATA_CO_UK
     assert display_name == "Football-Data.co.uk"
     assert role == SourceRole.HISTORICAL_DATA.value
@@ -116,17 +132,16 @@ def test_scraper_lists_sources_without_bootstrapping_database(tmp_path: Path) ->
     assert not (tmp_path / "storage" / "operational.sqlite3").exists()
 
 
-def test_scraper_list_sources_omits_unimplemented_bookmaker_sources(tmp_path: Path) -> None:
+def test_scraper_list_sources_includes_bookmaker_providers(tmp_path: Path) -> None:
     result = _run_scraper(tmp_path, "--list-sources")
 
     assert result.returncode == 0
     lowered = result.stdout.lower()
-    assert "betclic" not in lowered
-    assert "betano" not in lowered
-    assert SourceCapability.CURRENT_ODDS.value not in lowered
-    assert SourceCapability.CURRENT_FIXTURES.value not in lowered
+    assert "betclic-pt" in lowered
+    assert "betano-pt" in lowered
+    assert SourceCapability.CURRENT_ODDS.value in lowered
+    assert SourceCapability.CURRENT_FIXTURES.value in lowered
     assert SourceCapability.SETTLEMENT_RESULTS.value not in lowered
-
 
 def test_scraper_lists_competitions_without_bootstrapping_database(tmp_path: Path) -> None:
     result = _run_scraper(tmp_path, "--list-competitions")
@@ -371,5 +386,5 @@ def test_scraper_list_sources_validates_config_without_side_effects(tmp_path: Pa
     _write_scraping_config(tmp_path)
     result = _run_scraper(tmp_path, "--list-sources")
     assert result.returncode == 0
-    assert result.stdout.splitlines() == [EXPECTED_SOURCE_LINE]
+    assert result.stdout.splitlines() == list(EXPECTED_SOURCE_LINES)
     assert not (tmp_path / "storage").exists()

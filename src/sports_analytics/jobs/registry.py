@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sports_analytics.bookmakers.handlers import ingest_bookmaker_current_odds_handler
+from sports_analytics.bookmakers.types import INGEST_BOOKMAKER_CURRENT_ODDS_JOB_TYPE
 from sports_analytics.core.exceptions import JobRegistryError, RepositoryError
 from sports_analytics.data.types import validate_identifier
 from sports_analytics.ingestion.handlers import ingest_football_data_csv_handler
@@ -70,6 +72,10 @@ def build_default_registry() -> HandlerRegistry:
     registry = HandlerRegistry()
     registry.register(SYSTEM_NOOP_JOB_TYPE, system_noop_handler)
     registry.register(INGEST_FOOTBALL_DATA_CSV_JOB_TYPE, ingest_football_data_csv_handler)
+    registry.register(
+        INGEST_BOOKMAKER_CURRENT_ODDS_JOB_TYPE,
+        ingest_bookmaker_current_odds_handler,
+    )
     registry.register(SETTLE_ANALYSIS_JOB_TYPE, settle_analysis_handler)
     registry.register(RUN_MONITORING_JOB_TYPE, run_monitoring_handler)
     registry.freeze()

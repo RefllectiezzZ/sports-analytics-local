@@ -24,12 +24,13 @@ from sports_analytics.sports.types import CompetitionType
 
 
 def test_top_level_source_catalog_lists_football_data_source() -> None:
-    assert list_source_names() == (SOURCE_FOOTBALL_DATA_CO_UK,)
+    assert SOURCE_FOOTBALL_DATA_CO_UK in list_source_names()
     assert source_name() == SOURCE_FOOTBALL_DATA_CO_UK
     assert (
         tuple(descriptor.source_id for descriptor in list_source_descriptors())
         == list_source_names()
     )
+    assert list_source_names() == tuple(sorted(list_source_names()))
 
 
 def test_football_data_descriptor_describes_the_implemented_adapter() -> None:

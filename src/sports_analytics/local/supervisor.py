@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import Final, Protocol, cast
@@ -56,7 +57,7 @@ class ChildProcess(Protocol):
 
 
 class PopenFactory(Protocol):
-    """Factory used to start the worker child process."""
+    """Factory used to start supervised child processes."""
 
     def __call__(
         self,
@@ -116,23 +117,33 @@ def select_shutdown_strategy(*, platform_name: str | None = None) -> ProcessShut
     return PosixShutdownStrategy()
 
 
+@dataclass(slots=True)
+class _SupervisedChild:
+    name: str
+    process: ChildProcess
+    graceful_stop_sent: bool = False
+
+
 class LocalSupervisor:
-    """Start and supervise the local worker entry-point process."""
+    """Start and supervise local worker and optional bookmaker scheduler processes."""
 
     def __init__(
         self,
         *,
         worker_script: Path | str | None = None,
+        scheduler_module: str = "sports_analytics.bookmakers.scheduler",
         popen_factory: PopenFactory | None = None,
         install_signals: bool = True,
         shutdown_strategy: ProcessShutdownStrategy | None = None,
         platform_name: str | None = None,
+        poll_interval_seconds: float = 0.5,
     ) -> None:
         self._worker_script = (
             Path(worker_script).resolve()
             if worker_script is not None
             else Path(__file__).resolve().parents[3] / "worker.py"
         )
+        self._scheduler_module = scheduler_module
         self._popen_factory = _default_popen if popen_factory is None else popen_factory
         self._install_signals = install_signals
         self._shutdown_strategy = (
@@ -140,6 +151,7 @@ class LocalSupervisor:
             if shutdown_strategy is not None
             else select_shutdown_strategy(platform_name=platform_name)
         )
+        self._poll_interval_seconds = poll_interval_seconds
         self._graceful_stop_sent = False
 
     def run(
@@ -151,7 +163,7 @@ class LocalSupervisor:
         worker_max_jobs: int | None = None,
         worker_id: str | None = None,
     ) -> int:
-        """Bootstrap run_local, start ``worker.py``, and propagate exit status."""
+        """Bootstrap run_local, start children, and propagate exit status."""
         self._graceful_stop_sent = False
         runtime_context = bootstrap_runtime(
             "run_local",
@@ -159,6 +171,7 @@ class LocalSupervisor:
             env_file=env_file,
         )
         settings: WorkerSettings = runtime_context.settings.worker
+        bookmakers_enabled = runtime_context.settings.bookmakers.enabled
         absolute_config = None if config is None else str(Path(config).resolve())
         absolute_env = None if env_file is None else str(Path(env_file).resolve())
         if worker_id is not None:
@@ -166,21 +179,39 @@ class LocalSupervisor:
                 worker_id = normalize_uuid(worker_id)
             except RepositoryError as exc:
                 raise WorkerError(f"invalid worker UUID: {worker_id}") from exc
-        command = self._build_worker_command(
-            config=absolute_config,
-            env_file=absolute_env,
-            worker_once=worker_once,
-            worker_max_jobs=worker_max_jobs,
-            worker_id=worker_id,
-        )
+
+        children: list[_SupervisedChild] = []
         try:
-            child = self._popen_factory(
-                command,
-                creationflags=self._shutdown_strategy.creationflags(),
+            worker_command = self._build_worker_command(
+                config=absolute_config,
+                env_file=absolute_env,
+                worker_once=worker_once,
+                worker_max_jobs=worker_max_jobs,
+                worker_id=worker_id,
             )
-        except OSError as exc:
-            msg = f"failed to start worker child process: {sanitize_error_text(exc)}"
-            raise WorkerError(msg) from exc
+            worker_child = self._start_child(
+                name="worker",
+                command=worker_command,
+            )
+            children.append(worker_child)
+
+            # Worker-once modes skip the long-lived scheduler.
+            if bookmakers_enabled and not worker_once:
+                scheduler_command = self._build_scheduler_command(
+                    config=absolute_config,
+                    env_file=absolute_env,
+                )
+                scheduler_child = self._start_child(
+                    name="bookmaker-scheduler",
+                    command=scheduler_command,
+                )
+                children.append(scheduler_child)
+        except WorkerError:
+            self._shutdown_children(
+                children,
+                shutdown_grace_seconds=settings.shutdown_grace_seconds,
+            )
+            raise
 
         stop_requested = threading.Event()
         originals: dict[int, SignalHandler] = {}
@@ -189,24 +220,54 @@ class LocalSupervisor:
             originals = self._install_signal_handlers(stop_requested)
             while True:
                 if stop_requested.is_set():
-                    return self._shutdown_child(
-                        child,
+                    return self._shutdown_children(
+                        children,
                         shutdown_grace_seconds=settings.shutdown_grace_seconds,
                     )
+                exited = self._first_exited_child(children)
+                if exited is not None:
+                    return self._handle_child_exit(
+                        children,
+                        exited_name=exited[0],
+                        exit_code=exited[1],
+                        shutdown_grace_seconds=settings.shutdown_grace_seconds,
+                    )
+                alive = [item for item in children if item.process.poll() is None]
+                if not alive:
+                    return 0
                 try:
-                    return child.wait(timeout=0.5)
+                    code = alive[0].process.wait(timeout=self._poll_interval_seconds)
                 except subprocess.TimeoutExpired:
                     continue
+                return self._handle_child_exit(
+                    children,
+                    exited_name=alive[0].name,
+                    exit_code=code,
+                    shutdown_grace_seconds=settings.shutdown_grace_seconds,
+                )
         except BaseException as exc:
             primary_exc = exc
-            self._cleanup_child_after_exception(
-                child,
-                shutdown_grace_seconds=settings.shutdown_grace_seconds,
-                primary_exc=primary_exc,
-            )
+            for child in children:
+                self._cleanup_child_after_exception(
+                    child.process,
+                    shutdown_grace_seconds=settings.shutdown_grace_seconds,
+                    primary_exc=primary_exc,
+                    child_state=child,
+                )
             raise
         finally:
             self._restore_signal_handlers(originals, primary_exc=primary_exc)
+
+    def _start_child(self, *, name: str, command: Sequence[str]) -> _SupervisedChild:
+        try:
+            process = self._popen_factory(
+                command,
+                creationflags=self._shutdown_strategy.creationflags(),
+            )
+        except OSError as exc:
+            msg = f"failed to start {name} child process: {sanitize_error_text(exc)}"
+            raise WorkerError(msg) from exc
+        return _SupervisedChild(name=name, process=process)
 
     def _build_worker_command(
         self,
@@ -229,6 +290,51 @@ class LocalSupervisor:
         if worker_id is not None:
             command.extend(["--worker-id", worker_id])
         return command
+
+    def _build_scheduler_command(
+        self,
+        *,
+        config: str | None,
+        env_file: str | None,
+    ) -> list[str]:
+        command = [sys.executable, "-m", self._scheduler_module]
+        if config is not None:
+            command.extend(["--config", config])
+        if env_file is not None:
+            command.extend(["--env-file", env_file])
+        return command
+
+    @staticmethod
+    def _first_exited_child(
+        children: Sequence[_SupervisedChild],
+    ) -> tuple[str, int] | None:
+        for child in children:
+            code = child.process.poll()
+            if code is not None:
+                return child.name, code
+        return None
+
+    def _handle_child_exit(
+        self,
+        children: Sequence[_SupervisedChild],
+        *,
+        exited_name: str,
+        exit_code: int,
+        shutdown_grace_seconds: float,
+    ) -> int:
+        if len(children) > 1:
+            _LOGGER.error(
+                "supervised child exited unexpectedly name=%s exit_code=%s",
+                exited_name,
+                exit_code,
+            )
+        remaining = [item for item in children if item.name != exited_name]
+        if remaining:
+            self._shutdown_children(
+                remaining,
+                shutdown_grace_seconds=shutdown_grace_seconds,
+            )
+        return exit_code
 
     def _install_signal_handlers(
         self,
@@ -296,7 +402,34 @@ class LocalSupervisor:
         msg = "failed to restore signal handlers after supervising worker child"
         raise WorkerError(msg) from restoration_errors[0]
 
-    def _shutdown_child(self, child: ChildProcess, *, shutdown_grace_seconds: float) -> int:
+    def _shutdown_children(
+        self,
+        children: Sequence[_SupervisedChild],
+        *,
+        shutdown_grace_seconds: float,
+    ) -> int:
+        """Gracefully stop all children; return the first non-zero exit code seen."""
+        codes: list[int] = []
+        for child in children:
+            codes.append(
+                self._shutdown_child(
+                    child.process,
+                    shutdown_grace_seconds=shutdown_grace_seconds,
+                    child_state=child,
+                )
+            )
+        for code in codes:
+            if code != 0:
+                return code
+        return 0 if not codes else codes[0]
+
+    def _shutdown_child(
+        self,
+        child: ChildProcess,
+        *,
+        shutdown_grace_seconds: float,
+        child_state: _SupervisedChild | None = None,
+    ) -> int:
         grace = validate_positive_duration_seconds(
             shutdown_grace_seconds,
             field_name="shutdown_grace_seconds",
@@ -304,14 +437,26 @@ class LocalSupervisor:
         code = child.poll()
         if code is not None:
             return code
-        self._request_graceful_stop_once(child)
+        self._request_graceful_stop_once(child, child_state=child_state)
         try:
             return child.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             child.kill()
             return child.wait()
 
-    def _request_graceful_stop_once(self, child: ChildProcess) -> None:
+    def _request_graceful_stop_once(
+        self,
+        child: ChildProcess,
+        *,
+        child_state: _SupervisedChild | None = None,
+    ) -> None:
+        if child_state is not None:
+            if child_state.graceful_stop_sent:
+                return
+            self._shutdown_strategy.request_graceful_stop(child)
+            child_state.graceful_stop_sent = True
+            self._graceful_stop_sent = True
+            return
         if self._graceful_stop_sent:
             return
         self._shutdown_strategy.request_graceful_stop(child)
@@ -323,6 +468,7 @@ class LocalSupervisor:
         *,
         shutdown_grace_seconds: float,
         primary_exc: BaseException,
+        child_state: _SupervisedChild | None = None,
     ) -> None:
         """Best-effort child cleanup that preserves ``primary_exc``.
 
@@ -337,7 +483,7 @@ class LocalSupervisor:
                 field_name="shutdown_grace_seconds",
             )
             try:
-                self._request_graceful_stop_once(child)
+                self._request_graceful_stop_once(child, child_state=child_state)
             except Exception as graceful_exc:  # noqa: BLE001 - forced kill remains
                 _LOGGER.warning(
                     "graceful child stop failed during cleanup error=%s",
