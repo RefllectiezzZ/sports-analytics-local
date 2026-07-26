@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -94,6 +94,19 @@ class ClosingMarketQuoteTriple:
     """Closing market-average 1X2 decimal odds for one event, when complete."""
 
     canonical_event_id: str
+    source_name: str
+    provider_type: str
+    provider_id: str
+    quote_phase: str
+    source_observed_at_utc: datetime
+    quoted_at_utc: datetime | None
+    quote_timestamp_precision: str
+    home_quote_series_id: str
+    draw_quote_series_id: str
+    away_quote_series_id: str
+    home_quote_observation_id: str
+    draw_quote_observation_id: str
+    away_quote_observation_id: str
     home_odds: float
     draw_odds: float
     away_odds: float
@@ -374,6 +387,23 @@ def build_feature_artifact(
             "closing_market_quotes": [
                 {
                     "canonical_event_id": item.canonical_event_id,
+                    "source_name": item.source_name,
+                    "provider_type": item.provider_type,
+                    "provider_id": item.provider_id,
+                    "quote_phase": item.quote_phase,
+                    "source_observed_at_utc": format_utc_timestamp(item.source_observed_at_utc),
+                    "quoted_at_utc": (
+                        None
+                        if item.quoted_at_utc is None
+                        else format_utc_timestamp(item.quoted_at_utc)
+                    ),
+                    "quote_timestamp_precision": item.quote_timestamp_precision,
+                    "home_quote_series_id": item.home_quote_series_id,
+                    "draw_quote_series_id": item.draw_quote_series_id,
+                    "away_quote_series_id": item.away_quote_series_id,
+                    "home_quote_observation_id": item.home_quote_observation_id,
+                    "draw_quote_observation_id": item.draw_quote_observation_id,
+                    "away_quote_observation_id": item.away_quote_observation_id,
                     "home_odds": item.home_odds,
                     "draw_odds": item.draw_odds,
                     "away_odds": item.away_odds,
@@ -577,6 +607,21 @@ def load_feature_artifact(
     quotes = tuple(
         ClosingMarketQuoteTriple(
             canonical_event_id=str(item["canonical_event_id"]),
+            source_name=str(item["source_name"]),
+            provider_type=str(item["provider_type"]),
+            provider_id=str(item["provider_id"]),
+            quote_phase=str(item["quote_phase"]),
+            source_observed_at_utc=_as_datetime(item["source_observed_at_utc"]),
+            quoted_at_utc=(
+                None if item.get("quoted_at_utc") is None else _as_datetime(item["quoted_at_utc"])
+            ),
+            quote_timestamp_precision=str(item["quote_timestamp_precision"]),
+            home_quote_series_id=str(item["home_quote_series_id"]),
+            draw_quote_series_id=str(item["draw_quote_series_id"]),
+            away_quote_series_id=str(item["away_quote_series_id"]),
+            home_quote_observation_id=str(item["home_quote_observation_id"]),
+            draw_quote_observation_id=str(item["draw_quote_observation_id"]),
+            away_quote_observation_id=str(item["away_quote_observation_id"]),
             home_odds=float(item["home_odds"]),
             draw_odds=float(item["draw_odds"]),
             away_odds=float(item["away_odds"]),
@@ -941,7 +986,7 @@ def _read_parquet(path: Path) -> pa.Table:
 
 def _extract_closing_market_averages(table: pa.Table) -> list[ClosingMarketQuoteTriple]:
     rows = table.to_pylist()
-    grouped: dict[str, dict[str, float]] = {}
+    grouped: dict[str, dict[str, dict[str, object]]] = {}
     for row in rows:
         if str(row.get("market_key")) != MARKET_KEY_MATCH_RESULT_1X2:
             continue
@@ -960,17 +1005,53 @@ def _extract_closing_market_averages(table: pa.Table) -> list[ClosingMarketQuote
             continue
         if odds <= 1.0:
             continue
-        grouped.setdefault(event_id, {})[outcome] = odds
+        outcome_row = dict(row)
+        outcome_row["parsed_odds"] = odds
+        grouped.setdefault(event_id, {})[outcome] = outcome_row
     triples: list[ClosingMarketQuoteTriple] = []
     for event_id, outcomes in grouped.items():
         if set(outcomes) != set(MATCH_RESULT_1X2_OUTCOMES):
             continue
+        home = outcomes["home"]
+        draw = outcomes["draw"]
+        away = outcomes["away"]
+        shared_fields = (
+            "source_name",
+            "provider_type",
+            "provider_id",
+            "quote_phase",
+            "source_observed_at_utc",
+            "quoted_at_utc",
+            "quote_timestamp_precision",
+        )
+        if any(
+            (home.get(field), draw.get(field), away.get(field)).count(home.get(field)) != 3
+            for field in shared_fields
+        ):
+            continue
         triples.append(
             ClosingMarketQuoteTriple(
                 canonical_event_id=event_id,
-                home_odds=outcomes["home"],
-                draw_odds=outcomes["draw"],
-                away_odds=outcomes["away"],
+                source_name=str(home["source_name"]),
+                provider_type=str(home["provider_type"]),
+                provider_id=str(home["provider_id"]),
+                quote_phase=str(home["quote_phase"]),
+                source_observed_at_utc=_as_datetime(home["source_observed_at_utc"]),
+                quoted_at_utc=(
+                    None
+                    if home.get("quoted_at_utc") is None
+                    else _as_datetime(home["quoted_at_utc"])
+                ),
+                quote_timestamp_precision=str(home["quote_timestamp_precision"]),
+                home_quote_series_id=str(home["quote_series_id"]),
+                draw_quote_series_id=str(draw["quote_series_id"]),
+                away_quote_series_id=str(away["quote_series_id"]),
+                home_quote_observation_id=str(home["quote_observation_id"]),
+                draw_quote_observation_id=str(draw["quote_observation_id"]),
+                away_quote_observation_id=str(away["quote_observation_id"]),
+                home_odds=cast(float, home["parsed_odds"]),
+                draw_odds=cast(float, draw["parsed_odds"]),
+                away_odds=cast(float, away["parsed_odds"]),
             )
         )
     return triples
@@ -993,6 +1074,21 @@ def _as_date(value: object) -> date:
         return value
     msg = f"expected date, got {type(value)!r}"
     raise FeatureError(msg)
+
+
+def _as_datetime(value: object) -> datetime:
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, str):
+        from sports_analytics.data.codec import parse_utc_timestamp
+
+        try:
+            return parse_utc_timestamp(value)
+        except ValueError as exc:
+            raise FeatureError("expected canonical UTC timestamp") from exc
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value
+    raise FeatureError(f"expected timezone-aware datetime, got {type(value)!r}")
 
 
 __all__ = [

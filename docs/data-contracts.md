@@ -463,7 +463,9 @@ application observed the row at that instant. Treating an
 observation-only closing price as available before kickoff would be a leakage
 error the contract explicitly refuses to endorse.
 
-Backtesting is not implemented in this release.
+The backtesting layer therefore accepts these Football-Data closing prices only
+in `closing-line-historical-benchmark` mode. It refuses to treat them as
+live-safe quotes and refuses production closing-line accumulators.
 
 ## Post-match statistics
 
@@ -499,9 +501,10 @@ accumulators, and two distinct odds filters: `selection_odds_range` applied per
 selection versus `combined_odds_range` applied to a whole accumulator.
 
 Unknown source information is represented explicitly as null or `unknown` and is
-never invented. None of the search, bet-builder, filter, or accumulator
-functionality is implemented in this release; only the contract shape that would
-permit it exists.
+never invented. Generic typed filters, deterministic opportunity ranking, and a
+bounded structural combination builder now use this shape. There is still no
+current-price adapter, live automatic builder, operational settlement, or
+correlation estimate.
 
 ## Leakage boundaries
 
@@ -587,12 +590,16 @@ Implemented now:
 - the generic canonical market quote contract;
 - historical 1X2 mapped into that contract;
 - immutable generic Parquet snapshots;
+- football 1X2 features and logistic models;
+- generic prediction, complete-market value, opportunity, combination, and
+  backtesting contracts;
+- Football-Data closing market-average historical singles benchmark;
 - worker job integration (`ingest.football-data-csv` in the frozen default
   registry);
 - snapshot listing and verification through `scraper.py`.
 
 Not implemented: Betclic; Betano; current bookmaker prices; browser scraping or
 automation; additional sports; markets beyond production 1X2 plus the synthetic
-contract proof; models; features; predictions; combinations and accumulators;
-backtesting; settlement; bankroll; Streamlit UI; opportunity search engine;
-automatic bet builder; user bet filters; cross-source fuzzy resolution.
+contract proof; current-price production opportunities and accumulators;
+operational settlement; bankroll; Streamlit UI; live automatic bet builder;
+cross-source fuzzy resolution.

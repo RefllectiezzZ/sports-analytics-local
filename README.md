@@ -43,14 +43,19 @@ Implemented now:
   (`football-1x2-prematch-features-v1`);
 - deterministic rolling-origin training, temperature calibration, evaluation, and
   pickle-free model artifacts (`football-1x2-logistic-v1`) via `engine.py`;
+- generic immutable predictions, complete-market implied probability/edge/EV,
+  auditable opportunity filtering, bounded dependency-safe combinations, pure
+  flat-unit settlement, and rolling-origin backtesting contracts;
+- a Football-Data market-average closing-price **historical benchmark** for
+  football 1X2 singles, with content-addressed analytical artifacts;
 - documentation, linting, typing, and tests.
 
 **Not implemented**: Betclic; Betano; current bookmaker prices; browser scraping
 or automation; additional sports; markets beyond production 1X2 plus a synthetic
-contract proof; player/lineup/injury features; opportunity discovery; expected
-value; Kelly staking; bet recommendations; combinations and accumulators;
-settlement; bankroll management; Streamlit UI pages; an automatic bet builder;
-user bet filters; cross-source fuzzy resolution.
+contract proof; player/lineup/injury features; Kelly staking; bet
+recommendations; production accumulators; operational settlement; bankroll
+management; Streamlit UI pages; live automatic bet building; cross-source fuzzy
+resolution.
 
 ## Supported Python version
 
@@ -259,9 +264,36 @@ python engine.py --config config/settings.toml --verify-model \
 ```
 
 This baseline is team-level historical football 1X2 only. It is not a betting
-recommendation engine, does not use players/injuries/lineups, does not use
-bookmaker odds as model features, and does not produce expected value or
-accumulators. See [docs/modelling.md](docs/modelling.md).
+recommendation engine, does not use players/injuries/lineups, and does not use
+bookmaker odds as model features. See [docs/modelling.md](docs/modelling.md).
+
+### Football 1X2 closing-line benchmark
+
+```bash
+python engine.py --config config/settings.toml --backtest-football-1x2 \
+  --features football/football-1x2-prematch-features-v1/<competition>/<artifact-id>
+```
+
+This is a rolling-origin singles benchmark against Football-Data market-average
+closing prices. It does not claim those prices were available before kickoff and
+explicitly refuses production closing-line accumulators. See
+[docs/prediction-value-backtesting.md](docs/prediction-value-backtesting.md).
+
+Focused generic workflows use explicit JSON files (never “latest” discovery):
+
+```bash
+python engine.py --generate-predictions prediction-request.json
+python engine.py --evaluate-opportunities evaluation-request.json
+python engine.py --build-combinations combination-request.json
+python engine.py --validate-combination manual-combination.json
+python engine.py --run-backtest backtest-request.json
+
+python engine.py --config config/settings.toml --verify-backtest-artifact \
+  <relative-directory> --artifact-schema football-1x2-closing-backtest-v1
+```
+
+Published backtests are typed, content-addressed multi-dataset artifacts with
+strict manifest, JSONL schema/count/hash, lineage, timing, and duplicate checks.
 
 ### Windows PowerShell overrides
 
@@ -327,15 +359,15 @@ pre-commit run --all-files
 | --- | --- | --- |
 | `app.py` | Streamlit user interface entry point | Placeholder |
 | `scraper.py` | Coordinates permitted public data ingestion | Implemented |
-| `engine.py` | Coordinates features, predictions, and combinations | Placeholder |
+| `engine.py` | Coordinates features, models, predictions, value, and backtesting | Implemented |
 | `worker.py` | Runs durable background jobs outside the Streamlit process | Implemented |
 | `run_local.py` | Supervises the local worker child process | Implemented |
 
 Each file supports shared validation / database CLI modes. `worker.py` and
 `run_local.py` implement durable worker infrastructure. `scraper.py` implements
 source and competition listing, football ingestion enqueue, snapshot listing, and
-read-only snapshot verification. `app.py` and `engine.py` remain
-business-function placeholders after bootstrap.
+read-only snapshot verification. `app.py` remains a business-function placeholder
+after bootstrap.
 
 ## Directory structure
 
@@ -397,21 +429,23 @@ business-function placeholders after bootstrap.
     ├── data-contracts.md
     ├── database.md
     ├── development.md
+    ├── prediction-value-backtesting.md
     ├── snapshots.md
     ├── sources.md
     └── worker.md
 ```
 
-`scrapers`, `features`, `models`, `combinations`, `services`, and `evaluation` are
-reserved package placeholders and are currently empty.
+The prediction, value, opportunities, combinations, backtesting, features,
+models, services, and evaluation packages contain the deterministic analytics
+pipeline. `scrapers` remains reserved.
 
 ## High-level architecture
 
 - **Streamlit** (`app.py`) for local interactive use (planned).
 - **Ingestion coordinator** (`scraper.py`) for permitted public sources only
   (implemented for the Football-Data.co.uk ingestion adapter).
-- **Engine** (`engine.py`) for deterministic feature generation, local models, and
-  combination proposals (planned).
+- **Engine** (`engine.py`) for deterministic features, local models, prediction
+  contracts, value evaluation, and historical backtesting (implemented).
 - **Worker** (`worker.py`) for durable background jobs, leases, and retries
   (implemented).
 - **SQLite** for operational state, jobs, snapshot metadata, and audit records.
@@ -431,9 +465,8 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
 - Cross-source resolution is limited to exact canonical identity. There is no
   fuzzy or machine-learning matching and no silent alias merge; unresolved source
   events stay in `source_events` and are excluded from downstream-safe datasets.
-- No feature engineering, models, predictions, combinations, accumulators,
-  backtesting, settlement, or bankroll management.
-- No opportunity search engine, automatic bet builder, or user bet filters.
+- No current-price production opportunity feed, operational settlement, staking,
+  correlation model, or bankroll management.
 - No sports-domain SQLite schemas: analytical data lives in Parquet snapshots and
   SQLite stores only snapshot metadata.
 - No browser automation and no HTML scraping.
@@ -441,7 +474,7 @@ See [docs/architecture.md](docs/architecture.md) for principles and boundaries.
   started yet, and no Streamlit UI pages exist.
 - `system.noop` remains infrastructure-only; `ingest.football-data-csv` is the
   only sports-domain job handler.
-- `app.py` and `engine.py` remain functional placeholders after bootstrap.
+- `app.py` remains a functional placeholder after bootstrap.
 
 ## Contribution workflow
 
