@@ -14,8 +14,6 @@ from sports_analytics.bookmakers.markets import (
     DEFINITION_FOOTBALL_TOTAL_GOALS,
     DEFINITION_TENNIS_MATCH_WINNER,
     MARKET_PERIOD_FULL_MATCH,
-    OVERTIME_INCLUDED,
-    REGULATION_ONLY,
 )
 from sports_analytics.core.exceptions import PermanentSourceError, SnapshotVerificationError
 from sports_analytics.markets.contracts import LineType
@@ -69,6 +67,16 @@ _EXACT_MARKET_KEY_DEFINITIONS: Final[dict[str, str]] = {
     ): DEFINITION_TENNIS_MATCH_WINNER,
 }
 
+_REQUIRED_LINE_TYPE: Final[dict[str, str]] = {
+    DEFINITION_FOOTBALL_MATCH_RESULT_1X2: LineType.NONE.value,
+    DEFINITION_FOOTBALL_BTTS: LineType.NONE.value,
+    DEFINITION_FOOTBALL_TOTAL_GOALS: LineType.TOTAL.value,
+    DEFINITION_BASKETBALL_MATCH_WINNER_WITH_OT: LineType.NONE.value,
+    DEFINITION_BASKETBALL_TOTAL_POINTS_WITH_OT: LineType.TOTAL.value,
+    DEFINITION_BASKETBALL_SPREAD_WITH_OT: LineType.SPREAD.value,
+    DEFINITION_TENNIS_MATCH_WINNER: LineType.NONE.value,
+}
+
 
 def canonical_market_definition_id_from_quote_dimensions(
     *,
@@ -85,49 +93,42 @@ def canonical_market_definition_id_from_quote_dimensions(
     if definition_id is None:
         msg = f"unknown market_key for canonical mapping: {market_key}"
         raise PermanentSourceError(msg)
-    if definition_id in {
-        DEFINITION_FOOTBALL_TOTAL_GOALS,
-        DEFINITION_BASKETBALL_TOTAL_POINTS_WITH_OT,
-        DEFINITION_BASKETBALL_SPREAD_WITH_OT,
-    }:
-        if line_type not in {LineType.TOTAL.value, LineType.SPREAD.value}:
-            msg = f"{definition_id} requires total or spread line_type"
+    expected_line = _REQUIRED_LINE_TYPE[definition_id]
+    if line_type != expected_line:
+        msg = f"{definition_id} requires line_type {expected_line}"
+        raise PermanentSourceError(msg)
+    if expected_line == LineType.NONE.value:
+        if line_value is not None:
+            msg = f"{definition_id} must not carry a line_value"
             raise PermanentSourceError(msg)
-        if line_value is None:
-            msg = f"{definition_id} requires an explicit line_value"
-            raise PermanentSourceError(msg)
-    elif line_type != LineType.NONE.value:
-        msg = f"{definition_id} requires line_type none"
+    elif line_value is None:
+        msg = f"{definition_id} requires an explicit line_value"
         raise PermanentSourceError(msg)
     return definition_id
 
 
-def overtime_scope_from_definition_id(definition_id: str) -> str | None:
-    """Return overtime scope implied by a canonical market definition ID."""
+def quote_is_comparable(
+    *,
+    definition_id: str,
+    overtime_scope: str | None,
+    rules_scope: str | None,
+) -> bool:
+    """Return whether provider-supplied scopes make a quote cross-comparable.
+
+    Scopes must come from provider evidence. Missing/unknown rules make the quote
+    non-comparable. Overtime-included basketball definitions require overtime
+    evidence.
+    """
+    if rules_scope is None or not str(rules_scope).strip():
+        return False
     if definition_id in {
         DEFINITION_BASKETBALL_MATCH_WINNER_WITH_OT,
         DEFINITION_BASKETBALL_TOTAL_POINTS_WITH_OT,
         DEFINITION_BASKETBALL_SPREAD_WITH_OT,
     }:
-        return OVERTIME_INCLUDED
-    return None
-
-
-def rules_scope_from_definition_id(definition_id: str) -> str | None:
-    """Return rules scope implied by a canonical market definition ID."""
-    if definition_id in {
-        DEFINITION_FOOTBALL_MATCH_RESULT_1X2,
-        DEFINITION_FOOTBALL_TOTAL_GOALS,
-        DEFINITION_FOOTBALL_BTTS,
-    }:
-        return REGULATION_ONLY
-    if definition_id in {
-        DEFINITION_BASKETBALL_MATCH_WINNER_WITH_OT,
-        DEFINITION_BASKETBALL_TOTAL_POINTS_WITH_OT,
-        DEFINITION_BASKETBALL_SPREAD_WITH_OT,
-    }:
-        return OVERTIME_INCLUDED
-    return None
+        if overtime_scope is None or not str(overtime_scope).strip():
+            return False
+    return True
 
 
 def canonical_market_definition_id_from_row(row: dict[str, object]) -> str:

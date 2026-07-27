@@ -129,36 +129,18 @@ def build_acceptance_report(
 def _common_quote_keys(
     betano_quotes: tuple[VerifiedBookmakerQuote, ...],
     betclic_quotes: tuple[VerifiedBookmakerQuote, ...],
-) -> set[tuple[str, str, str]]:
-    betano_keys = {
-        (
-            quote.identity.canonical_event_id,
-            quote.canonical_market_definition_id,
-            quote.canonical_selection_id,
-        )
-        for quote in betano_quotes
-    }
-    betclic_keys = {
-        (
-            quote.identity.canonical_event_id,
-            quote.canonical_market_definition_id,
-            quote.canonical_selection_id,
-        )
-        for quote in betclic_quotes
-    }
+) -> set[tuple[object, ...]]:
+    """Common cross-provider identity including line/period/scopes/pre-match."""
+    betano_keys = {quote.comparison_identity() for quote in betano_quotes if quote.comparable}
+    betclic_keys = {quote.comparison_identity() for quote in betclic_quotes if quote.comparable}
     return betano_keys & betclic_keys
 
 
 def _quote_by_key(
     quotes: tuple[VerifiedBookmakerQuote, ...],
-    key: tuple[str, str, str],
+    key: tuple[object, ...],
 ) -> VerifiedBookmakerQuote | None:
     for quote in quotes:
-        identity = (
-            quote.identity.canonical_event_id,
-            quote.canonical_market_definition_id,
-            quote.canonical_selection_id,
-        )
-        if identity == key:
+        if quote.comparison_identity() == key:
             return quote
     return None

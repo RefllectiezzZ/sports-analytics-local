@@ -196,11 +196,12 @@ def ingest_bookmaker_autonomous_cycle_handler(
     """Execute one autonomous Betano-first / Betclic-fallback sport cycle."""
     database_path, raw_directory, snapshots_directory, bookmakers = _require_runtime(context)
     payload_object = _require_payload_object(payload)
-    sport, observed_raw, cycle_id, scheduled_raw, _enqueued_raw = validate_autonomous_cycle_payload(
+    sport, observed_raw, cycle_id, scheduled_raw, enqueued_raw = validate_autonomous_cycle_payload(
         {key: value for key, value in payload_object.items()}
     )
     observed_at = parse_utc_timestamp(observed_raw) if observed_raw is not None else None
     scheduled_for = parse_utc_timestamp(scheduled_raw) if scheduled_raw is not None else None
+    enqueued_at = parse_utc_timestamp(enqueued_raw) if enqueued_raw is not None else None
     service = BookmakerIngestionService(
         database_path=database_path,
         raw_directory=raw_directory,
@@ -223,6 +224,7 @@ def ingest_bookmaker_autonomous_cycle_handler(
             acquisition_cycle_id=cycle_id,
             observed_at_utc=observed_at,
             scheduled_for_utc=scheduled_for,
+            enqueued_at_utc=enqueued_at,
             actor="worker",
             attempt_number=context.attempt,
             maximum_attempts=context.maximum_attempts,
@@ -230,6 +232,7 @@ def ingest_bookmaker_autonomous_cycle_handler(
     except RetryableJobError:
         raise
     selected = result.selected_result
+    lifecycle = result.lifecycle
     context.logger.info(
         "bookmaker autonomous cycle complete job_id=%s sport=%s selected=%s reason=%s",
         context.job_id,
@@ -237,7 +240,7 @@ def ingest_bookmaker_autonomous_cycle_handler(
         result.fallback_decision.selected_provider,
         result.fallback_decision.reason_code.value,
     )
-    return {
+    payload_out: dict[str, JsonValue] = {
         "sport": sport,
         "acquisition_cycle_id": result.acquisition_cycle_id,
         "selected_provider": result.fallback_decision.selected_provider,
@@ -247,6 +250,31 @@ def ingest_bookmaker_autonomous_cycle_handler(
         "betclic_status": None if result.betclic_result is None else result.betclic_result.status,
         "selected_snapshot_id": None if selected is None else selected.snapshot_id,
     }
+    if lifecycle is not None:
+        from sports_analytics.data.codec import format_utc_timestamp
+
+        payload_out["scheduled_for_utc"] = (
+            None
+            if lifecycle.scheduled_for_utc is None
+            else format_utc_timestamp(lifecycle.scheduled_for_utc)
+        )
+        payload_out["enqueued_at_utc"] = (
+            None
+            if lifecycle.enqueued_at_utc is None
+            else format_utc_timestamp(lifecycle.enqueued_at_utc)
+        )
+        payload_out["acquisition_started_at_utc"] = format_utc_timestamp(
+            lifecycle.acquisition_started_at_utc
+        )
+        payload_out["provider_response_observed_at_utc"] = (
+            None
+            if lifecycle.provider_response_observed_at_utc is None
+            else format_utc_timestamp(lifecycle.provider_response_observed_at_utc)
+        )
+        payload_out["acquisition_finished_at_utc"] = format_utc_timestamp(
+            lifecycle.acquisition_finished_at_utc
+        )
+    return payload_out
 
 
 CURRENT_ODDS_JOB_TYPE = INGEST_BOOKMAKER_CURRENT_ODDS_JOB_TYPE

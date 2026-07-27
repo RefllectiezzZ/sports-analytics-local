@@ -9,6 +9,10 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from sports_analytics.bookmakers.canonical_mapping import (
+    canonical_market_definition_id_from_row,
+    quote_is_comparable,
+)
 from sports_analytics.bookmakers.schemas import (
     DATASET_ACQUISITION_METADATA,
     DATASET_CANONICAL_EVENTS,
@@ -21,7 +25,8 @@ from sports_analytics.bookmakers.snapshots import parse_bookmaker_source_version
 from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION, BOOKMAKER_SNAPSHOT_TYPE
 from sports_analytics.bookmakers.verified_evidence import (
     VerifiedBookmakerQuote,
-    build_verified_quote_from_loaded_row,
+    VerifiedQuoteCatalogue,
+    bookmaker_quote_identity_from_row,
     quote_semantic_identity_key,
     verify_quote_row_identity,
 )
@@ -63,6 +68,7 @@ class LoadedBookmakerSnapshot:
     verified_quotes_by_semantic_identity: tuple[
         tuple[tuple[object, ...], VerifiedBookmakerQuote], ...
     ] = ()
+    catalogue: VerifiedQuoteCatalogue | None = None
 
 
 def load_bookmaker_snapshot(
@@ -193,6 +199,14 @@ def load_bookmaker_snapshot(
         quote_count=quote_count,
         verified_quotes_by_observation_id=verified_by_observation,
         verified_quotes_by_semantic_identity=verified_by_semantic,
+        catalogue=VerifiedQuoteCatalogue(
+            snapshot_id=snapshot_id,
+            snapshot_checksum_sha256=result.manifest_checksum_sha256,
+            provider_id=provider_id,
+            sport=sport_code,
+            quotes_by_observation_id=verified_by_observation,
+            quotes_by_semantic_identity=verified_by_semantic,
+        ),
     )
 
 
@@ -293,11 +307,13 @@ def _verify_semantic_datasets(
         source_participants=source_participants,
         participant_reconciliations=participant_reconciliations,
         sport_code=sport_code,
+        provider_id=provider_id,
     )
     resolved_event_ids = _verify_source_event_graph(
         source_events=source_events,
         event_reconciliations=event_reconciliations,
         sport_code=sport_code,
+        provider_id=provider_id,
     )
 
     if len(events) < 1 or len(quotes) < 1:
@@ -308,11 +324,27 @@ def _verify_semantic_datasets(
     for row in events:
         if str(row.get("sport_code")) != sport_code:
             raise SnapshotVerificationError("canonical event sport mismatch with registration")
+        home_canonical = row.get("home_canonical_participant_id")
+        away_canonical = row.get("away_canonical_participant_id")
+        if home_canonical is None or away_canonical is None:
+            raise SnapshotVerificationError("canonical event requires participant correspondence")
 
     observation_ids: set[str] = set()
     semantic_keys: set[tuple[object, ...]] = set()
     verified_by_observation: dict[str, VerifiedBookmakerQuote] = {}
     verified_by_semantic: dict[tuple[object, ...], VerifiedBookmakerQuote] = {}
+    eligibility_by_observation = {
+        str(row["quote_observation_id"]): row
+        for row in eligibility
+        if row.get("quote_observation_id")
+    }
+    if len(eligibility_by_observation) != len(eligibility):
+        raise SnapshotVerificationError("eligibility quote_observation_id must be unique")
+    if set(eligibility_by_observation) != {str(row["quote_observation_id"]) for row in quotes}:
+        raise SnapshotVerificationError(
+            "eligibility coverage must match quote observations exactly"
+        )
+
     for row in quotes:
         identity = verify_quote_row_identity(row)
         if identity.provider_id != provider_id:
@@ -331,48 +363,39 @@ def _verify_semantic_datasets(
         if identity.quote_observation_id in observation_ids:
             raise SnapshotVerificationError("quote_observation_id must be unique")
         observation_ids.add(identity.quote_observation_id)
-        semantic_key = quote_semantic_identity_key(identity)
-        if semantic_key in semantic_keys:
-            raise SnapshotVerificationError("conflicting duplicate quote identity in snapshot")
-        semantic_keys.add(semantic_key)
         if str(row.get("sport_code")) != sport_code:
             raise SnapshotVerificationError("quote sport mismatch with registration")
-        verified = build_verified_quote_from_loaded_row(
+        source_event_id = str(row.get("source_event_id", ""))
+        if not source_event_id:
+            raise SnapshotVerificationError("quote requires source_event_id")
+        eligibility_row = eligibility_by_observation[identity.quote_observation_id]
+        overtime_scope = (
+            None
+            if eligibility_row.get("overtime_scope") is None
+            else str(eligibility_row["overtime_scope"])
+        )
+        rules_scope = (
+            None
+            if eligibility_row.get("rules_scope") is None
+            else str(eligibility_row["rules_scope"])
+        )
+        verified = _build_verified_quote_from_loaded_row(
             loaded_snapshot_id=snapshot_id,
             loaded_checksum_sha256=checksum_sha256,
             loaded_provider_id=provider_id,
             loaded_sport=sport_code,
             quote_row=row,
+            overtime_scope=overtime_scope,
+            rules_scope=rules_scope,
+            comparable=bool(eligibility_row.get("comparable")),
         )
+        semantic_key = quote_semantic_identity_key(verified.identity)
+        if semantic_key in semantic_keys:
+            raise SnapshotVerificationError("conflicting duplicate quote identity in snapshot")
+        semantic_keys.add(semantic_key)
+        _validate_eligibility_matches_quote(eligibility_row, verified)
         verified_by_observation[identity.quote_observation_id] = verified
         verified_by_semantic[semantic_key] = verified
-
-    eligibility_keys: set[tuple[str, str, str, str]] = set()
-    for row in eligibility:
-        if str(row.get("provider_id")) != provider_id:
-            raise SnapshotVerificationError("eligibility provider_id mismatch")
-        if not bool(row.get("eligible")):
-            continue
-        event_id = str(row["canonical_event_id"])
-        market_id = str(row["canonical_market_definition_id"])
-        selection_id = str(row["canonical_selection_id"])
-        key = (event_id, market_id, selection_id, provider_id)
-        if key in eligibility_keys:
-            raise SnapshotVerificationError("duplicate eligibility evidence for quote identity")
-        eligibility_keys.add(key)
-        matched = False
-        for verified in verified_by_observation.values():
-            if (
-                verified.identity.canonical_event_id == event_id
-                and verified.canonical_market_definition_id == market_id
-                and verified.canonical_selection_id == selection_id
-            ):
-                matched = True
-                break
-        if not matched:
-            raise SnapshotVerificationError(
-                "eligible comparison row references missing verified quote identity"
-            )
 
     for row in drift_findings:
         if str(row.get("provider_id")) != provider_id:
@@ -393,6 +416,7 @@ def _verify_source_participant_graph(
     source_participants: list[dict[str, Any]],
     participant_reconciliations: list[dict[str, Any]],
     sport_code: str,
+    provider_id: str,
 ) -> None:
     source_ids = {str(row["source_participant_id"]) for row in source_participants}
     if len(source_ids) != len(source_participants):
@@ -403,9 +427,31 @@ def _verify_source_participant_graph(
     if set(reconciliation_by_source) != source_ids:
         raise SnapshotVerificationError("participant reconciliation coverage mismatch")
     for row in source_participants:
+        if str(row.get("source_name")) != provider_id:
+            raise SnapshotVerificationError("source participant provider identity mismatch")
         reconciliation = reconciliation_by_source[str(row["source_participant_id"])]
         if str(reconciliation.get("source_participant_id")) != str(row["source_participant_id"]):
             raise SnapshotVerificationError("participant reconciliation source id mismatch")
+        if str(reconciliation.get("source_name")) != provider_id:
+            raise SnapshotVerificationError("participant reconciliation provider mismatch")
+        if not str(reconciliation.get("reconciliation_policy_version") or "").strip():
+            raise SnapshotVerificationError(
+                "participant reconciliation requires reconciliation_policy_version"
+            )
+        if reconciliation.get("source_observed_at_utc") is None:
+            raise SnapshotVerificationError(
+                "participant reconciliation requires source_observed_at_utc"
+            )
+        state = str(reconciliation.get("reconciliation_state"))
+        if state == ReconciliationState.UNRESOLVED.value:
+            if reconciliation.get("canonical_participant_id") is not None:
+                raise SnapshotVerificationError(
+                    "unresolved participant reconciliation must not claim canonical id"
+                )
+        elif reconciliation.get("canonical_participant_id") is None:
+            raise SnapshotVerificationError(
+                "resolved participant reconciliation requires canonical_participant_id"
+            )
 
 
 def _verify_source_event_graph(
@@ -413,6 +459,7 @@ def _verify_source_event_graph(
     source_events: list[dict[str, Any]],
     event_reconciliations: list[dict[str, Any]],
     sport_code: str,
+    provider_id: str,
 ) -> set[str]:
     source_ids = {str(row["source_event_id"]) for row in source_events}
     if len(source_ids) != len(source_events):
@@ -422,7 +469,23 @@ def _verify_source_event_graph(
         raise SnapshotVerificationError("event reconciliation coverage mismatch")
     resolved_event_ids: set[str] = set()
     for row in source_events:
+        if str(row.get("source_name")) != provider_id:
+            raise SnapshotVerificationError("source event provider identity mismatch")
+        if str(row.get("sport_code")) != sport_code:
+            raise SnapshotVerificationError("source event sport mismatch")
+        if row.get("source_observed_at_utc") is None:
+            raise SnapshotVerificationError("source event requires source_observed_at_utc")
+        home_source = row.get("home_source_participant_id")
+        away_source = row.get("away_source_participant_id")
+        if home_source is None or away_source is None:
+            raise SnapshotVerificationError("source event requires participant references")
         reconciliation = reconciliation_by_source[str(row["source_event_id"])]
+        if str(reconciliation.get("source_name")) != provider_id:
+            raise SnapshotVerificationError("event reconciliation provider mismatch")
+        if not str(reconciliation.get("reconciliation_policy_version") or "").strip():
+            raise SnapshotVerificationError(
+                "event reconciliation requires reconciliation_policy_version"
+            )
         state = str(reconciliation.get("reconciliation_state"))
         canonical_event_id = reconciliation.get("canonical_event_id")
         if state == ReconciliationState.UNRESOLVED.value:
@@ -437,5 +500,120 @@ def _verify_source_event_graph(
             raise SnapshotVerificationError(
                 "source event canonical id mismatch with reconciliation"
             )
+        home_canonical = row.get("home_canonical_participant_id")
+        away_canonical = row.get("away_canonical_participant_id")
+        if home_canonical is None or away_canonical is None:
+            raise SnapshotVerificationError(
+                "resolved source event requires canonical participant correspondence"
+            )
         resolved_event_ids.add(str(canonical_event_id))
     return resolved_event_ids
+
+
+def _validate_eligibility_matches_quote(
+    eligibility_row: dict[str, Any],
+    verified: VerifiedBookmakerQuote,
+) -> None:
+    identity = verified.identity
+    line = None if identity.line_value is None else format(identity.line_value, "f")
+    if str(eligibility_row.get("provider_id")) != verified.provider_id:
+        raise SnapshotVerificationError("eligibility provider_id mismatch")
+    if str(eligibility_row["canonical_event_id"]) != identity.canonical_event_id:
+        raise SnapshotVerificationError("eligibility event mismatch with quote")
+    if str(eligibility_row["canonical_market_definition_id"]) != (
+        verified.canonical_market_definition_id
+    ):
+        raise SnapshotVerificationError("eligibility market definition mismatch with quote")
+    if str(eligibility_row["canonical_selection_id"]) != verified.canonical_selection_id:
+        raise SnapshotVerificationError("eligibility selection mismatch with quote")
+    if str(eligibility_row.get("line_type")) != identity.line_type:
+        raise SnapshotVerificationError("eligibility line_type mismatch with quote")
+    eligibility_line = eligibility_row.get("line_value")
+    eligibility_line_text = None if eligibility_line is None else str(eligibility_line)
+    if eligibility_line_text != line:
+        raise SnapshotVerificationError("eligibility line_value mismatch with quote")
+    if str(eligibility_row.get("market_period")) != identity.market_period:
+        raise SnapshotVerificationError("eligibility market_period mismatch with quote")
+    if str(eligibility_row.get("participant_scope")) != identity.participant_scope:
+        raise SnapshotVerificationError("eligibility participant_scope mismatch with quote")
+    eligibility_participant = eligibility_row.get("canonical_participant_id")
+    if (None if eligibility_participant is None else str(eligibility_participant)) != (
+        identity.canonical_participant_id
+    ):
+        raise SnapshotVerificationError("eligibility canonical_participant_id mismatch")
+    eligibility_overtime = eligibility_row.get("overtime_scope")
+    if (None if eligibility_overtime is None else str(eligibility_overtime)) != (
+        identity.overtime_scope
+    ):
+        raise SnapshotVerificationError("eligibility overtime_scope mismatch with quote")
+    eligibility_rules = eligibility_row.get("rules_scope")
+    if (None if eligibility_rules is None else str(eligibility_rules)) != identity.rules_scope:
+        raise SnapshotVerificationError("eligibility rules_scope mismatch with quote")
+    if bool(eligibility_row.get("comparable")) != verified.comparable:
+        raise SnapshotVerificationError("eligibility comparable mismatch with quote")
+    if verified.comparable and not quote_is_comparable(
+        definition_id=verified.canonical_market_definition_id,
+        overtime_scope=identity.overtime_scope,
+        rules_scope=identity.rules_scope,
+    ):
+        raise SnapshotVerificationError("comparable quote missing required rules evidence")
+
+
+def _build_verified_quote_from_loaded_row(
+    *,
+    loaded_snapshot_id: str,
+    loaded_checksum_sha256: str,
+    loaded_provider_id: str,
+    loaded_sport: str,
+    quote_row: dict[str, Any],
+    overtime_scope: str | None,
+    rules_scope: str | None,
+    comparable: bool,
+) -> VerifiedBookmakerQuote:
+    """Private loader-only constructor for verified quote evidence."""
+    from datetime import datetime
+    from decimal import Decimal
+
+    from sports_analytics.markets.contracts import validate_decimal_odds
+    from sports_analytics.sports.contracts import require_utc
+
+    identity = bookmaker_quote_identity_from_row(
+        quote_row,
+        overtime_scope=overtime_scope,
+        rules_scope=rules_scope,
+    )
+    if identity.provider_id != loaded_provider_id:
+        msg = "quote provider_id does not match verified snapshot registration"
+        raise SnapshotVerificationError(msg)
+    sport = str(quote_row.get("sport_code", loaded_sport))
+    if sport != loaded_sport:
+        msg = "quote sport does not match verified snapshot registration"
+        raise SnapshotVerificationError(msg)
+    observed_raw = quote_row.get("source_observed_at_utc")
+    if not isinstance(observed_raw, datetime):
+        msg = "quote row requires source_observed_at_utc timestamp"
+        raise SnapshotVerificationError(msg)
+    canonical_market_definition_id = canonical_market_definition_id_from_row(quote_row)
+    expected_comparable = quote_is_comparable(
+        definition_id=canonical_market_definition_id,
+        overtime_scope=overtime_scope,
+        rules_scope=rules_scope,
+    )
+    if comparable != expected_comparable:
+        raise SnapshotVerificationError("eligibility comparable flag mismatch with scopes")
+    return VerifiedBookmakerQuote(
+        snapshot_id=loaded_snapshot_id,
+        snapshot_checksum_sha256=loaded_checksum_sha256,
+        provider_id=loaded_provider_id,
+        sport=loaded_sport,
+        identity=identity,
+        decimal_odds=validate_decimal_odds(Decimal(str(quote_row["decimal_odds"]))),
+        observed_at_utc=require_utc(observed_raw, field_name="source_observed_at_utc"),
+        market_status=str(quote_row.get("market_status", "open")),
+        selection_status=str(quote_row.get("selection_status", "active")),
+        source_file_sha256=str(quote_row.get("source_file_sha256", "")),
+        canonical_market_definition_id=canonical_market_definition_id,
+        canonical_selection_id=str(quote_row.get("outcome_key", "")),
+        source_event_id=str(quote_row.get("source_event_id", "")),
+        comparable=comparable,
+    )

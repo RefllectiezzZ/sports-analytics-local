@@ -57,4 +57,5 @@ def verified_quote(
         canonical_market_definition_id=canonical_market_definition_id,
         canonical_selection_id=selection_id,
         source_event_id=f"source-{leg_key}",
+        comparable=True,
     )

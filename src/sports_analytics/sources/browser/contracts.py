@@ -139,6 +139,7 @@ class BrowserAcquisitionResult:
     diagnostics: tuple[BrowserDiagnosticReference, ...]
     block_reason: BrowserBlockReason | None
     warnings: tuple[str, ...]
+    cookie_banner_dismissed: bool = False
 
     def __post_init__(self) -> None:
         validate_identifier(self.provider_id, field_name="provider_id")

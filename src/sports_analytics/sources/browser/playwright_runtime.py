@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
@@ -27,10 +27,10 @@ from sports_analytics.sources.browser.contracts import (
     BrowserPageObservation,
     BrowserResponseObservation,
 )
+from sports_analytics.sources.browser.cookie_consent import dismiss_cookie_consent
 from sports_analytics.sources.browser.errors import (
     classify_browser_crash,
     classify_missing_chromium_error,
-    classify_navigation_timeout,
     classify_playwright_import_error,
     raise_for_classified_error,
 )
@@ -61,6 +61,7 @@ class BrowserSession(Protocol):
         start_urls: Sequence[tuple[str, str]],
         observed_at_utc: datetime,
         browser_mode: BrowserMode,
+        deadline_at_utc: datetime | None = None,
     ) -> BrowserAcquisitionResult:
         """Collect page and first-party JSON observations for fixed routes."""
 
@@ -81,13 +82,18 @@ class PlaywrightBrowserSession:
         *,
         navigation_timeout_ms: int = 30_000,
         maximum_response_bytes: int = 2_097_152,
+        dwell_after_readiness_ms: int = 1_500,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if navigation_timeout_ms < 1:
             msg = "navigation_timeout_ms must be positive"
             raise PermanentSourceError(msg)
+        if dwell_after_readiness_ms < 0:
+            msg = "dwell_after_readiness_ms must be non-negative"
+            raise PermanentSourceError(msg)
         self._navigation_timeout_ms = navigation_timeout_ms
         self._maximum_response_bytes = maximum_response_bytes
+        self._dwell_after_readiness_ms = dwell_after_readiness_ms
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def acquire(
@@ -100,6 +106,7 @@ class PlaywrightBrowserSession:
         start_urls: Sequence[tuple[str, str]],
         observed_at_utc: datetime,
         browser_mode: BrowserMode,
+        deadline_at_utc: datetime | None = None,
     ) -> BrowserAcquisitionResult:
         if browser_mode not in {BrowserMode.VISIBLE, BrowserMode.VISIBLE_MINIMIZED}:
             msg = "headless production scraping is forbidden"
@@ -114,8 +121,15 @@ class PlaywrightBrowserSession:
         responses: list[BrowserResponseObservation] = []
         warnings: list[str] = []
         block_reason: BrowserBlockReason | None = None
+        cookie_banner_dismissed = False
 
         current_route_id = "unknown"
+        started_at = self._clock()
+        deadline = (
+            deadline_at_utc
+            if deadline_at_utc is not None
+            else started_at + timedelta(seconds=max(1, self._navigation_timeout_ms // 1000))
+        )
 
         try:
             with sync_playwright() as playwright:
@@ -139,6 +153,8 @@ class PlaywrightBrowserSession:
                     def _on_response(response: object) -> None:
                         nonlocal current_route_id
                         try:
+                            if self._clock() > deadline:
+                                return
                             response_url = str(getattr(response, "url", ""))
                             validate_provider_navigation_url(
                                 response_url,
@@ -179,22 +195,49 @@ class PlaywrightBrowserSession:
                     page.on("response", _on_response)
 
                     for page_route_id, url in start_urls:
+                        if self._clock() > deadline:
+                            msg = (
+                                "browser acquisition exceeded duration deadline "
+                                f"for provider {provider_id}"
+                            )
+                            raise RetryableSourceError(msg)
                         current_route_id = page_route_id
                         approved = validate_provider_navigation_url(
                             url,
                             allowed_hostnames=allowed_hostnames,
                         )
                         try:
+                            remaining_ms = max(
+                                1,
+                                int((deadline - self._clock()).total_seconds() * 1000),
+                            )
+                            nav_timeout = min(self._navigation_timeout_ms, remaining_ms)
                             page.goto(
                                 approved.url,
                                 wait_until="domcontentloaded",
-                                timeout=self._navigation_timeout_ms,
+                                timeout=nav_timeout,
                             )
+                            # Ordinary public cookie consent before readiness wait.
+                            if dismiss_cookie_consent(page, provider_id=provider_id):
+                                cookie_banner_dismissed = True
+                            if self._clock() > deadline:
+                                msg = (
+                                    "browser acquisition exceeded duration deadline "
+                                    f"before readiness for provider {provider_id}"
+                                )
+                                raise RetryableSourceError(msg)
                             wait_for_readiness(
                                 page,
                                 predicate=readiness_predicate,
                                 page_route_id=page_route_id,
                             )
+                            remaining_ms = max(
+                                0,
+                                int((deadline - self._clock()).total_seconds() * 1000),
+                            )
+                            dwell_ms = min(self._dwell_after_readiness_ms, remaining_ms)
+                            if dwell_ms > 0:
+                                page.wait_for_timeout(dwell_ms)
                         except ReadinessBlockedError as exc:
                             block_reason = exc.block_reason
                             pages.append(
@@ -210,8 +253,8 @@ class PlaywrightBrowserSession:
                                 )
                             )
                             break
-                        except RetryableSourceError as exc:
-                            raise_for_classified_error(classify_navigation_timeout(str(exc)))
+                        except RetryableSourceError:
+                            raise
                         except PlaywrightError as exc:
                             message = f"incomplete page load for {page_route_id}: {exc}"
                             raise RetryableSourceError(message) from exc
@@ -248,6 +291,7 @@ class PlaywrightBrowserSession:
                             block_reason = detected
                             break
                 finally:
+                    # Bounded cleanup may briefly exceed the acquisition deadline.
                     context.close()
                     browser.close()
         except RetryableSourceError:
@@ -268,6 +312,7 @@ class PlaywrightBrowserSession:
             diagnostics=(),
             block_reason=block_reason,
             warnings=tuple(sorted(set(warnings))),
+            cookie_banner_dismissed=cookie_banner_dismissed,
         )
 
 
@@ -288,6 +333,7 @@ class RecordingBrowserSession:
         start_urls: Sequence[tuple[str, str]],
         observed_at_utc: datetime,
         browser_mode: BrowserMode,
+        deadline_at_utc: datetime | None = None,
     ) -> BrowserAcquisitionResult:
         for _, url in start_urls:
             validate_provider_navigation_url(url, allowed_hostnames=allowed_hostnames)
@@ -298,6 +344,7 @@ class RecordingBrowserSession:
                 "acquisition_cycle_id": acquisition_cycle_id,
                 "browser_mode": browser_mode,
                 "start_urls": list(start_urls),
+                "deadline_at_utc": deadline_at_utc,
             }
         )
         return self._result

@@ -141,7 +141,7 @@ def test_betano_blocked_attempts_betclic(tmp_path: Path) -> None:
     assert result.fallback_decision.selected_provider == PROVIDER_BETCLIC_PT
 
 
-def test_retryable_betano_continues_to_betclic(tmp_path: Path) -> None:
+def test_retryable_betano_preserves_betclic_and_requests_retry(tmp_path: Path) -> None:
     ensure_database_ready(tmp_path / "db.sqlite3")
     service = MagicMock()
 
@@ -151,14 +151,148 @@ def test_retryable_betano_continues_to_betclic(tmp_path: Path) -> None:
         return _result(provider_id=PROVIDER_BETCLIC_PT)
 
     service.ingest.side_effect = _ingest
+    with pytest.raises(RetryableJobError, match="betano-pt"):
+        _orchestrator(tmp_path, _settings(), service).run_autonomous_cycle(
+            sport="football",
+            acquisition_cycle_id="cycle-3",
+            attempt_number=1,
+            maximum_attempts=2,
+        )
+    assert service.ingest.call_count == 2
+    assert {call.kwargs["provider_id"] for call in service.ingest.call_args_list} == {
+        PROVIDER_BETANO_PT,
+        PROVIDER_BETCLIC_PT,
+    }
+    assert service.ingest.call_args_list[0].kwargs["acquisition_cycle_id"] == "cycle-3-betano"
+    assert service.ingest.call_args_list[1].kwargs["acquisition_cycle_id"] == "cycle-3-betclic"
+
+
+def test_retryable_betclic_preserves_betano_and_requests_retry(tmp_path: Path) -> None:
+    ensure_database_ready(tmp_path / "db.sqlite3")
+    service = MagicMock()
+
+    def _ingest(**kwargs):
+        if kwargs["provider_id"] == PROVIDER_BETCLIC_PT:
+            raise RetryableJobError("source timeout")
+        return _result(provider_id=PROVIDER_BETANO_PT)
+
+    service.ingest.side_effect = _ingest
+    with pytest.raises(RetryableJobError, match="betclic-pt"):
+        _orchestrator(tmp_path, _settings(), service).run_autonomous_cycle(
+            sport="football",
+            acquisition_cycle_id="cycle-retry-betclic",
+            attempt_number=1,
+            maximum_attempts=2,
+        )
+    assert service.ingest.call_count == 2
+
+
+def test_one_success_other_retry_exhaustion_finalizes(tmp_path: Path) -> None:
+    ensure_database_ready(tmp_path / "db.sqlite3")
+    service = MagicMock()
+
+    def _ingest(**kwargs):
+        if kwargs["provider_id"] == PROVIDER_BETANO_PT:
+            return _result(provider_id=PROVIDER_BETANO_PT)
+        raise RetryableJobError("source timeout")
+
+    service.ingest.side_effect = _ingest
     result = _orchestrator(tmp_path, _settings(), service).run_autonomous_cycle(
         sport="football",
-        acquisition_cycle_id="cycle-3",
-        attempt_number=1,
+        acquisition_cycle_id="cycle-exhaust",
+        attempt_number=2,
         maximum_attempts=2,
     )
-    assert service.ingest.call_count == 2
+    assert result.betano_result is not None
+    assert result.betclic_result is None
+    assert any(
+        item.provider_id == PROVIDER_BETCLIC_PT and not item.outcome.success
+        for item in result.provider_sub_attempts
+    )
+
+
+def test_provider_sub_cycle_ids_are_exact_and_unique() -> None:
+    from sports_analytics.bookmakers.orchestration import provider_sub_cycle_id
+
+    logical = "cycle-abc-pt"
+    betano = provider_sub_cycle_id(logical, PROVIDER_BETANO_PT)
+    betclic = provider_sub_cycle_id(logical, PROVIDER_BETCLIC_PT)
+    assert betano == "cycle-abc-pt-betano"
+    assert betclic == "cycle-abc-pt-betclic"
+    assert betano != betclic
+    assert not betano.endswith("-pt")
+    assert betano.rsplit("-", 1)[-1] == "betano"
+
+
+def test_lifecycle_timestamps_preserve_schedule_separately(tmp_path: Path) -> None:
+    ensure_database_ready(tmp_path / "db.sqlite3")
+    service = MagicMock()
+    service.ingest.return_value = _result(provider_id=PROVIDER_BETANO_PT)
+    scheduled = NOW - timedelta(minutes=5)
+    enqueued = NOW - timedelta(minutes=1)
+    result = _orchestrator(
+        tmp_path,
+        _settings(selection_mode=SelectionMode.BETANO.value),
+        service,
+    ).run_autonomous_cycle(
+        sport="football",
+        acquisition_cycle_id="cycle-ts",
+        scheduled_for_utc=scheduled,
+        enqueued_at_utc=enqueued,
+        observed_at_utc=NOW,
+    )
+    assert result.lifecycle is not None
+    assert result.lifecycle.scheduled_for_utc == scheduled
+    assert result.lifecycle.enqueued_at_utc == enqueued
+    assert result.lifecycle.acquisition_started_at_utc == NOW
+    assert result.lifecycle.acquisition_finished_at_utc == NOW
+    assert result.lifecycle.scheduled_for_utc != result.lifecycle.provider_response_observed_at_utc
+
+
+def test_exact_replay_after_restart_reuses_success_without_rerunning_browser(
+    tmp_path: Path,
+) -> None:
+    """Simulate process restart: second attempt returns existing successful run only."""
+    ensure_database_ready(tmp_path / "db.sqlite3")
+    betano_success = _result(provider_id=PROVIDER_BETANO_PT)
+    betclic_success = _result(provider_id=PROVIDER_BETCLIC_PT)
+    calls: list[str] = []
+
+    def _ingest(**kwargs):
+        provider_id = kwargs["provider_id"]
+        calls.append(provider_id)
+        if provider_id == PROVIDER_BETANO_PT:
+            if len([item for item in calls if item == PROVIDER_BETANO_PT]) == 1:
+                raise RetryableJobError("timeout")
+            return betano_success
+        return betclic_success
+
+    service = MagicMock()
+    service.ingest.side_effect = _ingest
+    orchestrator = _orchestrator(tmp_path, _settings(), service)
+    with pytest.raises(RetryableJobError):
+        orchestrator.run_autonomous_cycle(
+            sport="football",
+            acquisition_cycle_id="cycle-replay-partial",
+            attempt_number=1,
+            maximum_attempts=2,
+        )
+    # Restarted process: successful Betclic returns via service idempotency;
+    # Betano is retried. Mock simulates that by succeeding on second Betano call.
+    result = orchestrator.run_autonomous_cycle(
+        sport="football",
+        acquisition_cycle_id="cycle-replay-partial",
+        attempt_number=2,
+        maximum_attempts=2,
+    )
+    assert result.betano_result is not None
     assert result.betclic_result is not None
+    assert calls.count(PROVIDER_BETANO_PT) == 2
+    assert calls.count(PROVIDER_BETCLIC_PT) == 2
+    assert {call.kwargs["acquisition_cycle_id"] for call in service.ingest.call_args_list} == {
+        "cycle-replay-partial-betano",
+        "cycle-replay-partial-betclic",
+    }
 
 
 def test_both_retryable_re_raises_when_no_success(tmp_path: Path) -> None:

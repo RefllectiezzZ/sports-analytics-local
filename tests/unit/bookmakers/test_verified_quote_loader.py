@@ -69,3 +69,92 @@ def test_snapshot_id_string_alone_is_insufficient_without_loader(tmp_path: Path)
                 raw_directory=raw,
                 snapshot_id="00000000-0000-0000-0000-000000000000",
             )
+
+
+def _rewrite_parquet(path: Path, mutator) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path)
+    rows = table.to_pylist()
+    mutator(rows)
+    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
+
+
+def test_loader_rejects_tampered_source_participant_provider(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("source_participants.parquet"))
+    _rewrite_parquet(path, lambda rows: rows[0].__setitem__("source_name", "other-provider"))
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="provider identity mismatch|checksum"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_loader_rejects_tampered_source_event_sport(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("source_events.parquet"))
+    _rewrite_parquet(path, lambda rows: rows[0].__setitem__("sport_code", "tennis"))
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="sport mismatch|checksum"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_loader_rejects_tampered_eligibility_line(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("comparison_eligibility.parquet"))
+    _rewrite_parquet(path, lambda rows: rows[0].__setitem__("line_value", "99.5"))
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="eligibility|checksum"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_loader_rejects_tampered_canonical_event_participants(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("canonical_events.parquet"))
+    _rewrite_parquet(
+        path,
+        lambda rows: rows[0].__setitem__("home_canonical_participant_id", "tampered-home"),
+    )
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="participant|checksum|mismatch"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_loader_exposes_catalogue_not_public_constructor(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    with connect_database(database) as connection:
+        loaded = load_verified_bookmaker_quotes(
+            database_connection=connection,
+            snapshots_directory=snapshots,
+            raw_directory=raw,
+            snapshot_id=snapshot_id,
+        )
+    assert loaded.catalogue is not None
+    assert loaded.catalogue.snapshot_id == snapshot_id
+    assert "build_verified_quote_from_loaded_row" not in dir(
+        __import__("sports_analytics.bookmakers.verified_evidence", fromlist=["*"])
+    )
+    from sports_analytics.bookmakers import loader as loader_mod
+
+    assert hasattr(loader_mod, "_build_verified_quote_from_loaded_row")
+    assert not hasattr(loader_mod, "build_verified_quote_from_loaded_row")

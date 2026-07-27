@@ -15,7 +15,7 @@ from sports_analytics.bookmakers.types import (
     PROVIDER_BETANO_PT,
     PROVIDER_BETCLIC_PT,
 )
-from sports_analytics.core.cli import SUCCESS_EXIT
+from sports_analytics.core.cli import FAILURE_EXIT, SUCCESS_EXIT
 from sports_analytics.core.exceptions import (
     ConfigurationError,
     DatabaseError,
@@ -308,9 +308,22 @@ def smoke_bookmaker_cli(
                 "profile_verified": result.profile_verified,
                 "diagnostic_relative_path": result.diagnostic_relative_path,
                 "acceptance_summary": result.acceptance_summary,
+                "cycles": [
+                    {
+                        "cycle_number": cycle.cycle_number,
+                        "acquisition_cycle_id": cycle.acquisition_cycle_id,
+                        "events_extracted": cycle.events_extracted,
+                        "valid_quote_count": cycle.valid_quote_count,
+                        "snapshot_id": cycle.snapshot_id,
+                        "snapshot_verified": cycle.snapshot_verified,
+                        "snapshot_reused": cycle.snapshot_reused,
+                        "duration_seconds": cycle.duration_seconds,
+                    }
+                    for cycle in result.cycles
+                ],
             },
             sort_keys=True,
             separators=(",", ":"),
         )
     )
-    return SUCCESS_EXIT
+    return SUCCESS_EXIT if result.succeeded else FAILURE_EXIT

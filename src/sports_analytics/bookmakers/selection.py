@@ -19,7 +19,11 @@ from sports_analytics.bookmakers.types import (
     QuoteSelectionReason,
     SelectionMode,
 )
-from sports_analytics.bookmakers.verified_evidence import VerifiedBookmakerQuote
+from sports_analytics.bookmakers.verified_evidence import (
+    VerifiedBookmakerQuote,
+    VerifiedQuoteCatalogue,
+    require_catalogue_quote,
+)
 from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.sports.contracts import require_utc
 
@@ -98,11 +102,25 @@ def select_quote_pair(
     betclic_quote: VerifiedBookmakerQuote | None,
     policy: BookmakerSelectionPolicy,
     evaluated_at_utc: datetime,
+    *,
+    betano_catalogue: VerifiedQuoteCatalogue | None = None,
+    betclic_catalogue: VerifiedQuoteCatalogue | None = None,
 ) -> BookmakerQuoteComparison:
-    """Select a bookmaker quote under the configured preference policy."""
+    """Select a bookmaker quote under the configured preference policy.
+
+    When catalogues are supplied, quotes must be exact loader catalogue members.
+    """
     compared_at = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
-    betano_verified = _validated_verified_side(betano_quote, expected=PROVIDER_BETANO_PT)
-    betclic_verified = _validated_verified_side(betclic_quote, expected=PROVIDER_BETCLIC_PT)
+    betano_verified = _validated_verified_side(
+        betano_quote,
+        expected=PROVIDER_BETANO_PT,
+        catalogue=betano_catalogue,
+    )
+    betclic_verified = _validated_verified_side(
+        betclic_quote,
+        expected=PROVIDER_BETCLIC_PT,
+        catalogue=betclic_catalogue,
+    )
     betano = (
         None
         if betano_verified is None
@@ -305,12 +323,15 @@ def _validated_verified_side(
     quote: VerifiedBookmakerQuote | None,
     *,
     expected: str,
+    catalogue: VerifiedQuoteCatalogue | None = None,
 ) -> VerifiedBookmakerQuote | None:
     if quote is None:
         return None
     if quote.provider_id != expected:
         msg = f"expected provider {expected}, got {quote.provider_id}"
         raise PermanentSourceError(msg)
+    if catalogue is not None:
+        return require_catalogue_quote(quote, catalogue=catalogue)
     return quote
 
 

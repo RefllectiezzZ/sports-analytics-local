@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from sports_analytics.bookmakers.canonical_mapping import quote_is_comparable
 from sports_analytics.bookmakers.markets import (
     UnknownProviderMarket,
     canonical_selection,
@@ -90,6 +91,15 @@ class ComparisonEligibilityRecord:
     provider_id: str
     eligible: bool
     reason: str | None
+    quote_observation_id: str = ""
+    line_type: str = "none"
+    line_value: str | None = None
+    market_period: str = "full-match"
+    participant_scope: str = "event"
+    canonical_participant_id: str | None = None
+    overtime_scope: str | None = None
+    rules_scope: str | None = None
+    comparable: bool = False
     schema_version: str = BOOKMAKER_SCHEMA_VERSION
 
 
@@ -506,14 +516,35 @@ def _build_quotes(
                             schema_version=BOOKMAKER_SCHEMA_VERSION,
                         )
                     )
+                    line_value = (
+                        None
+                        if mapped.definition.line_value is None
+                        else format(mapped.definition.line_value, "f")
+                    )
+                    overtime_scope = market.overtime_scope
+                    rules_scope = market.rules_scope
+                    comparable = quote_is_comparable(
+                        definition_id=mapped.definition_id,
+                        overtime_scope=overtime_scope,
+                        rules_scope=rules_scope,
+                    )
                     eligibility.append(
                         ComparisonEligibilityRecord(
                             canonical_event_id=recon.canonical_event_id,
                             canonical_market_definition_id=mapped.definition_id,
                             canonical_selection_id=outcome_key,
                             provider_id=bundle.provider_id,
-                            eligible=True,
-                            reason=None,
+                            eligible=comparable,
+                            reason=None if comparable else "unknown-rules-or-overtime-scope",
+                            quote_observation_id=observation_id,
+                            line_type=mapped.definition.line_type,
+                            line_value=line_value,
+                            market_period=mapped.definition.market_period,
+                            participant_scope=mapped.definition.participant_scope,
+                            canonical_participant_id=mapped.definition.canonical_participant_id,
+                            overtime_scope=overtime_scope,
+                            rules_scope=rules_scope,
+                            comparable=comparable,
                         )
                     )
     return quotes, tuple(unknown), eligibility

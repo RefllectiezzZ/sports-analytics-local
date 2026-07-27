@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -113,6 +113,7 @@ def probe_bookmaker(
     output_dir = resolve_diagnostic_directory(diagnostic_directory)
     started = time.monotonic()
     now = datetime.now(tz=UTC) if clock is None else clock()
+    deadline = now + timedelta(seconds=duration_seconds)
     browser_session = session or PlaywrightBrowserSession(clock=(lambda: now))
     acquisition = browser_session.acquire(
         provider_id=provider_id,
@@ -122,8 +123,10 @@ def probe_bookmaker(
         start_urls=routes,
         observed_at_utc=now,
         browser_mode=BrowserMode.VISIBLE,
+        deadline_at_utc=deadline,
     )
-    elapsed = min(time.monotonic() - started, float(duration_seconds))
+    # Report actual elapsed duration; do not clamp with min().
+    elapsed = time.monotonic() - started
     responses = tuple(_response_evidence(item) for item in acquisition.responses)
     pages = tuple(_page_evidence(item) for item in acquisition.pages)
     result = ProbeResult(
@@ -179,23 +182,11 @@ def collect_probe_from_acquisition(
     )
 
 
-def handle_cookie_consent(page: Any) -> bool:
+def handle_cookie_consent(page: Any, *, provider_id: str) -> bool:
     """Dismiss ordinary cookie banners when they block public content."""
-    selectors = (
-        "button:has-text('Aceitar')",
-        "button:has-text('Accept')",
-        "button:has-text('Concordo')",
-        "#onetrust-accept-btn-handler",
-    )
-    for selector in selectors:
-        try:
-            locator = page.locator(selector)
-            if locator.count() > 0:
-                locator.first.click(timeout=1000)
-                return True
-        except Exception:  # noqa: BLE001
-            continue
-    return False
+    from sports_analytics.sources.browser.cookie_consent import dismiss_cookie_consent
+
+    return dismiss_cookie_consent(page, provider_id=provider_id)
 
 
 def _response_evidence(item: BrowserResponseObservation) -> ProbeResponseEvidence:

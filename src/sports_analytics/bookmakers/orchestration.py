@@ -29,6 +29,31 @@ from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.repositories.bookmakers import BookmakerRepository
 from sports_analytics.data.types import JsonValue, normalize_uuid
 
+_PROVIDER_CYCLE_SUFFIX: dict[str, str] = {
+    PROVIDER_BETANO_PT: "betano",
+    PROVIDER_BETCLIC_PT: "betclic",
+}
+
+
+def provider_sub_cycle_id(logical_cycle_id: str, provider_id: str) -> str:
+    """Return the deterministic provider sub-attempt cycle identity."""
+    suffix = _PROVIDER_CYCLE_SUFFIX.get(provider_id)
+    if suffix is None:
+        msg = f"unsupported provider for sub-cycle identity: {provider_id}"
+        raise PermanentJobError(msg)
+    return f"{logical_cycle_id}-{suffix}"
+
+
+@dataclass(frozen=True, slots=True)
+class CycleLifecycleTimestamps:
+    """Exact autonomous cycle lifecycle timestamps."""
+
+    scheduled_for_utc: datetime | None
+    enqueued_at_utc: datetime | None
+    acquisition_started_at_utc: datetime
+    provider_response_observed_at_utc: datetime | None
+    acquisition_finished_at_utc: datetime
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderSubAttempt:
@@ -52,6 +77,7 @@ class OrchestratedAcquisitionResult:
     betclic_result: BookmakerIngestionResult | None
     selected_result: BookmakerIngestionResult | None
     provider_sub_attempts: tuple[ProviderSubAttempt, ...] = ()
+    lifecycle: CycleLifecycleTimestamps | None = None
 
 
 class BookmakerAcquisitionOrchestrator:
@@ -81,6 +107,7 @@ class BookmakerAcquisitionOrchestrator:
         acquisition_cycle_id: str | None = None,
         observed_at_utc: datetime | None = None,
         scheduled_for_utc: datetime | None = None,
+        enqueued_at_utc: datetime | None = None,
         actor: str = "bookmaker-orchestrator",
         attempt_number: int = 1,
         maximum_attempts: int = 2,
@@ -89,17 +116,24 @@ class BookmakerAcquisitionOrchestrator:
         cycle_id = (
             acquisition_cycle_id if acquisition_cycle_id is not None else normalize_uuid(None)
         )
-        now = self._normalize_utc(self._clock())
-        observed_at = self._normalize_utc(observed_at_utc) if observed_at_utc is not None else now
-        _ = scheduled_for_utc
+        started_at = self._normalize_utc(self._clock())
+        scheduled = (
+            self._normalize_utc(scheduled_for_utc) if scheduled_for_utc is not None else None
+        )
+        enqueued = self._normalize_utc(enqueued_at_utc) if enqueued_at_utc is not None else None
+        # Provider response observation time is captured by the browser session /
+        # ingestion path, never substituted with the scheduled slot identity.
+        observed_at = self._normalize_utc(observed_at_utc) if observed_at_utc is not None else None
         providers = _providers_for_selection_mode(self._bookmakers)
         sub_attempts: list[ProviderSubAttempt] = []
         retryable_providers: list[str] = []
         betano_result: BookmakerIngestionResult | None = None
         betclic_result: BookmakerIngestionResult | None = None
+        provider_observed_at: datetime | None = None
 
         for provider_id in providers:
-            if not self._provider_eligible(provider_id=provider_id, sport=sport, now=now):
+            sub_cycle_id = provider_sub_cycle_id(cycle_id, provider_id)
+            if not self._provider_eligible(provider_id=provider_id, sport=sport, now=started_at):
                 outcome = ProviderAttemptOutcome(
                     provider_id=provider_id,
                     success=False,
@@ -109,44 +143,47 @@ class BookmakerAcquisitionOrchestrator:
                 sub_attempts.append(
                     ProviderSubAttempt(
                         provider_id=provider_id,
-                        acquisition_cycle_id=f"{cycle_id}-{provider_id.rsplit('-', 1)[-1]}",
+                        acquisition_cycle_id=sub_cycle_id,
                         result=None,
                         outcome=outcome,
                         skipped_cooldown=True,
                     )
                 )
                 continue
-            sub_cycle_id = f"{cycle_id}-{provider_id.rsplit('-', 1)[-1]}"
             try:
                 result = self._ingest_provider(
                     provider_id=provider_id,
                     sport=sport,
                     acquisition_cycle_id=sub_cycle_id,
-                    observed_at_utc=observed_at,
+                    observed_at_utc=observed_at if observed_at is not None else started_at,
                     actor=actor,
                     attempt_number=attempt_number,
                     maximum_attempts=maximum_attempts,
                 )
             except RetryableJobError:
+                outcome = ProviderAttemptOutcome(
+                    provider_id=provider_id,
+                    success=False,
+                    failure_classification=FailureClassification.RETRYABLE,
+                    block_or_failure_code="retryable-source-error",
+                )
+                sub_attempts.append(
+                    ProviderSubAttempt(
+                        provider_id=provider_id,
+                        acquisition_cycle_id=sub_cycle_id,
+                        result=None,
+                        outcome=outcome,
+                    )
+                )
                 if attempt_number < maximum_attempts:
                     retryable_providers.append(provider_id)
-                    outcome = ProviderAttemptOutcome(
-                        provider_id=provider_id,
-                        success=False,
-                        failure_classification=FailureClassification.RETRYABLE,
-                        block_or_failure_code="retryable-source-error",
-                    )
-                    sub_attempts.append(
-                        ProviderSubAttempt(
-                            provider_id=provider_id,
-                            acquisition_cycle_id=sub_cycle_id,
-                            result=None,
-                            outcome=outcome,
-                        )
-                    )
-                    continue
-                raise
+                continue
             outcome = _outcome_from_result(result, provider_id=provider_id)
+            if result.observed_at_utc:
+                try:
+                    provider_observed_at = parse_utc_timestamp(result.observed_at_utc)
+                except Exception:  # noqa: BLE001
+                    provider_observed_at = provider_observed_at
             sub_attempts.append(
                 ProviderSubAttempt(
                     provider_id=provider_id,
@@ -160,10 +197,22 @@ class BookmakerAcquisitionOrchestrator:
             elif provider_id == PROVIDER_BETCLIC_PT:
                 betclic_result = result
 
-        if retryable_providers and not _any_success(sub_attempts):
+        # Preserve successful providers while requesting a retry for unfinished
+        # retryable providers. Successful provider sub-cycles are idempotent on
+        # replay via acquisition_cycle_id (service returns the existing run).
+        if retryable_providers and attempt_number < maximum_attempts:
             raise RetryableJobError(
-                f"retryable failures for providers: {','.join(sorted(retryable_providers))}"
+                "retryable provider sub-attempts remain: " + ",".join(sorted(retryable_providers))
             )
+
+        finished_at = self._normalize_utc(self._clock())
+        lifecycle = CycleLifecycleTimestamps(
+            scheduled_for_utc=scheduled,
+            enqueued_at_utc=enqueued,
+            acquisition_started_at_utc=started_at,
+            provider_response_observed_at_utc=provider_observed_at,
+            acquisition_finished_at_utc=finished_at,
+        )
 
         betano_attempt = _attempt_for_provider(sub_attempts, PROVIDER_BETANO_PT)
         betclic_attempt = _attempt_for_provider(sub_attempts, PROVIDER_BETCLIC_PT)
@@ -196,6 +245,7 @@ class BookmakerAcquisitionOrchestrator:
             betclic_result=betclic_result,
             selected_result=selected,
             provider_sub_attempts=tuple(sub_attempts),
+            lifecycle=lifecycle,
         )
 
     def _provider_eligible(self, *, provider_id: str, sport: str, now: datetime) -> bool:
