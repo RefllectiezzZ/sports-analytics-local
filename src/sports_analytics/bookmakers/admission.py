@@ -21,6 +21,33 @@ class AdmissionOutcome(StrEnum):
     FAILED = "failed"
 
 
+#: Drift codes that remain auditable without blocking an otherwise valid cycle.
+_INFORMATIONAL_DRIFT_CODES: frozenset[str] = frozenset(
+    {
+        "unknown-market",
+        "live-event-excluded",
+        "non-football-excluded",
+        "non-prematch-excluded",
+        "malformed-event-reference",
+        "malformed-market-reference",
+        "malformed-selection-reference",
+        "malformed-market-list",
+        "malformed-selection-list",
+        "malformed-event",
+        "malformed-market",
+        "malformed-selection",
+        "event-without-supported-markets",
+        "participant-count-rejected",
+        "participant-identity-rejected",
+        "selection-mapping-rejected",
+        "market-typeid-mismatch",
+        "missing-total-line",
+        "contradictory-line",
+        "duplicate-selection-id",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AdmissionDecision:
     """Explicit typed admission decision for one acquisition cycle."""
@@ -93,7 +120,10 @@ def evaluate_admission(
             may_replace_last_valid=False,
             warnings=warnings,
         )
-    if bundle.drift_codes:
+    blocking_drift = tuple(
+        sorted(code for code in bundle.drift_codes if code not in _INFORMATIONAL_DRIFT_CODES)
+    )
+    if blocking_drift:
         return AdmissionDecision(
             outcome=AdmissionOutcome.DRIFT_DETECTED,
             reason_code="parser-drift",

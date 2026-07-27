@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from sports_analytics.core.exceptions import PermanentSourceError
+from sports_analytics.core.exceptions import ParserError, PermanentSourceError
 from sports_analytics.sources.betano.catalog import (
     ADAPTER_VERSION,
     BETANO_CATALOG,
@@ -14,8 +14,8 @@ from sports_analytics.sources.betano.catalog import (
 )
 from sports_analytics.sources.bookmaker_catalog import reject_forbidden_job_controls
 from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
-from sports_analytics.sources.bookmaker_extraction.betano_topeventsv2 import looks_like_topeventsv2
 from sports_analytics.sources.bookmaker_extraction.adapter_contract import load_json_payload
+from sports_analytics.sources.bookmaker_extraction.betano_topeventsv2 import looks_like_topeventsv2
 from sports_analytics.sources.bookmaker_extraction.contracts import ExtractionProfile
 from sports_analytics.sources.bookmaker_extraction.pipeline import apply_extraction_profile
 from sports_analytics.sources.bookmaker_extraction.registry import get_verified_extraction_profile
@@ -25,7 +25,6 @@ from sports_analytics.sources.browser.playwright_runtime import (
     PlaywrightBrowserSession,
 )
 from sports_analytics.sources.raw_capture import BookmakerRawCapture, BookmakerRawCaptureStore
-from sports_analytics.core.exceptions import ParserError
 
 
 def acquire_betano_current_odds(

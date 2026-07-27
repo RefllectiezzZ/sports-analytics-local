@@ -91,6 +91,117 @@ def test_empty_unverified_extraction_rejected() -> None:
     assert decision.may_replace_last_valid is False
 
 
+def test_informational_drift_codes_do_not_block_admission() -> None:
+    from datetime import timedelta
+
+    from sports_analytics.sources.bookmaker_contracts import (
+        ProviderEventObservation,
+        ProviderEventState,
+        ProviderParticipantObservation,
+    )
+
+    event = ProviderEventObservation(
+        source_event_id="e1",
+        source_competition_id="c1",
+        sport="football",
+        scheduled_start_utc=OBSERVED + timedelta(hours=2),
+        event_state=ProviderEventState.PRE_MATCH,
+        participants=(
+            ProviderParticipantObservation(
+                source_participant_id="p1",
+                display_name="Home",
+                role="home",
+            ),
+            ProviderParticipantObservation(
+                source_participant_id="p2",
+                display_name="Away",
+                role="away",
+            ),
+        ),
+        markets=(),
+        source_page_route_id="football-prematch",
+    )
+    bundle = ProviderAcquisitionBundle(
+        provider_id="betano-pt",
+        adapter_version="betano-pt-adapter-v1",
+        acquisition_cycle_id="cycle-1",
+        observed_at_utc=OBSERVED,
+        sport="football",
+        events=(event,),
+        warnings=(),
+        drift_codes=(
+            "live-event-excluded",
+            "malformed-market-reference",
+            "non-football-excluded",
+            "unknown-market",
+        ),
+        provenance=(),
+    )
+    decision = evaluate_admission(
+        browser_result=_browser(),
+        bundle=bundle,
+        normalized=_normalized(),
+        valid_quote_count=2,
+        unresolved_event_count=0,
+        verified_extraction_applied=True,
+    )
+    assert decision.outcome is AdmissionOutcome.ADMITTED
+    assert decision.may_publish is True
+
+
+def test_blocking_drift_still_fails_closed() -> None:
+    from datetime import timedelta
+
+    from sports_analytics.sources.bookmaker_contracts import (
+        ProviderEventObservation,
+        ProviderEventState,
+        ProviderParticipantObservation,
+    )
+
+    event = ProviderEventObservation(
+        source_event_id="e1",
+        source_competition_id="c1",
+        sport="football",
+        scheduled_start_utc=OBSERVED + timedelta(hours=2),
+        event_state=ProviderEventState.PRE_MATCH,
+        participants=(
+            ProviderParticipantObservation(
+                source_participant_id="p1",
+                display_name="Home",
+                role="home",
+            ),
+            ProviderParticipantObservation(
+                source_participant_id="p2",
+                display_name="Away",
+                role="away",
+            ),
+        ),
+        markets=(),
+        source_page_route_id="football-prematch",
+    )
+    bundle = ProviderAcquisitionBundle(
+        provider_id="betano-pt",
+        adapter_version="betano-pt-adapter-v1",
+        acquisition_cycle_id="cycle-1",
+        observed_at_utc=OBSERVED,
+        sport="football",
+        events=(event,),
+        warnings=(),
+        drift_codes=("schema-version-mismatch",),
+        provenance=(),
+    )
+    decision = evaluate_admission(
+        browser_result=_browser(),
+        bundle=bundle,
+        normalized=_normalized(),
+        valid_quote_count=2,
+        unresolved_event_count=0,
+        verified_extraction_applied=True,
+    )
+    assert decision.outcome is AdmissionOutcome.DRIFT_DETECTED
+    assert decision.may_publish is False
+
+
 def test_partial_never_replaces_valid_snapshot() -> None:
     from datetime import timedelta
 

@@ -314,6 +314,10 @@ def _verify_semantic_datasets(
         event_reconciliations=event_reconciliations,
         sport_code=sport_code,
         provider_id=provider_id,
+        capture_checksums=capture_checksums,
+        source_participants=source_participants,
+        participant_reconciliations=participant_reconciliations,
+        canonical_events=events,
     )
 
     if len(events) < 1 or len(quotes) < 1:
@@ -368,6 +372,20 @@ def _verify_semantic_datasets(
         source_event_id = str(row.get("source_event_id", ""))
         if not source_event_id:
             raise SnapshotVerificationError("quote requires source_event_id")
+        source_event_rows = [
+            item for item in source_events if str(item.get("source_event_id")) == source_event_id
+        ]
+        if len(source_event_rows) != 1:
+            raise SnapshotVerificationError("quote source_event_id missing from source events")
+        source_event = source_event_rows[0]
+        if str(source_event.get("source_name")) != provider_id:
+            raise SnapshotVerificationError("quote source event provider mismatch")
+        if str(source_event.get("sport_code")) != sport_code:
+            raise SnapshotVerificationError("quote source event sport mismatch")
+        if str(source_event.get("canonical_event_id")) != identity.canonical_event_id:
+            raise SnapshotVerificationError(
+                "quote canonical event does not match reconciled source event"
+            )
         eligibility_row = eligibility_by_observation[identity.quote_observation_id]
         overtime_scope = (
             None
@@ -460,6 +478,10 @@ def _verify_source_event_graph(
     event_reconciliations: list[dict[str, Any]],
     sport_code: str,
     provider_id: str,
+    capture_checksums: set[str],
+    source_participants: list[dict[str, Any]],
+    participant_reconciliations: list[dict[str, Any]],
+    canonical_events: list[dict[str, Any]],
 ) -> set[str]:
     source_ids = {str(row["source_event_id"]) for row in source_events}
     if len(source_ids) != len(source_events):
@@ -467,6 +489,11 @@ def _verify_source_event_graph(
     reconciliation_by_source = {str(row["source_event_id"]): row for row in event_reconciliations}
     if set(reconciliation_by_source) != source_ids:
         raise SnapshotVerificationError("event reconciliation coverage mismatch")
+    participant_ids = {str(row["source_participant_id"]) for row in source_participants}
+    participant_recon_by_source = {
+        str(row["source_participant_id"]): row for row in participant_reconciliations
+    }
+    canonical_by_id = {str(row["canonical_event_id"]): row for row in canonical_events}
     resolved_event_ids: set[str] = set()
     for row in source_events:
         if str(row.get("source_name")) != provider_id:
@@ -475,10 +502,21 @@ def _verify_source_event_graph(
             raise SnapshotVerificationError("source event sport mismatch")
         if row.get("source_observed_at_utc") is None:
             raise SnapshotVerificationError("source event requires source_observed_at_utc")
+        source_checksum = row.get("source_file_sha256")
+        if not isinstance(source_checksum, str) or source_checksum not in capture_checksums:
+            raise SnapshotVerificationError(
+                "source event source_file_sha256 mismatch with capture manifest"
+            )
         home_source = row.get("home_source_participant_id")
         away_source = row.get("away_source_participant_id")
         if home_source is None or away_source is None:
             raise SnapshotVerificationError("source event requires participant references")
+        home_source_id = str(home_source)
+        away_source_id = str(away_source)
+        if home_source_id not in participant_ids or away_source_id not in participant_ids:
+            raise SnapshotVerificationError(
+                "source event participant references missing from source participants"
+            )
         reconciliation = reconciliation_by_source[str(row["source_event_id"])]
         if str(reconciliation.get("source_name")) != provider_id:
             raise SnapshotVerificationError("event reconciliation provider mismatch")
@@ -505,6 +543,27 @@ def _verify_source_event_graph(
         if home_canonical is None or away_canonical is None:
             raise SnapshotVerificationError(
                 "resolved source event requires canonical participant correspondence"
+            )
+        home_recon = participant_recon_by_source[home_source_id]
+        away_recon = participant_recon_by_source[away_source_id]
+        if str(home_recon.get("canonical_participant_id")) != str(home_canonical):
+            raise SnapshotVerificationError(
+                "home source participant reconciliation does not match event home canonical"
+            )
+        if str(away_recon.get("canonical_participant_id")) != str(away_canonical):
+            raise SnapshotVerificationError(
+                "away source participant reconciliation does not match event away canonical"
+            )
+        canonical_event = canonical_by_id.get(str(canonical_event_id))
+        if canonical_event is None:
+            raise SnapshotVerificationError("canonical event missing for reconciled source event")
+        if str(canonical_event.get("home_canonical_participant_id")) != str(home_canonical):
+            raise SnapshotVerificationError(
+                "canonical event home participant mismatch with source event"
+            )
+        if str(canonical_event.get("away_canonical_participant_id")) != str(away_canonical):
+            raise SnapshotVerificationError(
+                "canonical event away participant mismatch with source event"
             )
         resolved_event_ids.add(str(canonical_event_id))
     return resolved_event_ids
@@ -601,6 +660,18 @@ def _build_verified_quote_from_loaded_row(
     )
     if comparable != expected_comparable:
         raise SnapshotVerificationError("eligibility comparable flag mismatch with scopes")
+    market_status = quote_row.get("market_status")
+    selection_status = quote_row.get("selection_status")
+    if not isinstance(market_status, str) or not market_status.strip():
+        raise SnapshotVerificationError("quote row requires market_status")
+    if not isinstance(selection_status, str) or not selection_status.strip():
+        raise SnapshotVerificationError("quote row requires selection_status")
+    source_event_id = quote_row.get("source_event_id")
+    if not isinstance(source_event_id, str) or not source_event_id.strip():
+        raise SnapshotVerificationError("quote requires source_event_id")
+    source_file_sha256 = quote_row.get("source_file_sha256")
+    if not isinstance(source_file_sha256, str) or not source_file_sha256.strip():
+        raise SnapshotVerificationError("quote requires source_file_sha256")
     return VerifiedBookmakerQuote(
         snapshot_id=loaded_snapshot_id,
         snapshot_checksum_sha256=loaded_checksum_sha256,
@@ -609,11 +680,11 @@ def _build_verified_quote_from_loaded_row(
         identity=identity,
         decimal_odds=validate_decimal_odds(Decimal(str(quote_row["decimal_odds"]))),
         observed_at_utc=require_utc(observed_raw, field_name="source_observed_at_utc"),
-        market_status=str(quote_row.get("market_status", "open")),
-        selection_status=str(quote_row.get("selection_status", "active")),
-        source_file_sha256=str(quote_row.get("source_file_sha256", "")),
+        market_status=market_status,
+        selection_status=selection_status,
+        source_file_sha256=source_file_sha256,
         canonical_market_definition_id=canonical_market_definition_id,
         canonical_selection_id=str(quote_row.get("outcome_key", "")),
-        source_event_id=str(quote_row.get("source_event_id", "")),
+        source_event_id=source_event_id,
         comparable=comparable,
     )

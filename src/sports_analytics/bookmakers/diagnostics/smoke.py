@@ -211,6 +211,20 @@ def smoke_bookmaker(
                 diagnostic_directory=diagnostic_directory,
                 cycles=tuple(cycles),
             )
+        event_ids_with_quotes = {
+            quote.identity.canonical_event_id
+            for _, quote in loaded.verified_quotes_by_observation_id
+        }
+        if len(event_ids_with_quotes) < loaded.event_count:
+            return _failed_smoke(
+                provider_id=provider_id,
+                sport=sport,
+                reason="per-event-quote-coverage-failed",
+                profile_id=profile_id,
+                profile_verified=profile_verified,
+                diagnostic_directory=diagnostic_directory,
+                cycles=tuple(cycles),
+            )
         cycles.append(
             SmokeCycleResult(
                 cycle_number=cycle_number,
@@ -250,6 +264,17 @@ def smoke_bookmaker(
             diagnostic_directory=diagnostic_directory,
             cycles=tuple(cycles),
         )
+    refresh_or_reuse = _second_cycle_refresh_or_reuse_proven(tuple(cycles))
+    if refresh_or_reuse is None:
+        return _failed_smoke(
+            provider_id=provider_id,
+            sport=sport,
+            reason="second-cycle-refresh-or-reuse-unproven",
+            profile_id=profile_id,
+            profile_verified=profile_verified,
+            diagnostic_directory=diagnostic_directory,
+            cycles=tuple(cycles),
+        )
 
     summary = {
         "provider": provider_id,
@@ -261,6 +286,7 @@ def smoke_bookmaker(
         "profile_id": profile_id,
         "profile_verified": profile_verified,
         "second_cycle_reused_or_refreshed": True,
+        "second_cycle_proof": refresh_or_reuse,
     }
     artifact = _write_smoke_artifact(
         provider_id=provider_id,
@@ -296,14 +322,15 @@ def evaluate_fake_session_smoke(
     profile_id: str | None,
     valid_quote_count: int | None = None,
     snapshot_verified: bool = True,
+    snapshot_reused_second_cycle: bool = True,
 ) -> SmokeResult:
     """Evaluate smoke criteria from injected test evidence without live browser."""
     quotes = markets_with_odds if valid_quote_count is None else valid_quote_count
     succeeded = (
         profile_verified
         and events_extracted >= _MIN_EVENTS
-        and markets_with_odds >= _MIN_MARKETS_PER_EVENT * _MIN_EVENTS
-        and quotes >= 1
+        and markets_with_odds >= _MIN_MARKETS_PER_EVENT * events_extracted
+        and quotes >= events_extracted
         and snapshot_verified
     )
     failure = None if succeeded else "zero-events-or-odds"
@@ -329,14 +356,21 @@ def evaluate_fake_session_smoke(
                 events_extracted=events_extracted,
                 supported_market_count=markets_with_odds,
                 valid_quote_count=quotes,
-                snapshot_id="snap-test-2",
-                snapshot_checksum="b" * 64,
+                snapshot_id=("snap-test-1" if snapshot_reused_second_cycle else "snap-test-2"),
+                snapshot_checksum=("a" * 64 if snapshot_reused_second_cycle else "b" * 64),
                 snapshot_verified=True,
-                snapshot_reused=True,
+                snapshot_reused=snapshot_reused_second_cycle,
                 observed_at_utc="2026-07-26T12:01:00Z",
                 duration_seconds=1.0,
             ),
         )
+        refresh_or_reuse = _second_cycle_refresh_or_reuse_proven(cycles)
+        if refresh_or_reuse is None:
+            succeeded = False
+            failure = "second-cycle-refresh-or-reuse-unproven"
+            cycles = ()
+    else:
+        refresh_or_reuse = None
     summary = {
         "provider": provider_id,
         "sport": sport,
@@ -344,6 +378,8 @@ def evaluate_fake_session_smoke(
         "markets_with_odds": markets_with_odds,
         "profile_id": profile_id,
         "profile_verified": profile_verified,
+        "second_cycle_reused_or_refreshed": succeeded,
+        "second_cycle_proof": refresh_or_reuse,
     }
     return SmokeResult(
         provider=provider_id,
@@ -426,6 +462,37 @@ def _write_smoke_artifact(
     }
     path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
     return filename
+
+
+def _second_cycle_refresh_or_reuse_proven(cycles: tuple[SmokeCycleResult, ...]) -> str | None:
+    """Return proof label when cycle 2 is a real refresh or deterministic reuse."""
+    if len(cycles) != 2:
+        return None
+    first, second = cycles
+    if (
+        first.observed_at_utc is None
+        or second.observed_at_utc is None
+        or first.snapshot_id is None
+        or second.snapshot_id is None
+        or first.snapshot_checksum is None
+        or second.snapshot_checksum is None
+    ):
+        return None
+    if second.observed_at_utc > first.observed_at_utc and second.snapshot_verified:
+        if (
+            second.snapshot_id != first.snapshot_id
+            or second.snapshot_checksum != first.snapshot_checksum
+        ):
+            return "refresh"
+    if (
+        second.snapshot_reused
+        and second.snapshot_id == first.snapshot_id
+        and second.snapshot_checksum == first.snapshot_checksum
+        and second.snapshot_verified
+        and second.observed_at_utc >= first.observed_at_utc
+    ):
+        return "deterministic-reuse"
+    return None
 
 
 class _DeadlineBrowserSession:

@@ -126,10 +126,8 @@ class _DomCandidateParser(HTMLParser):
             redact_text(attr_map["data-testid"])[:80] if "data-testid" in attr_map else None
         )
         data_qa = redact_text(attr_map["data-qa"])[:80] if "data-qa" in attr_map else None
-        aria_label = (
-            redact_text(attr_map["aria-label"])[:80] if "aria-label" in attr_map else None
-        )
-        node = {
+        aria_label = redact_text(attr_map["aria-label"])[:80] if "aria-label" in attr_map else None
+        node: dict[str, Any] = {
             "tag": tag.lower(),
             "class_tokens": class_tokens,
             "data_testid": data_testid,

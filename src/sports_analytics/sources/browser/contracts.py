@@ -157,9 +157,7 @@ class BrowserNetworkMetadata:
                 "structural_fingerprint",
                 validate_sha256_checksum(self.structural_fingerprint),
             )
-        if self.status_code is not None and (
-            self.status_code < 100 or self.status_code > 599
-        ):
+        if self.status_code is not None and (self.status_code < 100 or self.status_code > 599):
             msg = "status_code must be an HTTP status"
             raise PermanentSourceError(msg)
         if self.byte_size is not None and self.byte_size < 0:

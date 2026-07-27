@@ -531,7 +531,10 @@ def _sparse_is_suspended(value: object) -> bool:
 
 def _parse_epoch_ms(value: object) -> datetime:
     try:
-        millis = int(value)  # type: ignore[arg-type]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            msg = f"invalid startTime epoch milliseconds: {value!r}"
+            raise ParserError(msg)
+        millis = int(value)
     except (TypeError, ValueError) as exc:
         msg = f"invalid startTime epoch milliseconds: {value!r}"
         raise ParserError(msg) from exc

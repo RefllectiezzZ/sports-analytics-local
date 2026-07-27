@@ -140,6 +140,66 @@ def test_loader_rejects_tampered_canonical_event_participants(tmp_path: Path) ->
             )
 
 
+def test_loader_rejects_tampered_quote_source_event_id(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("market_quotes.parquet"))
+    _rewrite_parquet(path, lambda rows: rows[0].__setitem__("source_event_id", "missing-source"))
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="source_event_id|checksum"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_loader_rejects_source_event_checksum_not_in_manifest(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("source_events.parquet"))
+    _rewrite_parquet(path, lambda rows: rows[0].__setitem__("source_file_sha256", "a" * 64))
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="source_file_sha256|checksum"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_loader_rejects_participant_reconciliation_home_mismatch(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("participant_reconciliations.parquet"))
+
+    def _swap_home(rows: list[dict]) -> None:
+        rows[0]["canonical_participant_id"] = "tampered-participant"
+
+    _rewrite_parquet(path, _swap_home)
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="participant|checksum|mismatch"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_loader_rejects_missing_market_status(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    path = next(snapshots.rglob("market_quotes.parquet"))
+    _rewrite_parquet(path, lambda rows: rows[0].__setitem__("market_status", ""))
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="market_status|checksum"):
+            load_verified_bookmaker_quotes(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
 def test_loader_exposes_catalogue_not_public_constructor(tmp_path: Path) -> None:
     database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
     with connect_database(database) as connection:

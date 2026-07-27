@@ -232,10 +232,21 @@ class BookmakerIngestionService:
 
         _checkpoint()
         try:
+            from sports_analytics.bookmakers.normalization import EMPTY_SOURCE_FILE_SHA256
+
+            evidence_sha256 = next(
+                (
+                    capture.checksum_sha256
+                    for capture in captures
+                    if capture.capture_kind == "provider-json"
+                ),
+                EMPTY_SOURCE_FILE_SHA256,
+            )
             reconciliations = reconcile_bookmaker_bundles((bundle,))
             normalized = normalize_bookmaker_bundles(
                 (bundle,),
                 reconciliations=reconciliations,
+                source_file_sha256=evidence_sha256,
             )
         except (NormalizationError, PermanentSourceError, ParserError) as exc:
             finished_at = self._normalize_utc(self._clock())

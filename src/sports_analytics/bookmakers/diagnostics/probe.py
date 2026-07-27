@@ -274,13 +274,7 @@ def _page_evidence(item: BrowserPageObservation) -> ProbePageEvidence:
         block_classification=block,
         dom_fingerprint=None if not dom_fragment else structural_fingerprint(dom_sample),
         candidate_paths=tuple(
-            sorted(
-                {
-                    f"dom.{candidate.tag}"
-                    for candidate in dom_candidates
-                    if candidate.tag
-                }
-            )
+            sorted({f"dom.{candidate.tag}" for candidate in dom_candidates if candidate.tag})
         ),
         sanitized_sample=dom_sample,
         dom_candidates=tuple(candidate.as_dict() for candidate in dom_candidates),

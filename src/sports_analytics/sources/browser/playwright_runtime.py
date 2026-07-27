@@ -96,9 +96,7 @@ def sanitized_path_hash(url: str) -> str:
 
 def top_level_keys_fingerprint(payload: dict[str, Any]) -> str:
     """Stable hash of sorted top-level JSON keys (avoids diagnostics import cycle)."""
-    encoded = json.dumps(sorted(str(key) for key in payload), separators=(",", ":")).encode(
-        "utf-8"
-    )
+    encoded = json.dumps(sorted(str(key) for key in payload), separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -295,9 +293,7 @@ class PlaywrightBrowserSession:
                                         content_length = None
                             raw_status = getattr(response, "status", None)
                             try:
-                                parsed_status = (
-                                    int(raw_status) if raw_status is not None else None
-                                )
+                                parsed_status = int(raw_status) if raw_status is not None else None
                             except (TypeError, ValueError):
                                 parsed_status = None
                             status_code = (
@@ -361,9 +357,7 @@ class PlaywrightBrowserSession:
                                 response_url=response_url,
                                 allowed_hostnames=allowed_hostnames,
                                 status_code=status_code,
-                                content_type=(
-                                    str(content_type) if content_type else None
-                                ),
+                                content_type=(str(content_type) if content_type else None),
                                 resource_type=resource_type,
                                 observed_at_utc=self._clock(),
                                 body_text=body_text,
@@ -543,8 +537,7 @@ class PlaywrightBrowserSession:
         )
         while self._clock() < window_end:
             if any(
-                item.hostname_approved and item.candidate_keys_detected
-                for item in network_metadata
+                item.hostname_approved and item.candidate_keys_detected for item in network_metadata
             ):
                 return
             if observation_complete is not None and observation_complete():

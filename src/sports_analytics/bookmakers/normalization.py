@@ -28,6 +28,7 @@ from sports_analytics.bookmakers.types import (
 )
 from sports_analytics.core.exceptions import NormalizationError
 from sports_analytics.markets.contracts import (
+    MarketStatus,
     OddsQuote,
     ProviderType,
     QuotePhase,
@@ -455,6 +456,10 @@ def _build_quotes(
                 # Unresolved events remain auditable but never enter canonical quotes.
                 continue
             for market in event.markets:
+                if market.market_status is not MarketStatus.OPEN:
+                    # Suspended/closed markets remain provider-auditable but never
+                    # enter the current-odds quote catalogue.
+                    continue
                 mapped = map_provider_market_to_canonical(market)
                 if isinstance(mapped, UnknownProviderMarket):
                     unknown.append(mapped)

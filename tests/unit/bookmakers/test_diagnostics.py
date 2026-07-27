@@ -111,6 +111,36 @@ def test_fake_session_positive_smoke() -> None:
         profile_id="test-profile",
     )
     assert result.succeeded is True
+    assert result.acceptance_summary["second_cycle_proof"] == "deterministic-reuse"
+
+
+def test_fake_session_smoke_refresh_proof() -> None:
+    result = evaluate_fake_session_smoke(
+        provider_id="betano-pt",
+        sport="football",
+        events_extracted=2,
+        markets_with_odds=2,
+        profile_verified=True,
+        profile_id="test-profile",
+        snapshot_reused_second_cycle=False,
+    )
+    assert result.succeeded is True
+    assert result.acceptance_summary["second_cycle_proof"] == "refresh"
+    assert result.cycles[1].snapshot_reused is False
+    assert result.cycles[1].snapshot_id != result.cycles[0].snapshot_id
+
+
+def test_fake_session_smoke_requires_per_event_quotes() -> None:
+    result = evaluate_fake_session_smoke(
+        provider_id="betano-pt",
+        sport="football",
+        events_extracted=2,
+        markets_with_odds=2,
+        valid_quote_count=1,
+        profile_verified=True,
+        profile_id="test-profile",
+    )
+    assert result.succeeded is False
 
 
 def test_zero_event_smoke_failure() -> None:

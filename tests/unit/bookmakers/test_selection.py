@@ -195,13 +195,25 @@ def test_forced_modes_and_best_mode() -> None:
         betclic_catalogue=catalogue_for(betclic),
     )
     forced_betano = select_quote_pair(
-        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BETANO), NOW, **catalogues
+        betano,
+        betclic,
+        BookmakerSelectionPolicy(selection_mode=SelectionMode.BETANO),
+        NOW,
+        **catalogues,
     )
     forced_betclic = select_quote_pair(
-        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BETCLIC), NOW, **catalogues
+        betano,
+        betclic,
+        BookmakerSelectionPolicy(selection_mode=SelectionMode.BETCLIC),
+        NOW,
+        **catalogues,
     )
     best = select_quote_pair(
-        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BEST), NOW, **catalogues
+        betano,
+        betclic,
+        BookmakerSelectionPolicy(selection_mode=SelectionMode.BEST),
+        NOW,
+        **catalogues,
     )
     assert forced_betano.reason_code is QuoteSelectionReason.MODE_FORCED_PREFERRED
     assert forced_betano.selected_bookmaker_id == PROVIDER_BETANO_PT

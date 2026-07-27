@@ -37,7 +37,7 @@ def test_scraper_module_main_executes(isolated_cwd: Path) -> None:
 
 
 def test_documented_scraper_smoke_no_profile_exits_nonzero(isolated_cwd: Path) -> None:
-    """Documented ``scraper.py --smoke-bookmaker`` returns failure without a profile."""
+    """Documented ``scraper.py --smoke-bookmaker`` fails when no verified profile exists."""
     scraper = repository_root() / "scraper.py"
     config = isolated_cwd / "settings.toml"
     config.write_text(
@@ -54,7 +54,7 @@ def test_documented_scraper_smoke_no_profile_exits_nonzero(isolated_cwd: Path) -
             str(config.resolve()),
             "--smoke-bookmaker",
             "--provider",
-            "betano-pt",
+            "betclic-pt",
             "--sport",
             "football",
             "--duration-seconds",
@@ -72,7 +72,7 @@ def test_documented_scraper_smoke_no_profile_exits_nonzero(isolated_cwd: Path) -
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
     assert payload["succeeded"] is False
     assert payload["failure_reason"] == "no-verified-extraction-profile"
-    assert payload["provider"] == "betano-pt"
+    assert payload["provider"] == "betclic-pt"
 
 
 def test_documented_scraper_probe_prints_json(isolated_cwd: Path) -> None:

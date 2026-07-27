@@ -42,9 +42,7 @@ def test_metadata_only_for_unknown_public_host() -> None:
         "https://cdn.example.com/api/v1/track?x=1"
     )
     # Path-only hash must ignore query string.
-    assert meta.sanitized_path_hash == sanitized_path_hash(
-        "https://cdn.example.com/api/v1/track"
-    )
+    assert meta.sanitized_path_hash == sanitized_path_hash("https://cdn.example.com/api/v1/track")
 
 
 def test_approved_json_captures_body_and_candidate_keys() -> None:
