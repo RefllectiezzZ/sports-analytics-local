@@ -68,6 +68,10 @@ def test_recording_session_captures_deadline() -> None:
     )
     session = RecordingBrowserSession(result)
     deadline = now + timedelta(seconds=15)
+
+    def observation_complete() -> bool:
+        return False
+
     session.acquire(
         provider_id="betano-pt",
         sport="football",
@@ -77,5 +81,9 @@ def test_recording_session_captures_deadline() -> None:
         observed_at_utc=now,
         browser_mode=BrowserMode.VISIBLE,
         deadline_at_utc=deadline,
+        observation_window_ms=12_000,
+        observation_complete=observation_complete,
     )
     assert session.calls[0]["deadline_at_utc"] == deadline
+    assert session.calls[0]["observation_window_ms"] == 12_000
+    assert session.calls[0]["observation_complete"] is observation_complete

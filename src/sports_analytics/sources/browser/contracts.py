@@ -126,6 +126,56 @@ class BrowserResponseObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class BrowserNetworkMetadata:
+    """Sanitized network observation for an HTTPS response (body optional)."""
+
+    response_url: str
+    hostname: str | None
+    resource_type: str | None
+    status_code: int | None
+    content_type: str | None
+    byte_size: int | None
+    sanitized_path_hash: str
+    structural_fingerprint: str | None
+    hostname_approved: bool
+    candidate_keys_detected: bool
+    body_captured: bool
+    observed_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        if not self.response_url.startswith("https://"):
+            msg = "response_url must be HTTPS"
+            raise PermanentSourceError(msg)
+        object.__setattr__(
+            self,
+            "sanitized_path_hash",
+            validate_sha256_checksum(self.sanitized_path_hash),
+        )
+        if self.structural_fingerprint is not None:
+            object.__setattr__(
+                self,
+                "structural_fingerprint",
+                validate_sha256_checksum(self.structural_fingerprint),
+            )
+        if self.status_code is not None and (
+            self.status_code < 100 or self.status_code > 599
+        ):
+            msg = "status_code must be an HTTP status"
+            raise PermanentSourceError(msg)
+        if self.byte_size is not None and self.byte_size < 0:
+            msg = "byte_size must be non-negative"
+            raise PermanentSourceError(msg)
+        object.__setattr__(
+            self,
+            "observed_at_utc",
+            require_utc(self.observed_at_utc, field_name="observed_at_utc"),
+        )
+        if self.body_captured and not self.hostname_approved:
+            msg = "body capture requires an approved hostname"
+            raise PermanentSourceError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class BrowserAcquisitionResult:
     """Complete disposable-browser acquisition outcome for one provider cycle."""
 
@@ -140,6 +190,7 @@ class BrowserAcquisitionResult:
     block_reason: BrowserBlockReason | None
     warnings: tuple[str, ...]
     cookie_banner_dismissed: bool = False
+    network_metadata: tuple[BrowserNetworkMetadata, ...] = ()
 
     def __post_init__(self) -> None:
         validate_identifier(self.provider_id, field_name="provider_id")

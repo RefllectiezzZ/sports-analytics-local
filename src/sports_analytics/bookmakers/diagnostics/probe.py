@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from sports_analytics.bookmakers.diagnostics.dom_discovery import discover_dom_candidates
 from sports_analytics.bookmakers.diagnostics.fingerprint import structural_fingerprint
 from sports_analytics.bookmakers.diagnostics.paths import resolve_diagnostic_directory
 from sports_analytics.bookmakers.diagnostics.redaction import redact_text, sanitize_sample_payload
@@ -22,10 +24,14 @@ from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
     BrowserBlockReason,
     BrowserMode,
+    BrowserNetworkMetadata,
     BrowserPageObservation,
     BrowserResponseObservation,
 )
-from sports_analytics.sources.browser.playwright_runtime import PlaywrightBrowserSession
+from sports_analytics.sources.browser.playwright_runtime import (
+    BrowserSession,
+    PlaywrightBrowserSession,
+)
 from sports_analytics.sources.browser.readiness import (
     ReadinessBlockedError,
     readiness_predicate_for_provider,
@@ -40,6 +46,8 @@ _PROVIDER_CATALOGS = {
     PROVIDER_BETANO_PT: BETANO_CATALOG,
     PROVIDER_BETCLIC_PT: BETCLIC_CATALOG,
 }
+
+_DOM_PREVIEW_CHARS = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +78,7 @@ class ProbePageEvidence:
     dom_fingerprint: str | None
     candidate_paths: tuple[str, ...]
     sanitized_sample: dict[str, Any]
+    dom_candidates: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +93,7 @@ class ProbeResult:
     responses: tuple[ProbeResponseEvidence, ...]
     pages: tuple[ProbePageEvidence, ...]
     diagnostic_relative_path: str
+    network_metadata: tuple[dict[str, Any], ...] = ()
 
 
 def probe_bookmaker(
@@ -92,8 +102,8 @@ def probe_bookmaker(
     sport: str,
     duration_seconds: int = 30,
     diagnostic_directory: str | Path | None = None,
-    session: PlaywrightBrowserSession | None = None,
-    clock: Any | None = None,
+    session: BrowserSession | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> ProbeResult:
     """Collect sanitized structural evidence from one provider sport route."""
     if provider_id not in _PROVIDER_CATALOGS:
@@ -112,23 +122,42 @@ def probe_bookmaker(
         raise ConfigurationError(msg)
     output_dir = resolve_diagnostic_directory(diagnostic_directory)
     started = time.monotonic()
-    now = datetime.now(tz=UTC) if clock is None else clock()
-    deadline = now + timedelta(seconds=duration_seconds)
-    browser_session = session or PlaywrightBrowserSession(clock=(lambda: now))
+    # Progressing clock — never freeze to a single timestamp for deadline math.
+    if clock is not None:
+        clock_fn: Callable[[], datetime] = clock
+    else:
+        clock_fn = lambda: datetime.now(tz=UTC)  # noqa: E731
+    started_at = clock_fn()
+    deadline = started_at + timedelta(seconds=duration_seconds)
+    # Bounded by deadline inside acquire; full duration window for network dwell.
+    observation_window_ms = duration_seconds * 1000
+    browser_session = session or PlaywrightBrowserSession(clock=clock_fn)
+
+    def observation_complete() -> bool:
+        # Duration exhaustion is enforced by the observation window / deadline.
+        # Candidate-key completion is evaluated against live metadata inside acquire;
+        # this callback remains available for injected sessions / tests.
+        return clock_fn() >= deadline
+
     acquisition = browser_session.acquire(
         provider_id=provider_id,
         sport=sport,
         acquisition_cycle_id=f"probe-{provider_id}-{sport}",
         allowed_hostnames=catalog.allowed_hostnames,
         start_urls=routes,
-        observed_at_utc=now,
+        observed_at_utc=started_at,
         browser_mode=BrowserMode.VISIBLE,
         deadline_at_utc=deadline,
+        observation_window_ms=observation_window_ms,
+        observation_complete=observation_complete,
     )
     # Report actual elapsed duration; do not clamp with min().
     elapsed = time.monotonic() - started
     responses = tuple(_response_evidence(item) for item in acquisition.responses)
     pages = tuple(_page_evidence(item) for item in acquisition.pages)
+    network_metadata = tuple(
+        _network_metadata_payload(item) for item in acquisition.network_metadata
+    )
     result = ProbeResult(
         provider=provider_id,
         sport=sport,
@@ -144,8 +173,10 @@ def probe_bookmaker(
             acquisition=acquisition,
             responses=responses,
             pages=pages,
+            network_metadata=network_metadata,
             duration_seconds=elapsed,
         ),
+        network_metadata=network_metadata,
     )
     return result
 
@@ -162,6 +193,9 @@ def collect_probe_from_acquisition(
     output_dir = resolve_diagnostic_directory(diagnostic_directory)
     responses = tuple(_response_evidence(item) for item in acquisition.responses)
     pages = tuple(_page_evidence(item) for item in acquisition.pages)
+    network_metadata = tuple(
+        _network_metadata_payload(item) for item in acquisition.network_metadata
+    )
     return ProbeResult(
         provider=provider_id,
         sport=sport,
@@ -177,8 +211,10 @@ def collect_probe_from_acquisition(
             acquisition=acquisition,
             responses=responses,
             pages=pages,
+            network_metadata=network_metadata,
             duration_seconds=duration_seconds,
         ),
+        network_metadata=network_metadata,
     )
 
 
@@ -222,10 +258,13 @@ def _response_evidence(item: BrowserResponseObservation) -> ProbeResponseEvidenc
 def _page_evidence(item: BrowserPageObservation) -> ProbePageEvidence:
     hostname = urlparse(item.final_url).hostname or ""
     dom_fragment = item.sanitized_dom_fragment or ""
-    dom_sample = {
+    dom_candidates = discover_dom_candidates(dom_fragment)
+    dom_sample: dict[str, Any] = {
         "title": redact_text(item.title or ""),
-        "dom_preview": redact_text(dom_fragment[:200]),
+        "dom_preview": redact_text(dom_fragment[:_DOM_PREVIEW_CHARS]),
     }
+    if dom_candidates:
+        dom_sample["dom_candidates"] = [candidate.as_dict() for candidate in dom_candidates]
     block = None if item.block_reason is None else item.block_reason.value
     return ProbePageEvidence(
         provider=item.provider_id,
@@ -234,9 +273,35 @@ def _page_evidence(item: BrowserPageObservation) -> ProbePageEvidence:
         title=redact_text(item.title) if item.title else None,
         block_classification=block,
         dom_fingerprint=None if not dom_fragment else structural_fingerprint(dom_sample),
-        candidate_paths=(),
+        candidate_paths=tuple(
+            sorted(
+                {
+                    f"dom.{candidate.tag}"
+                    for candidate in dom_candidates
+                    if candidate.tag
+                }
+            )
+        ),
         sanitized_sample=dom_sample,
+        dom_candidates=tuple(candidate.as_dict() for candidate in dom_candidates),
     )
+
+
+def _network_metadata_payload(item: BrowserNetworkMetadata) -> dict[str, Any]:
+    return {
+        "response_url": item.response_url,
+        "hostname": item.hostname,
+        "resource_type": item.resource_type,
+        "status_code": item.status_code,
+        "content_type": item.content_type,
+        "byte_size": item.byte_size,
+        "sanitized_path_hash": item.sanitized_path_hash,
+        "structural_fingerprint": item.structural_fingerprint,
+        "hostname_approved": item.hostname_approved,
+        "candidate_keys_detected": item.candidate_keys_detected,
+        "body_captured": item.body_captured,
+        "observed_at_utc": item.observed_at_utc.isoformat(),
+    }
 
 
 def _candidate_paths(value: Any, *, prefix: str = "") -> list[str]:
@@ -259,6 +324,7 @@ def _write_probe_artifact(
     acquisition: BrowserAcquisitionResult,
     responses: tuple[ProbeResponseEvidence, ...],
     pages: tuple[ProbePageEvidence, ...],
+    network_metadata: tuple[dict[str, Any], ...],
     duration_seconds: float,
 ) -> str:
     filename = f"probe-{provider_id}-{sport}-{int(time.time())}.json"
@@ -273,6 +339,7 @@ def _write_probe_artifact(
         ),
         "responses": [asdict(item) for item in responses],
         "pages": [asdict(item) for item in pages],
+        "network_metadata": list(network_metadata),
     }
     path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
     return filename

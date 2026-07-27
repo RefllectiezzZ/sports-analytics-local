@@ -9,6 +9,7 @@ from sports_analytics.sources.betano.catalog import ALLOWED_HOSTNAMES as BETANO_
 from sports_analytics.sources.browser.contracts import BrowserBlockReason
 from sports_analytics.sources.browser.safety import (
     classify_block_signals,
+    classify_https_public_url,
     validate_provider_navigation_url,
 )
 
@@ -84,6 +85,13 @@ def test_accepts_allowlisted_https_url() -> None:
     )
     assert approved.hostname == "www.betano.pt"
     assert approved.path.startswith("/sport/")
+
+
+def test_classify_https_public_url_rejects_private_allows_unknown_public() -> None:
+    assert classify_https_public_url("https://tracker.example/cdn.js") == "tracker.example"
+    assert classify_https_public_url("https://127.0.0.1/x") is None
+    assert classify_https_public_url("https://localhost/x") is None
+    assert classify_https_public_url("http://tracker.example/x") is None
 
 
 @pytest.mark.parametrize(

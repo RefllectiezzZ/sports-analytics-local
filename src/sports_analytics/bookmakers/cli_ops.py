@@ -295,7 +295,6 @@ def smoke_bookmaker_cli(
         database_path=runtime.database_path,
         raw_directory=runtime.paths.raw_directory,
         snapshots_directory=runtime.paths.snapshots_directory,
-        clock=lambda: runtime.started_at,
     )
     print(
         json.dumps(

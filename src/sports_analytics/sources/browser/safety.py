@@ -72,6 +72,31 @@ def classify_block_signals(
     return None
 
 
+def classify_https_public_url(url: str) -> str | None:
+    """Return hostname for a public HTTPS URL, or ``None`` when rejected.
+
+    Rejects non-HTTPS schemes, embedded credentials, and private/loopback hosts.
+    Does **not** require a provider allowlist — used for metadata-only observation
+    of third-party public responses without following them independently.
+    """
+    if not isinstance(url, str) or not url or any(ch.isspace() for ch in url):
+        return None
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme in _FORBIDDEN_SCHEMES or scheme != "https":
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return None
+    try:
+        _reject_private_or_loopback_hostname(hostname)
+    except PermanentSourceError:
+        return None
+    return hostname
+
+
 def validate_provider_navigation_url(
     url: str,
     *,
