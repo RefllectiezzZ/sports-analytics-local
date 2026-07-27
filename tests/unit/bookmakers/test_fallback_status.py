@@ -61,6 +61,7 @@ def test_comparison_fallback_when_preferred_fails() -> None:
 def test_stale_cache_preserved_and_never_labelled_current() -> None:
     with pytest.raises(PermanentSourceError, match="never be labelled current"):
         CachedSnapshotReference(
+            provider_id=PROVIDER_BETANO_PT,
             snapshot_id="snap-1",
             observed_at_utc=NOW,
             age_seconds=120,
@@ -78,6 +79,7 @@ def test_stale_cache_preserved_and_never_labelled_current() -> None:
             failure_classification=FailureClassification.PERMANENT,
         ),
         cached_snapshot=CachedSnapshotReference(
+            provider_id=PROVIDER_BETCLIC_PT,
             snapshot_id="snap-stale",
             observed_at_utc=NOW,
             age_seconds=900,

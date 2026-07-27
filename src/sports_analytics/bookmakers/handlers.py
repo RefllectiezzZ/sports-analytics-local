@@ -172,9 +172,10 @@ def ingest_bookmaker_autonomous_cycle_handler(
     """Execute one autonomous Betano-first / Betclic-fallback sport cycle."""
     database_path, raw_directory, snapshots_directory, bookmakers = _require_runtime(context)
     payload_object = _require_payload_object(payload)
-    sport, _observed_raw, cycle_id = validate_autonomous_cycle_payload(
+    sport, observed_raw, cycle_id = validate_autonomous_cycle_payload(
         {key: value for key, value in payload_object.items()}
     )
+    observed_at = parse_utc_timestamp(observed_raw) if observed_raw is not None else None
     service = BookmakerIngestionService(
         database_path=database_path,
         raw_directory=raw_directory,
@@ -195,6 +196,7 @@ def ingest_bookmaker_autonomous_cycle_handler(
         result = orchestrator.run_autonomous_cycle(
             sport=sport,
             acquisition_cycle_id=cycle_id,
+            observed_at_utc=observed_at,
             actor="worker",
             attempt_number=context.attempt,
             maximum_attempts=context.maximum_attempts,

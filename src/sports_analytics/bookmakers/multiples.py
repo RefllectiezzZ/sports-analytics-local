@@ -12,12 +12,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Final
 
-from sports_analytics.bookmakers.selection import BookmakerPricedQuote
+from sports_analytics.bookmakers.priced_quote import BookmakerPricedQuote
 from sports_analytics.bookmakers.types import (
     PROVIDER_BETANO_PT,
     PROVIDER_BETCLIC_PT,
     QuoteSelectionReason,
 )
+from sports_analytics.bookmakers.verified_evidence import VerifiedBookmakerQuote
 from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.markets.contracts import validate_decimal_odds
 from sports_analytics.sports.contracts import require_utc
@@ -136,14 +137,18 @@ def build_same_bookmaker_multiple(
 
 def compare_provider_multiples(
     requested_leg_specs: tuple[RequestedMultipleLegSpec, ...] | list[RequestedMultipleLegSpec],
-    betano_quotes_by_leg_key: dict[str, BookmakerPricedQuote],
-    betclic_quotes_by_leg_key: dict[str, BookmakerPricedQuote],
+    betano_quotes_by_leg_key: dict[str, VerifiedBookmakerQuote],
+    betclic_quotes_by_leg_key: dict[str, VerifiedBookmakerQuote],
+    *,
+    evaluated_at_utc: datetime,
+    quote_maximum_age_seconds: int,
 ) -> ProviderMultipleComparison:
     """Compare complete Betano-only and Betclic-only multiples.
 
     Incomplete provider coverage makes that provider ineligible. Equal complete
     totals select Betano. Best individual legs are never mixed across providers.
     """
+    evaluated_at = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
     specs = tuple(requested_leg_specs)
     if len(specs) < MIN_MULTIPLE_LEGS:
         msg = f"requested multiple requires at least {MIN_MULTIPLE_LEGS} legs"
@@ -153,18 +158,30 @@ def compare_provider_multiples(
         msg = "requested multiple leg keys must be unique"
         raise PermanentSourceError(msg)
     _reject_duplicate_canonical_identities(specs)
-    _reject_mixed_observation_windows(betano_quotes_by_leg_key)
-    _reject_mixed_observation_windows(betclic_quotes_by_leg_key)
+    _reject_mixed_observation_windows(
+        betano_quotes_by_leg_key,
+        evaluated_at_utc=evaluated_at,
+        quote_maximum_age_seconds=quote_maximum_age_seconds,
+    )
+    _reject_mixed_observation_windows(
+        betclic_quotes_by_leg_key,
+        evaluated_at_utc=evaluated_at,
+        quote_maximum_age_seconds=quote_maximum_age_seconds,
+    )
 
     betano_multiple, betano_eligible = _build_provider_multiple(
         provider_id=PROVIDER_BETANO_PT,
         specs=specs,
         quotes_by_leg_key=betano_quotes_by_leg_key,
+        evaluated_at_utc=evaluated_at,
+        quote_maximum_age_seconds=quote_maximum_age_seconds,
     )
     betclic_multiple, betclic_eligible = _build_provider_multiple(
         provider_id=PROVIDER_BETCLIC_PT,
         specs=specs,
         quotes_by_leg_key=betclic_quotes_by_leg_key,
+        evaluated_at_utc=evaluated_at,
+        quote_maximum_age_seconds=quote_maximum_age_seconds,
     )
 
     if betano_multiple is None and betclic_multiple is None:
@@ -237,18 +254,28 @@ def _build_provider_multiple(
     *,
     provider_id: str,
     specs: tuple[RequestedMultipleLegSpec, ...],
-    quotes_by_leg_key: dict[str, BookmakerPricedQuote],
+    quotes_by_leg_key: dict[str, VerifiedBookmakerQuote],
+    evaluated_at_utc: datetime,
+    quote_maximum_age_seconds: int,
 ) -> tuple[BookmakerMultiple | None, bool]:
     legs: list[BookmakerMultipleLeg] = []
     for spec in specs:
-        quote = quotes_by_leg_key.get(spec.leg_key)
-        if quote is None or not quote.fresh or quote.provider_id != provider_id:
+        verified = quotes_by_leg_key.get(spec.leg_key)
+        if verified is None or verified.provider_id != provider_id:
+            return None, False
+        quote = verified.to_priced_quote(
+            evaluated_at_utc=evaluated_at_utc,
+            maximum_age_seconds=quote_maximum_age_seconds,
+        )
+        if not quote.fresh:
             return None, False
         if (
             quote.canonical_event_id != spec.canonical_event_id
             or quote.canonical_market_definition_id != spec.canonical_market_definition_id
             or quote.canonical_selection_id != spec.canonical_selection_id
         ):
+            return None, False
+        if quote.market_status != "open" or quote.selection_status != "active":
             return None, False
         legs.append(
             BookmakerMultipleLeg(
@@ -287,9 +314,18 @@ def _reject_duplicate_canonical_identities(
         seen.add(identity)
 
 
-def _reject_mixed_observation_windows(quotes_by_leg_key: dict[str, BookmakerPricedQuote]) -> None:
+def _reject_mixed_observation_windows(
+    quotes_by_leg_key: dict[str, VerifiedBookmakerQuote],
+    *,
+    evaluated_at_utc: datetime,
+    quote_maximum_age_seconds: int,
+) -> None:
     observed: set[datetime] = set()
-    for quote in quotes_by_leg_key.values():
+    for verified in quotes_by_leg_key.values():
+        quote = verified.to_priced_quote(
+            evaluated_at_utc=evaluated_at_utc,
+            maximum_age_seconds=quote_maximum_age_seconds,
+        )
         if quote.fresh:
             if not quote.snapshot_id or not quote.snapshot_checksum_sha256:
                 msg = "verified quote evidence requires snapshot id and checksum"

@@ -17,10 +17,8 @@ from sports_analytics.bookmakers.multiples import (
     build_same_bookmaker_multiple,
     compare_provider_multiples,
 )
+from sports_analytics.bookmakers.priced_quote import BookmakerPricedQuote
 from sports_analytics.bookmakers.selection import (
-    DEFAULT_BOOKMAKER_SELECTION_POLICY,
-    BookmakerPricedQuote,
-    BookmakerQuoteComparison,
     BookmakerSelectionPolicy,
     select_quote_pair,
 )

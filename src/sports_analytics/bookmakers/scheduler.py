@@ -127,7 +127,7 @@ class BookmakerScheduler:
             database_path=self._database_path,
             sport=sport,
             now=now,
-            acquisition_interval_seconds=self._bookmakers.betano.acquisition_interval_seconds,
+            bookmakers=self._bookmakers,
         )
         if scheduled_for > now:
             return False

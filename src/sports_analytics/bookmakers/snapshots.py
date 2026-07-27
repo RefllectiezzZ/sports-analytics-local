@@ -214,3 +214,37 @@ def build_bookmaker_source_version(
     checksum = validate_sha256_checksum(raw_sha256)
     value = f"{sport_code}:{acquisition_cycle_id}:sha256:{checksum}"
     return validate_identifier(value, field_name="source_version")
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedBookmakerSourceVersion:
+    """Parsed ``build_bookmaker_source_version`` contract fields."""
+
+    sport_code: str
+    acquisition_cycle_id: str
+    raw_sha256: str
+
+
+def parse_bookmaker_source_version(source_version: str) -> ParsedBookmakerSourceVersion:
+    """Parse and validate a bookmaker ``source_version`` string exactly."""
+    validate_identifier(source_version, field_name="source_version")
+    parts = source_version.split(":")
+    if len(parts) < 4:
+        msg = "source_version must follow sport:cycle:sha256:checksum"
+        raise PermanentSourceError(msg)
+    checksum = parts[-1]
+    algorithm = parts[-2]
+    if algorithm != "sha256":
+        msg = "source_version checksum algorithm must be sha256"
+        raise PermanentSourceError(msg)
+    sport_code = validate_identifier(parts[0], field_name="sport_code")
+    acquisition_cycle_id = validate_identifier(
+        ":".join(parts[1:-2]),
+        field_name="acquisition_cycle_id",
+    )
+    raw_sha256 = validate_sha256_checksum(checksum)
+    return ParsedBookmakerSourceVersion(
+        sport_code=sport_code,
+        acquisition_cycle_id=acquisition_cycle_id,
+        raw_sha256=raw_sha256,
+    )

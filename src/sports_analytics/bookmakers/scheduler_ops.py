@@ -10,6 +10,8 @@ from sports_analytics.bookmakers.types import (
     BOOKMAKER_AUTONOMOUS_SCHEDULER_PROVIDER,
     DEFAULT_BOOKMAKER_INGESTION_MAXIMUM_ATTEMPTS,
     INGEST_BOOKMAKER_AUTONOMOUS_CYCLE_JOB_TYPE,
+    PROVIDER_BETANO_PT,
+    PROVIDER_BETCLIC_PT,
 )
 from sports_analytics.core.exceptions import (
     ConfigurationError,
@@ -50,6 +52,48 @@ class SchedulerEnqueueResult:
     scheduled_for: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class AutonomousSchedulingPolicy:
+    """Derived autonomous scheduler cadence from enabled bookmaker providers."""
+
+    enabled_provider_ids: tuple[str, ...]
+    initial_delay_seconds: int
+    acquisition_interval_seconds: int
+
+
+def resolve_autonomous_scheduling_policy(
+    bookmakers: BookmakersSettings,
+) -> AutonomousSchedulingPolicy | None:
+    """Derive scheduler timing from the enabled provider set."""
+    enabled: list[str] = []
+    if bookmakers.betano.enabled:
+        enabled.append(PROVIDER_BETANO_PT)
+    if bookmakers.betclic.enabled:
+        enabled.append(PROVIDER_BETCLIC_PT)
+    if not enabled:
+        return None
+    if enabled == [PROVIDER_BETANO_PT]:
+        settings = bookmakers.betano
+    elif enabled == [PROVIDER_BETCLIC_PT]:
+        settings = bookmakers.betclic
+    else:
+        settings = bookmakers.betano
+        interval = min(
+            bookmakers.betano.acquisition_interval_seconds,
+            bookmakers.betclic.acquisition_interval_seconds,
+        )
+        return AutonomousSchedulingPolicy(
+            enabled_provider_ids=tuple(enabled),
+            initial_delay_seconds=bookmakers.betano.initial_delay_seconds,
+            acquisition_interval_seconds=interval,
+        )
+    return AutonomousSchedulingPolicy(
+        enabled_provider_ids=tuple(enabled),
+        initial_delay_seconds=settings.initial_delay_seconds,
+        acquisition_interval_seconds=settings.acquisition_interval_seconds,
+    )
+
+
 def ensure_scheduler_anchor(
     *,
     database_path: Path,
@@ -63,7 +107,11 @@ def ensure_scheduler_anchor(
         msg = f"unsupported bookmaker sport: {sport_code}"
         raise ConfigurationError(msg)
     provider_id = BOOKMAKER_AUTONOMOUS_SCHEDULER_PROVIDER
-    initial_delay = _initial_delay_seconds(bookmakers)
+    policy = resolve_autonomous_scheduling_policy(bookmakers)
+    if policy is None:
+        msg = "no bookmaker providers are enabled for autonomous scheduling"
+        raise ConfigurationError(msg)
+    initial_delay = policy.initial_delay_seconds
     with connect_database(database_path) as connection:
         with transaction(connection, immediate=True):
             repo = BookmakerRepository(connection)
@@ -111,16 +159,23 @@ def resolve_next_scheduled_for(
     database_path: Path,
     sport: str,
     now: datetime,
-    acquisition_interval_seconds: int,
+    bookmakers: BookmakersSettings,
 ) -> datetime:
     """Compute the next due slot from anchor/cycle history."""
     sport_code = validate_identifier(sport, field_name="sport")
+    policy = resolve_autonomous_scheduling_policy(bookmakers)
+    if policy is None:
+        return now
+    acquisition_interval_seconds = policy.acquisition_interval_seconds
     provider_id = BOOKMAKER_AUTONOMOUS_SCHEDULER_PROVIDER
     with connect_database(database_path, read_only=True) as connection:
         repo = BookmakerRepository(connection)
         latest = repo.latest_scheduler_cycle(provider_id=provider_id, sport=sport_code)
         anchor = repo.get_scheduler_anchor(provider_id=provider_id, sport=sport_code)
-        status = repo.get_provider_status(provider_id, sport_code)
+        provider_statuses = [
+            repo.get_provider_status(enabled_provider, sport_code)
+            for enabled_provider in policy.enabled_provider_ids
+        ]
     if latest is None:
         if anchor is not None:
             return parse_utc_timestamp(str(anchor["first_due_at_utc"]))
@@ -128,12 +183,14 @@ def resolve_next_scheduled_for(
     last_scheduled = parse_utc_timestamp(str(latest["scheduled_for_utc"]))
     next_from_interval = last_scheduled + timedelta(seconds=acquisition_interval_seconds)
     next_eligible = now
-    if status is not None:
+    for status in provider_statuses:
+        if status is None:
+            continue
+        if status.get("status") != "blocked":
+            continue
         next_eligible_raw = status.get("next_eligible_at_utc")
         if isinstance(next_eligible_raw, str) and next_eligible_raw:
-            next_eligible = parse_utc_timestamp(next_eligible_raw)
-        if status.get("status") == "blocked":
-            return max(next_from_interval, next_eligible)
+            next_eligible = max(next_eligible, parse_utc_timestamp(next_eligible_raw))
     return max(next_from_interval, next_eligible)
 
 
@@ -150,6 +207,10 @@ def atomic_enqueue_autonomous_cycle(
     """Atomically create job and scheduler cycle in one transaction."""
     if not bookmakers.enabled:
         msg = "bookmakers.enabled must be true to enqueue bookmaker acquisition"
+        raise ConfigurationError(msg)
+    policy = resolve_autonomous_scheduling_policy(bookmakers)
+    if policy is None:
+        msg = "no bookmaker providers are enabled for autonomous scheduling"
         raise ConfigurationError(msg)
     sport_code = validate_identifier(sport, field_name="sport")
     provider_id = BOOKMAKER_AUTONOMOUS_SCHEDULER_PROVIDER
@@ -209,8 +270,3 @@ def atomic_enqueue_autonomous_cycle(
                 )
     except (RepositoryError, SportsAnalyticsError) as exc:
         raise ConfigurationError(str(exc)) from exc
-
-
-def _initial_delay_seconds(bookmakers: BookmakersSettings) -> int:
-    """Use the preferred provider initial delay for autonomous sport cycles."""
-    return bookmakers.betano.initial_delay_seconds

@@ -43,6 +43,7 @@ class ProviderAttemptOutcome:
 class CachedSnapshotReference:
     """Reference to a previously published valid snapshot that is not current."""
 
+    provider_id: str
     snapshot_id: str
     observed_at_utc: datetime
     age_seconds: int
@@ -73,6 +74,7 @@ class ProviderFallbackDecision:
     cached_used: bool
     cached_age_seconds: int | None
     cached_snapshot_id: str | None
+    cached_provider_id: str | None
     reason_code: QuoteSelectionReason
     policy_id: str = BOOKMAKER_FALLBACK_POLICY_ID
     data_currency: str = "current"
@@ -83,6 +85,9 @@ class ProviderFallbackDecision:
             raise PermanentSourceError(msg)
         if self.cached_used and self.cached_snapshot_id is None:
             msg = "cached_used requires cached_snapshot_id"
+            raise PermanentSourceError(msg)
+        if self.cached_used and self.cached_provider_id is None:
+            msg = "cached_used requires cached_provider_id"
             raise PermanentSourceError(msg)
 
 
@@ -125,6 +130,7 @@ def resolve_provider_fallback(
             cached_used=False,
             cached_age_seconds=None,
             cached_snapshot_id=None,
+            cached_provider_id=None,
             reason_code=QuoteSelectionReason.PREFERRED_ONLY,
             data_currency="current",
         )
@@ -143,6 +149,7 @@ def resolve_provider_fallback(
                 cached_used=False,
                 cached_age_seconds=None,
                 cached_snapshot_id=None,
+                cached_provider_id=None,
                 reason_code=QuoteSelectionReason.COMPARISON_FALLBACK,
                 data_currency="current",
             )
@@ -159,6 +166,7 @@ def resolve_provider_fallback(
                 cached_used=False,
                 cached_age_seconds=None,
                 cached_snapshot_id=None,
+                cached_provider_id=None,
                 reason_code=QuoteSelectionReason.COMPARISON_FALLBACK,
                 data_currency="current",
             )
@@ -172,6 +180,7 @@ def resolve_provider_fallback(
             cached_used=True,
             cached_age_seconds=cached_snapshot.age_seconds,
             cached_snapshot_id=cached_snapshot.snapshot_id,
+            cached_provider_id=cached_snapshot.provider_id,
             reason_code=QuoteSelectionReason.CACHED_STALE_PRESERVED,
             data_currency="stale",
         )
@@ -184,6 +193,7 @@ def resolve_provider_fallback(
         cached_used=False,
         cached_age_seconds=None,
         cached_snapshot_id=None,
+        cached_provider_id=None,
         reason_code=QuoteSelectionReason.PROVIDER_UNAVAILABLE,
         data_currency="unavailable",
     )

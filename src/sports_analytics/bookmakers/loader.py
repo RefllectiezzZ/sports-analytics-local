@@ -5,25 +5,41 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pyarrow.parquet as pq
 
 from sports_analytics.bookmakers.schemas import (
+    DATASET_ACQUISITION_METADATA,
     DATASET_CANONICAL_EVENTS,
     DATASET_COMPARISON_ELIGIBILITY,
+    DATASET_PARSER_DRIFT_FINDINGS,
+    DATASET_PROVIDER_STATUS,
     bookmaker_snapshot_suite,
 )
+from sports_analytics.bookmakers.snapshots import parse_bookmaker_source_version
 from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION, BOOKMAKER_SNAPSHOT_TYPE
+from sports_analytics.bookmakers.verified_evidence import (
+    quote_semantic_identity_key,
+    verify_quote_row_identity,
+)
 from sports_analytics.core.exceptions import SnapshotVerificationError
 from sports_analytics.data.repositories.bookmakers import BookmakerRepository
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
 from sports_analytics.data.types import SnapshotStatus
 from sports_analytics.markets.schemas import DATASET_MARKET_QUOTES
 from sports_analytics.snapshots.paths import resolve_raw_path, resolve_snapshot_dir
-from sports_analytics.snapshots.reader import verify_snapshot_directory
+from sports_analytics.snapshots.reader import SnapshotVerificationResult, verify_snapshot_directory
 from sports_analytics.sources.bookmaker_capture import (
     parse_capture_manifest_from_bytes,
     verify_capture_manifest,
+)
+from sports_analytics.sports.contracts import ReconciliationState
+from sports_analytics.sports.schemas import (
+    DATASET_EVENT_RECONCILIATIONS,
+    DATASET_PARTICIPANT_RECONCILIATIONS,
+    DATASET_SOURCE_EVENTS,
+    DATASET_SOURCE_PARTICIPANTS,
 )
 
 
@@ -101,6 +117,16 @@ def load_bookmaker_snapshot(
         expected_snapshot=record,
     )
 
+    parsed_source = parse_bookmaker_source_version(result.source_version)
+    if parsed_source.sport_code != sport_code:
+        raise SnapshotVerificationError("source_version sport does not match registration")
+    if parsed_source.acquisition_cycle_id != acquisition_cycle_id:
+        raise SnapshotVerificationError(
+            "source_version acquisition_cycle_id does not match registration"
+        )
+    if parsed_source.raw_sha256 != result.raw_artifact_sha256:
+        raise SnapshotVerificationError("source_version raw checksum mismatch with manifest")
+
     capture_manifest_path = result.domain_metadata.get("capture_manifest_relative_path")
     capture_manifest_checksum = result.domain_metadata.get("capture_manifest_checksum_sha256")
     if not isinstance(capture_manifest_path, str) or not capture_manifest_path.strip():
@@ -129,8 +155,6 @@ def load_bookmaker_snapshot(
         raise SnapshotVerificationError("capture manifest relative path mismatch")
     if result.raw_artifact_sha256 != manifest.checksum_sha256:
         raise SnapshotVerificationError("snapshot raw artifact checksum mismatch with manifest")
-    if acquisition_cycle_id not in result.source_version:
-        raise SnapshotVerificationError("source_version must reference acquisition cycle id")
     verify_capture_manifest(raw_directory=raw_root, manifest=manifest)
 
     from pathlib import PurePosixPath
@@ -139,11 +163,11 @@ def load_bookmaker_snapshot(
     snapshot_dir = resolve_snapshot_dir(snapshots_directory, manifest_parent)
     event_count, quote_count = _verify_semantic_datasets(
         snapshot_dir=snapshot_dir,
+        verification=result,
         sport_code=sport_code,
         provider_id=provider_id,
         acquisition_cycle_id=acquisition_cycle_id,
-        expected_event_rows=result.row_count(DATASET_CANONICAL_EVENTS),
-        expected_quote_rows=result.row_count(DATASET_MARKET_QUOTES),
+        capture_checksums={entry.checksum_sha256 for entry in manifest.entries},
     )
 
     return LoadedBookmakerSnapshot(
@@ -160,53 +184,176 @@ def load_bookmaker_snapshot(
     )
 
 
+def _read_dataset(snapshot_dir: Path, dataset_name: str) -> list[dict[str, Any]]:
+    path = snapshot_dir / f"{dataset_name}.parquet"
+    if path.is_symlink():
+        raise SnapshotVerificationError(f"dataset must not be a symlink: {dataset_name}")
+    if not path.is_file():
+        raise SnapshotVerificationError(f"required dataset missing: {dataset_name}")
+    table = pq.read_table(path)
+    rows: list[dict[str, Any]] = table.to_pylist()
+    return rows
+
+
 def _verify_semantic_datasets(
     *,
     snapshot_dir: Path,
+    verification: SnapshotVerificationResult,
     sport_code: str,
     provider_id: str,
     acquisition_cycle_id: str,
-    expected_event_rows: int,
-    expected_quote_rows: int,
+    capture_checksums: set[str],
 ) -> tuple[int, int]:
-    events_path = snapshot_dir / f"{DATASET_CANONICAL_EVENTS}.parquet"
-    quotes_path = snapshot_dir / f"{DATASET_MARKET_QUOTES}.parquet"
-    eligibility_path = snapshot_dir / f"{DATASET_COMPARISON_ELIGIBILITY}.parquet"
-    for path in (events_path, quotes_path, eligibility_path):
-        if path.is_symlink():
-            raise SnapshotVerificationError(f"dataset must not be a symlink: {path.name}")
-        if not path.is_file():
-            raise SnapshotVerificationError(f"required dataset missing: {path.name}")
-    events = pq.read_table(events_path)
-    quotes = pq.read_table(quotes_path)
-    eligibility = pq.read_table(eligibility_path)
-    if events.num_rows != expected_event_rows:
-        raise SnapshotVerificationError("canonical event row count mismatch")
-    if quotes.num_rows != expected_quote_rows:
-        raise SnapshotVerificationError("market quote row count mismatch")
-    if events.num_rows < 1 or quotes.num_rows < 1:
+    suite = bookmaker_snapshot_suite(sport_code=sport_code)
+    for descriptor in suite.descriptors:
+        expected_rows = verification.row_count(descriptor.dataset_name)
+        rows = _read_dataset(snapshot_dir, descriptor.dataset_name)
+        if len(rows) != expected_rows:
+            raise SnapshotVerificationError(
+                f"{descriptor.dataset_name} row count mismatch with manifest"
+            )
+
+    acquisition_rows = _read_dataset(snapshot_dir, DATASET_ACQUISITION_METADATA)
+    provider_status_rows = _read_dataset(snapshot_dir, DATASET_PROVIDER_STATUS)
+    source_participants = _read_dataset(snapshot_dir, DATASET_SOURCE_PARTICIPANTS)
+    participant_reconciliations = _read_dataset(snapshot_dir, DATASET_PARTICIPANT_RECONCILIATIONS)
+    source_events = _read_dataset(snapshot_dir, DATASET_SOURCE_EVENTS)
+    event_reconciliations = _read_dataset(snapshot_dir, DATASET_EVENT_RECONCILIATIONS)
+    events = _read_dataset(snapshot_dir, DATASET_CANONICAL_EVENTS)
+    quotes = _read_dataset(snapshot_dir, DATASET_MARKET_QUOTES)
+    drift_findings = _read_dataset(snapshot_dir, DATASET_PARSER_DRIFT_FINDINGS)
+    eligibility = _read_dataset(snapshot_dir, DATASET_COMPARISON_ELIGIBILITY)
+
+    if len(acquisition_rows) != 1:
+        raise SnapshotVerificationError("acquisition metadata must contain exactly one row")
+    acquisition = acquisition_rows[0]
+    if str(acquisition.get("provider_id")) != provider_id:
+        raise SnapshotVerificationError("acquisition metadata provider_id mismatch")
+    if str(acquisition.get("sport")) != sport_code:
+        raise SnapshotVerificationError("acquisition metadata sport mismatch")
+    if str(acquisition.get("acquisition_cycle_id")) != acquisition_cycle_id:
+        raise SnapshotVerificationError("acquisition metadata acquisition_cycle_id mismatch")
+    if int(acquisition.get("event_count", -1)) != len(events):
+        raise SnapshotVerificationError("acquisition metadata event_count mismatch")
+
+    provider_status_for_provider = [
+        row for row in provider_status_rows if str(row.get("provider_id")) == provider_id
+    ]
+    if provider_status_rows:
+        if len(provider_status_for_provider) != 1:
+            raise SnapshotVerificationError("provider status must contain exactly one provider row")
+        provider_status = provider_status_for_provider[0]
+        if int(provider_status.get("valid_quotes_observed", -1)) != len(quotes):
+            raise SnapshotVerificationError("provider status valid_quotes_observed mismatch")
+
+    _verify_source_participant_graph(
+        source_participants=source_participants,
+        participant_reconciliations=participant_reconciliations,
+        sport_code=sport_code,
+    )
+    resolved_event_ids = _verify_source_event_graph(
+        source_events=source_events,
+        event_reconciliations=event_reconciliations,
+        sport_code=sport_code,
+    )
+
+    if len(events) < 1 or len(quotes) < 1:
         raise SnapshotVerificationError("admitted snapshot must contain events and quotes")
-    event_ids = {str(value) for value in events.column("canonical_event_id").to_pylist()}
-    if len(event_ids) != events.num_rows:
+    event_ids = {str(row["canonical_event_id"]) for row in events}
+    if len(event_ids) != len(events):
         raise SnapshotVerificationError("canonical event identities must be unique")
-    quote_event_ids = quotes.column("canonical_event_id").to_pylist()
-    for event_id in quote_event_ids:
-        if str(event_id) not in event_ids:
+    for row in events:
+        if str(row.get("sport_code")) != sport_code:
+            raise SnapshotVerificationError("canonical event sport mismatch with registration")
+
+    observation_ids: set[str] = set()
+    semantic_keys: set[tuple[object, ...]] = set()
+    for row in quotes:
+        identity = verify_quote_row_identity(row)
+        if identity.provider_id != provider_id:
+            raise SnapshotVerificationError("quote provider_id mismatch with registration")
+        if identity.canonical_event_id not in event_ids:
             raise SnapshotVerificationError("quote references unresolved canonical event")
-    market_keys = quotes.column("market_key").to_pylist()
-    outcome_keys = quotes.column("outcome_key").to_pylist()
-    if len(set(zip(market_keys, outcome_keys, strict=True))) != quotes.num_rows:
-        raise SnapshotVerificationError("canonical market/selection identities must be unique")
-    if "provider_id" in quotes.schema.names:
-        for observed_provider in quotes.column("provider_id").to_pylist():
-            if str(observed_provider) != provider_id:
-                raise SnapshotVerificationError("quote provider_id mismatch with registration")
-    if "acquisition_cycle_id" in eligibility.schema.names:
-        for cycle in eligibility.column("acquisition_cycle_id").to_pylist():
-            if str(cycle) != acquisition_cycle_id:
-                raise SnapshotVerificationError("eligibility acquisition_cycle_id mismatch")
-    if "sport_code" in events.schema.names:
-        for sport in events.column("sport_code").to_pylist():
-            if str(sport) != sport_code:
-                raise SnapshotVerificationError("event sport mismatch with registration")
-    return events.num_rows, quotes.num_rows
+        if identity.canonical_event_id not in resolved_event_ids:
+            raise SnapshotVerificationError(
+                "quote references unresolved source event reconciliation"
+            )
+        source_file_sha256 = str(row.get("source_file_sha256", ""))
+        if source_file_sha256 not in capture_checksums:
+            raise SnapshotVerificationError(
+                "quote source_file_sha256 mismatch with capture manifest"
+            )
+        if identity.quote_observation_id in observation_ids:
+            raise SnapshotVerificationError("quote_observation_id must be unique")
+        observation_ids.add(identity.quote_observation_id)
+        semantic_key = quote_semantic_identity_key(identity)
+        if semantic_key in semantic_keys:
+            raise SnapshotVerificationError("conflicting duplicate quote identity in snapshot")
+        semantic_keys.add(semantic_key)
+        if str(row.get("sport_code")) != sport_code:
+            raise SnapshotVerificationError("quote sport mismatch with registration")
+
+    for row in drift_findings:
+        if str(row.get("provider_id")) != provider_id:
+            raise SnapshotVerificationError("drift finding provider_id mismatch")
+        if str(row.get("acquisition_cycle_id")) != acquisition_cycle_id:
+            raise SnapshotVerificationError("drift finding acquisition_cycle_id mismatch")
+
+    for row in eligibility:
+        if str(row.get("provider_id")) != provider_id:
+            raise SnapshotVerificationError("eligibility provider_id mismatch")
+
+    return len(events), len(quotes)
+
+
+def _verify_source_participant_graph(
+    *,
+    source_participants: list[dict[str, Any]],
+    participant_reconciliations: list[dict[str, Any]],
+    sport_code: str,
+) -> None:
+    source_ids = {str(row["source_participant_id"]) for row in source_participants}
+    if len(source_ids) != len(source_participants):
+        raise SnapshotVerificationError("source participant identities must be unique")
+    reconciliation_by_source = {
+        str(row["source_participant_id"]): row for row in participant_reconciliations
+    }
+    if set(reconciliation_by_source) != source_ids:
+        raise SnapshotVerificationError("participant reconciliation coverage mismatch")
+    for row in source_participants:
+        reconciliation = reconciliation_by_source[str(row["source_participant_id"])]
+        if str(reconciliation.get("source_participant_id")) != str(row["source_participant_id"]):
+            raise SnapshotVerificationError("participant reconciliation source id mismatch")
+
+
+def _verify_source_event_graph(
+    *,
+    source_events: list[dict[str, Any]],
+    event_reconciliations: list[dict[str, Any]],
+    sport_code: str,
+) -> set[str]:
+    source_ids = {str(row["source_event_id"]) for row in source_events}
+    if len(source_ids) != len(source_events):
+        raise SnapshotVerificationError("source event identities must be unique")
+    reconciliation_by_source = {str(row["source_event_id"]): row for row in event_reconciliations}
+    if set(reconciliation_by_source) != source_ids:
+        raise SnapshotVerificationError("event reconciliation coverage mismatch")
+    resolved_event_ids: set[str] = set()
+    for row in source_events:
+        reconciliation = reconciliation_by_source[str(row["source_event_id"])]
+        state = str(reconciliation.get("reconciliation_state"))
+        canonical_event_id = reconciliation.get("canonical_event_id")
+        if state == ReconciliationState.UNRESOLVED.value:
+            if canonical_event_id is not None:
+                raise SnapshotVerificationError(
+                    "unresolved reconciliation must not claim canonical event"
+                )
+            continue
+        if canonical_event_id is None:
+            raise SnapshotVerificationError("resolved reconciliation requires canonical_event_id")
+        if str(canonical_event_id) != str(row.get("canonical_event_id")):
+            raise SnapshotVerificationError(
+                "source event canonical id mismatch with reconciliation"
+            )
+        resolved_event_ids.add(str(canonical_event_id))
+    return resolved_event_ids

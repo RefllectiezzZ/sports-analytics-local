@@ -46,7 +46,6 @@ def _published_snapshot(tmp_path: Path):
         sport="football",
     )
     reconciled = reconcile_bookmaker_bundles((bundle,))
-    normalized = normalize_bookmaker_bundles((bundle,), reconciliations=reconciled)
     store = BookmakerRawCaptureStore(raw)
     capture = store.store_text(
         source_name="betano-pt",
@@ -54,6 +53,11 @@ def _published_snapshot(tmp_path: Path):
         content=(FIXTURES / "football.json").read_text(encoding="utf-8"),
         retrieved_at=OBSERVED,
         extension="json",
+    )
+    normalized = normalize_bookmaker_bundles(
+        (bundle,),
+        reconciliations=reconciled,
+        source_file_sha256=capture.checksum_sha256,
     )
     manifest = persist_capture_manifest(
         raw_directory=raw,
@@ -141,6 +145,146 @@ def test_loader_rejects_tampered_capture_bytes(tmp_path: Path) -> None:
             break
     with connect_database(database) as connection:
         with pytest.raises((SnapshotVerificationError, SnapshotIntegrityError)):
+            load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def _multi_event_payload() -> dict:
+    payload = json.loads((FIXTURES / "football.json").read_text(encoding="utf-8"))
+    second = json.loads(json.dumps(payload["events"][0]))
+    second["source_event_id"] = "betano-evt-football-2"
+    second["participants"][0]["source_participant_id"] = "betano-club-east"
+    second["participants"][0]["display_name"] = "East United"
+    second["participants"][0]["normalized_name"] = "east united"
+    second["participants"][1]["source_participant_id"] = "betano-club-west"
+    second["participants"][1]["display_name"] = "West Rovers"
+    second["participants"][1]["normalized_name"] = "west rovers"
+    payload["events"].append(second)
+    return payload
+
+
+def test_loader_accepts_same_market_on_distinct_events(tmp_path: Path) -> None:
+    database = tmp_path / "operational.sqlite3"
+    ensure_database_ready(database)
+    snapshots = tmp_path / "snapshots"
+    raw = tmp_path / "raw"
+    payload = _multi_event_payload()
+    bundle = parse_betano_synthetic_payloads(
+        [payload],
+        provider_id="betano-pt",
+        adapter_version=BETANO_ADAPTER,
+        acquisition_cycle_id="cycle-multi",
+        observed_at_utc=OBSERVED,
+        sport="football",
+    )
+    reconciled = reconcile_bookmaker_bundles((bundle,))
+    store = BookmakerRawCaptureStore(raw)
+    capture = store.store_text(
+        source_name="betano-pt",
+        capture_kind="provider-json",
+        content=json.dumps(payload),
+        retrieved_at=OBSERVED,
+        extension="json",
+    )
+    normalized = normalize_bookmaker_bundles(
+        (bundle,),
+        reconciliations=reconciled,
+        source_file_sha256=capture.checksum_sha256,
+    )
+    manifest = persist_capture_manifest(
+        raw_directory=raw,
+        manifest=build_capture_manifest(
+            provider_id="betano-pt",
+            acquisition_cycle_id="cycle-multi",
+            captures=(capture,),
+        ),
+    )
+    source_version = build_bookmaker_source_version(
+        sport_code="football",
+        acquisition_cycle_id="cycle-multi",
+        raw_sha256=manifest.checksum_sha256,
+    )
+    publication = publish_bookmaker_snapshot(
+        database_path=database,
+        snapshots_directory=snapshots,
+        sport_code="football",
+        source_version=source_version,
+        source_observed_at_utc=OBSERVED,
+        bundle=normalized,
+        raw_artifact=manifest_to_raw_artifact(manifest),
+        domain_metadata={
+            "capture_manifest_relative_path": manifest.relative_path,
+            "capture_manifest_checksum_sha256": manifest.checksum_sha256,
+        },
+    )
+    with connect_database(database) as connection:
+        from sports_analytics.data.database import transaction
+        from sports_analytics.data.repositories.bookmakers import BookmakerRepository
+
+        with transaction(connection, immediate=True):
+            BookmakerRepository(connection).register_snapshot(
+                snapshot_id=publication.published.snapshot_id,
+                provider_id="betano-pt",
+                sport="football",
+                schema_version=publication.published.schema_version,
+                checksum_sha256=publication.published.manifest_checksum_sha256,
+                relative_path=publication.published.snapshot_relative_path,
+                observed_at=OBSERVED,
+                registered_at=OBSERVED,
+                acquisition_cycle_id="cycle-multi",
+            )
+        loaded = load_bookmaker_snapshot(
+            database_connection=connection,
+            snapshots_directory=snapshots,
+            raw_directory=raw,
+            snapshot_id=publication.published.snapshot_id,
+        )
+    assert loaded.event_count == 2
+    assert loaded.quote_count >= 6
+
+
+def test_loader_rejects_duplicate_quote_observation_id(tmp_path: Path) -> None:
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from sports_analytics.snapshots.parquet import file_sha256_and_size
+    from sports_analytics.snapshots.spec import MANIFEST_FILENAME
+
+    database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
+    quotes_path = next(snapshots.rglob("market_quotes.parquet"))
+    manifest_path = quotes_path.parent / MANIFEST_FILENAME
+    table = pq.read_table(quotes_path)
+    rows = table.to_pylist()
+    rows.append(dict(rows[0]))
+    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), quotes_path)
+    digest, byte_count = file_sha256_and_size(quotes_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in manifest["files"]:
+        if entry["relative_filename"] == "market_quotes.parquet":
+            entry["sha256"] = digest
+            entry["byte_count"] = byte_count
+            entry["row_count"] = len(rows)
+    if "row_counts" in manifest:
+        manifest["row_counts"]["market_quotes"] = len(rows)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_digest = __import__("hashlib").sha256(manifest_path.read_bytes()).hexdigest()
+    with connect_database(database) as connection:
+        connection.execute(
+            "UPDATE snapshots SET checksum_sha256 = ?, row_count = ? WHERE id = ?",
+            (manifest_digest, len(rows), snapshot_id),
+        )
+        connection.execute(
+            "UPDATE bookmaker_snapshot_registrations SET checksum_sha256 = ? WHERE snapshot_id = ?",
+            (manifest_digest, snapshot_id),
+        )
+        connection.commit()
+        with pytest.raises(SnapshotVerificationError, match="quote_observation_id must be unique"):
             load_bookmaker_snapshot(
                 database_connection=connection,
                 snapshots_directory=snapshots,

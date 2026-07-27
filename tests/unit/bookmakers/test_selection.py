@@ -7,18 +7,16 @@ from decimal import Decimal
 
 import pytest
 
-from sports_analytics.bookmakers.selection import (
-    BookmakerPricedQuote,
-    BookmakerSelectionPolicy,
-    select_quote_pair,
-)
+from sports_analytics.bookmakers.selection import BookmakerSelectionPolicy, select_quote_pair
 from sports_analytics.bookmakers.types import (
     PROVIDER_BETANO_PT,
     PROVIDER_BETCLIC_PT,
     QuoteSelectionReason,
     SelectionMode,
 )
+from sports_analytics.bookmakers.verified_evidence import VerifiedBookmakerQuote
 from sports_analytics.core.exceptions import PermanentSourceError
+from tests.unit.bookmakers.verified_quote_helpers import verified_quote
 
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 
@@ -28,33 +26,36 @@ def _quote(
     odds: str,
     *,
     age_seconds: int = 0,
-    fresh: bool = True,
-    selection_id: str = "sel-home",
-    snapshot_id: str | None = "snap-1",
-    snapshot_checksum_sha256: str | None = "a" * 64,
-) -> BookmakerPricedQuote:
-    return BookmakerPricedQuote(
+    selection_id: str = "home",
+    snapshot_id: str = "snap-1",
+    snapshot_checksum_sha256: str = "a" * 64,
+) -> VerifiedBookmakerQuote:
+    return verified_quote(
         provider_id=provider_id,
-        decimal_odds=Decimal(odds),
-        observed_at_utc=NOW - timedelta(seconds=age_seconds),
-        canonical_event_id="event-1",
-        canonical_market_definition_id="football-match-result-1x2",
-        canonical_selection_id=selection_id,
-        fresh=fresh,
+        odds=odds,
+        age_seconds=age_seconds,
+        observed_at=NOW,
+        selection_id=selection_id,
         snapshot_id=snapshot_id,
         snapshot_checksum_sha256=snapshot_checksum_sha256,
     )
 
 
 def test_verified_selectable_quote_requires_snapshot_evidence() -> None:
-    quote = BookmakerPricedQuote(
+    quote = VerifiedBookmakerQuote(
+        snapshot_id="",
+        snapshot_checksum_sha256="",
         provider_id=PROVIDER_BETANO_PT,
-        decimal_odds=Decimal("2.00"),
+        sport="football",
+        identity=_quote(PROVIDER_BETANO_PT, "2.00").identity,
+        decimal_odds=_quote(PROVIDER_BETANO_PT, "2.00").decimal_odds,
         observed_at_utc=NOW,
-        canonical_event_id="event-1",
+        market_status="open",
+        selection_status="active",
+        source_file_sha256="b" * 64,
         canonical_market_definition_id="football-match-result-1x2",
         canonical_selection_id="home",
-        fresh=True,
+        source_event_id="source-a",
     )
     with pytest.raises(PermanentSourceError, match="verified snapshot_id"):
         select_quote_pair(quote, None, BookmakerSelectionPolicy(), NOW)
@@ -182,3 +183,16 @@ def test_every_quote_retains_source_identity() -> None:
     assert result.betclic_quote.provider_id == PROVIDER_BETCLIC_PT
     assert result.selected_quote is not None
     assert result.selected_quote.provider_id == result.selected_bookmaker_id
+
+
+def test_future_observed_timestamp_is_not_fresh() -> None:
+    future = NOW + timedelta(hours=1)
+    quote = verified_quote(
+        provider_id=PROVIDER_BETANO_PT,
+        odds="2.00",
+        observed_at=future,
+        age_seconds=0,
+    )
+    result = select_quote_pair(quote, None, BookmakerSelectionPolicy(), NOW)
+    assert result.selected_quote is None
+    assert result.reason_code is QuoteSelectionReason.NEITHER_AVAILABLE

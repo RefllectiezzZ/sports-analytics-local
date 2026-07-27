@@ -66,6 +66,7 @@ class BookmakerAcquisitionOrchestrator:
         *,
         sport: str,
         acquisition_cycle_id: str | None = None,
+        observed_at_utc: datetime | None = None,
         actor: str = "bookmaker-orchestrator",
         attempt_number: int = 1,
         maximum_attempts: int = 2,
@@ -73,6 +74,11 @@ class BookmakerAcquisitionOrchestrator:
         """Attempt Betano, then Betclic when policy permits, with explicit fallback."""
         cycle_id = (
             acquisition_cycle_id if acquisition_cycle_id is not None else normalize_uuid(None)
+        )
+        observed_at = (
+            self._normalize_utc(observed_at_utc)
+            if observed_at_utc is not None
+            else self._normalize_utc(self._clock())
         )
         betano_result: BookmakerIngestionResult | None = None
         betclic_result: BookmakerIngestionResult | None = None
@@ -82,6 +88,7 @@ class BookmakerAcquisitionOrchestrator:
                 provider_id=PROVIDER_BETANO_PT,
                 sport=sport,
                 acquisition_cycle_id=f"{cycle_id}-betano",
+                observed_at_utc=observed_at,
                 actor=actor,
                 attempt_number=attempt_number,
                 maximum_attempts=maximum_attempts,
@@ -118,6 +125,7 @@ class BookmakerAcquisitionOrchestrator:
                 provider_id=PROVIDER_BETCLIC_PT,
                 sport=sport,
                 acquisition_cycle_id=f"{cycle_id}-betclic",
+                observed_at_utc=observed_at,
                 actor=actor,
                 attempt_number=attempt_number,
                 maximum_attempts=maximum_attempts,
@@ -127,10 +135,7 @@ class BookmakerAcquisitionOrchestrator:
                 provider_id=PROVIDER_BETCLIC_PT,
             )
 
-        cached = self._verified_cached_snapshot_reference(
-            provider_id=PROVIDER_BETANO_PT,
-            sport=sport,
-        )
+        cached = self._select_verified_cached_snapshot_reference(sport=sport)
         decision = resolve_provider_fallback(
             preferred_attempt=betano_attempt,
             comparison_attempt=comparison_attempt,
@@ -157,6 +162,7 @@ class BookmakerAcquisitionOrchestrator:
         provider_id: str,
         sport: str,
         acquisition_cycle_id: str,
+        observed_at_utc: datetime,
         actor: str,
         attempt_number: int,
         maximum_attempts: int,
@@ -165,6 +171,7 @@ class BookmakerAcquisitionOrchestrator:
             return self._service.ingest(
                 provider_id=provider_id,
                 sport=sport,
+                observed_at_utc=observed_at_utc,
                 acquisition_cycle_id=acquisition_cycle_id,
                 actor=actor,
                 attempt_number=attempt_number,
@@ -192,24 +199,54 @@ class BookmakerAcquisitionOrchestrator:
                 drift_codes=(),
             )
 
+    def _select_verified_cached_snapshot_reference(
+        self,
+        *,
+        sport: str,
+    ) -> CachedSnapshotReference | None:
+        candidates: list[CachedSnapshotReference] = []
+        now = self._clock()
+        for provider_id in (PROVIDER_BETANO_PT, PROVIDER_BETCLIC_PT):
+            reference = self._verified_cached_snapshot_reference(
+                provider_id=provider_id,
+                sport=sport,
+                now=now,
+            )
+            if reference is not None:
+                candidates.append(reference)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item.observed_at_utc)
+
     def _verified_cached_snapshot_reference(
         self,
         *,
         provider_id: str,
         sport: str,
+        now: datetime,
     ) -> CachedSnapshotReference | None:
         with connect_database(self._database_path, read_only=True) as connection:
-            status = BookmakerRepository(connection).get_provider_status(provider_id, sport)
-        if status is None:
+            repo = BookmakerRepository(connection)
+            status = repo.get_provider_status(provider_id, sport)
+            registration = None
+            snap_id = None
+            if status is not None:
+                raw_snap = status.get("last_valid_snapshot_id")
+                if isinstance(raw_snap, str) and raw_snap:
+                    snap_id = raw_snap
+            if snap_id is None:
+                return None
+            registration = repo.get_snapshot_registration(snap_id)
+        if registration is None:
             return None
-        snap_id = status.get("last_valid_snapshot_id")
-        if not isinstance(snap_id, str) or not snap_id:
-            return None
-        observed_raw = status.get("last_successful_at_utc")
+        observed_raw = registration.get("observed_at_utc")
+        if observed_raw is None:
+            observed_raw = status.get("last_successful_at_utc") if status is not None else None
         if not isinstance(observed_raw, str) or not observed_raw:
             return None
         observed_at = parse_utc_timestamp(observed_raw)
-        now = self._clock()
+        if observed_at > now:
+            return None
         age_seconds = max(0, int((now - observed_at).total_seconds()))
         with connect_database(self._database_path, read_only=True) as connection:
             loaded = load_bookmaker_snapshot(
@@ -221,11 +258,17 @@ class BookmakerAcquisitionOrchestrator:
         if loaded.provider_id != provider_id or loaded.sport != sport:
             return None
         return CachedSnapshotReference(
+            provider_id=provider_id,
             snapshot_id=snap_id,
             observed_at_utc=observed_at,
             age_seconds=age_seconds,
             is_current=False,
         )
+
+    def _normalize_utc(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     def _persist_fallback(self, decision: ProviderFallbackDecision) -> None:
         attempted: JsonValue = [
@@ -235,6 +278,13 @@ class BookmakerAcquisitionOrchestrator:
             }
             for provider_id, classification in decision.failure_classifications
         ]
+        if decision.cached_used:
+            attempted = {
+                "providers": attempted,
+                "cached_provider_id": decision.cached_provider_id,
+                "cached_snapshot_id": decision.cached_snapshot_id,
+                "cached_age_seconds": decision.cached_age_seconds,
+            }
         with connect_database(self._database_path) as connection:
             with transaction(connection, immediate=True):
                 BookmakerRepository(connection).insert_fallback_decision(

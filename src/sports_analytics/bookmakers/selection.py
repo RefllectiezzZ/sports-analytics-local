@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 
+from sports_analytics.bookmakers.priced_quote import (
+    BookmakerPricedQuote,
+    quote_is_fresh_at,
+)
 from sports_analytics.bookmakers.types import (
     BOOKMAKER_SELECTION_POLICY_ID,
     DEFAULT_QUOTE_MAXIMUM_AGE_SECONDS,
@@ -15,8 +19,8 @@ from sports_analytics.bookmakers.types import (
     QuoteSelectionReason,
     SelectionMode,
 )
+from sports_analytics.bookmakers.verified_evidence import VerifiedBookmakerQuote
 from sports_analytics.core.exceptions import PermanentSourceError
-from sports_analytics.markets.contracts import validate_decimal_odds
 from sports_analytics.sports.contracts import require_utc
 
 
@@ -46,73 +50,6 @@ class BookmakerSelectionPolicy:
 DEFAULT_BOOKMAKER_SELECTION_POLICY: BookmakerSelectionPolicy = BookmakerSelectionPolicy()
 
 
-@dataclass(frozen=True, slots=True)
-class QuoteEquivalenceIdentity:
-    """Verified identity for comparing two bookmaker quotes as the same bet."""
-
-    canonical_event_id: str
-    canonical_market_definition_id: str
-    canonical_selection_id: str
-    line: str | None = None
-    period: str | None = None
-    participant_scope: str | None = None
-    overtime_scope: str | None = None
-    rules_scope: str | None = None
-    pre_match_state: str = "pre-match"
-    comparison_policy_version: str = QUOTE_EQUIVALENCE_POLICY_ID
-
-
-@dataclass(frozen=True, slots=True)
-class BookmakerPricedQuote:
-    """One priced selection from exactly one bookmaker provider."""
-
-    provider_id: str
-    decimal_odds: Decimal
-    observed_at_utc: datetime
-    canonical_event_id: str
-    canonical_market_definition_id: str
-    canonical_selection_id: str
-    fresh: bool
-    line: str | None = None
-    period: str | None = None
-    participant_scope: str | None = None
-    overtime_scope: str | None = None
-    rules_scope: str | None = None
-    market_status: str = "open"
-    selection_status: str = "active"
-    snapshot_id: str | None = None
-    snapshot_checksum_sha256: str | None = None
-
-    def equivalence_identity(self) -> QuoteEquivalenceIdentity:
-        return QuoteEquivalenceIdentity(
-            canonical_event_id=self.canonical_event_id,
-            canonical_market_definition_id=self.canonical_market_definition_id,
-            canonical_selection_id=self.canonical_selection_id,
-            line=self.line,
-            period=self.period,
-            participant_scope=self.participant_scope,
-            overtime_scope=self.overtime_scope,
-            rules_scope=self.rules_scope,
-        )
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "decimal_odds", validate_decimal_odds(self.decimal_odds))
-        object.__setattr__(
-            self,
-            "observed_at_utc",
-            require_utc(self.observed_at_utc, field_name="observed_at_utc"),
-        )
-        if self.provider_id not in {PROVIDER_BETANO_PT, PROVIDER_BETCLIC_PT}:
-            msg = f"unsupported bookmaker provider_id: {self.provider_id}"
-            raise PermanentSourceError(msg)
-        if self.market_status != "open":
-            msg = "only open markets may be selected for comparison"
-            raise PermanentSourceError(msg)
-        if self.selection_status != "active":
-            msg = "only active selections may be selected for comparison"
-            raise PermanentSourceError(msg)
-
-
 def quotes_are_equivalent(
     left: BookmakerPricedQuote,
     right: BookmakerPricedQuote,
@@ -122,20 +59,6 @@ def quotes_are_equivalent(
     if left.equivalence_identity() != right.equivalence_identity():
         return False
     return left.equivalence_identity().comparison_policy_version == policy.equivalence_policy_id
-
-
-def quote_is_fresh_at(
-    quote: BookmakerPricedQuote,
-    *,
-    compared_at: datetime,
-    maximum_age_seconds: int,
-) -> bool:
-    observed = require_utc(quote.observed_at_utc, field_name="observed_at_utc")
-    current = require_utc(compared_at, field_name="compared_at")
-    if observed > current:
-        return False
-    age = current - observed
-    return timedelta(seconds=0) <= age <= timedelta(seconds=maximum_age_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,35 +93,32 @@ class BookmakerQuoteComparison:
             raise PermanentSourceError(msg)
 
 
-def quote_is_fresh(
-    quote: BookmakerPricedQuote,
-    *,
-    now: datetime,
-    maximum_age_seconds: int,
-) -> bool:
-    """Return whether ``quote`` is within the configured freshness window."""
-    return quote_is_fresh_at(
-        quote,
-        compared_at=now,
-        maximum_age_seconds=maximum_age_seconds,
-    )
-
-
 def select_quote_pair(
-    betano_quote: BookmakerPricedQuote | None,
-    betclic_quote: BookmakerPricedQuote | None,
+    betano_quote: VerifiedBookmakerQuote | None,
+    betclic_quote: VerifiedBookmakerQuote | None,
     policy: BookmakerSelectionPolicy,
-    now: datetime,
+    evaluated_at_utc: datetime,
 ) -> BookmakerQuoteComparison:
-    """Select a bookmaker quote under the configured preference policy.
-
-    Never hides source bookmaker identity. Stale comparison quotes must not
-    replace a fresh preferred quote. ``both`` retains separate quotes without a
-    single selected winner.
-    """
-    compared_at = require_utc(now, field_name="now")
-    betano = _validated_side(betano_quote, expected=PROVIDER_BETANO_PT)
-    betclic = _validated_side(betclic_quote, expected=PROVIDER_BETCLIC_PT)
+    """Select a bookmaker quote under the configured preference policy."""
+    compared_at = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
+    betano_verified = _validated_verified_side(betano_quote, expected=PROVIDER_BETANO_PT)
+    betclic_verified = _validated_verified_side(betclic_quote, expected=PROVIDER_BETCLIC_PT)
+    betano = (
+        None
+        if betano_verified is None
+        else betano_verified.to_priced_quote(
+            evaluated_at_utc=compared_at,
+            maximum_age_seconds=policy.quote_maximum_age_seconds,
+        )
+    )
+    betclic = (
+        None
+        if betclic_verified is None
+        else betclic_verified.to_priced_quote(
+            evaluated_at_utc=compared_at,
+            maximum_age_seconds=policy.quote_maximum_age_seconds,
+        )
+    )
 
     if (
         betano is not None
@@ -227,7 +147,6 @@ def select_quote_pair(
         )
     )
 
-    # Re-stamp freshness onto quotes so callers see policy evaluation results.
     if betano is not None and betano_fresh is not None and betano.fresh != betano_fresh:
         betano = _with_fresh(betano, betano_fresh)
     if betclic is not None and betclic_fresh is not None and betclic.fresh != betclic_fresh:
@@ -290,8 +209,6 @@ def select_quote_pair(
         )
 
     if usable_betano is None and usable_betclic is None:
-        # Prefer retaining a stale preferred observation over a stale comparison
-        # when neither is fresh, still labelling neither as a current selection.
         return _comparison(
             selected_bookmaker_id=None,
             selected_quote=None,
@@ -384,11 +301,11 @@ def _require_verified_selectable_quote(quote: BookmakerPricedQuote) -> None:
         raise PermanentSourceError(msg)
 
 
-def _validated_side(
-    quote: BookmakerPricedQuote | None,
+def _validated_verified_side(
+    quote: VerifiedBookmakerQuote | None,
     *,
     expected: str,
-) -> BookmakerPricedQuote | None:
+) -> VerifiedBookmakerQuote | None:
     if quote is None:
         return None
     if quote.provider_id != expected:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -126,9 +127,21 @@ def persist_capture_manifest(
             msg = "existing capture manifest content does not match checksum path"
             raise PermanentSourceError(msg)
     else:
-        absolute.write_bytes(manifest.manifest_bytes)
-        with absolute.open("rb") as handle:
-            os.fsync(handle.fileno())
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{manifest.checksum_sha256}.",
+            suffix=".tmp",
+            dir=str(absolute.parent),
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(manifest.manifest_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, absolute)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
     return manifest
 
 
