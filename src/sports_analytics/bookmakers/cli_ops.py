@@ -6,6 +6,8 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+from sports_analytics.bookmakers.diagnostics.probe import probe_bookmaker
+from sports_analytics.bookmakers.diagnostics.smoke import smoke_bookmaker
 from sports_analytics.bookmakers.enqueue import enqueue_bookmaker_acquisition
 from sports_analytics.bookmakers.loader import load_bookmaker_snapshot
 from sports_analytics.bookmakers.types import (
@@ -223,6 +225,89 @@ def enqueue_bookmaker_acquisition_cli(
                 "provider_id": provider,
                 "sport": sport,
                 "status": job.status.value,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return SUCCESS_EXIT
+
+
+def probe_bookmaker_cli(
+    *,
+    provider: str,
+    sport: str,
+    duration_seconds: str | None = None,
+    diagnostic_directory: str | None = None,
+) -> int:
+    """Run one visible localhost probe and print sanitized structural evidence."""
+    duration = 30
+    if duration_seconds is not None:
+        duration = parse_cli_positive_bounded_int(duration_seconds, field_name="duration_seconds")
+    result = probe_bookmaker(
+        provider_id=provider,
+        sport=sport,
+        duration_seconds=duration,
+        diagnostic_directory=diagnostic_directory,
+    )
+    print(
+        json.dumps(
+            {
+                "provider": result.provider,
+                "sport": result.sport,
+                "duration_seconds": result.duration_seconds,
+                "blocked": result.blocked,
+                "block_reason": result.block_reason,
+                "response_count": len(result.responses),
+                "page_count": len(result.pages),
+                "diagnostic_relative_path": result.diagnostic_relative_path,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return SUCCESS_EXIT
+
+
+def smoke_bookmaker_cli(
+    *,
+    config: str | None,
+    env_file: str | None,
+    provider: str,
+    sport: str,
+    duration_seconds: str | None = None,
+    diagnostic_directory: str | None = None,
+) -> int:
+    """Run one bounded provider smoke test."""
+    runtime = bootstrap_runtime(
+        "scraper",
+        config_path=config,
+        env_file=env_file,
+    )
+    duration = 60
+    if duration_seconds is not None:
+        duration = parse_cli_positive_bounded_int(duration_seconds, field_name="duration_seconds")
+    result = smoke_bookmaker(
+        provider_id=provider,
+        sport=sport,
+        duration_seconds=duration,
+        diagnostic_directory=diagnostic_directory,
+        database_path=runtime.database_path,
+        raw_directory=runtime.paths.raw_directory,
+        snapshots_directory=runtime.paths.snapshots_directory,
+        clock=lambda: runtime.started_at,
+    )
+    print(
+        json.dumps(
+            {
+                "provider": result.provider,
+                "sport": result.sport,
+                "succeeded": result.succeeded,
+                "failure_reason": result.failure_reason,
+                "profile_id": result.profile_id,
+                "profile_verified": result.profile_verified,
+                "diagnostic_relative_path": result.diagnostic_relative_path,
+                "acceptance_summary": result.acceptance_summary,
             },
             sort_keys=True,
             separators=(",", ":"),

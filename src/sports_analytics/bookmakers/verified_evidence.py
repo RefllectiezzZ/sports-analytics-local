@@ -7,9 +7,14 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from sports_analytics.bookmakers.canonical_mapping import (
+    canonical_market_definition_id_from_row,
+    overtime_scope_from_definition_id,
+    rules_scope_from_definition_id,
+)
 from sports_analytics.bookmakers.priced_quote import BookmakerPricedQuote, quote_is_fresh_at
 from sports_analytics.bookmakers.types import PROVIDER_BETANO_PT, PROVIDER_BETCLIC_PT
-from sports_analytics.core.exceptions import PermanentSourceError, SnapshotVerificationError
+from sports_analytics.core.exceptions import SnapshotVerificationError
 from sports_analytics.markets.contracts import validate_decimal_odds
 from sports_analytics.sports.contracts import require_utc
 
@@ -29,6 +34,8 @@ class BookmakerQuoteIdentity:
     outcome_key: str
     quote_phase: str
     quote_observation_id: str
+    overtime_scope: str | None = None
+    rules_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,60 +55,6 @@ class VerifiedBookmakerQuote:
     canonical_market_definition_id: str
     canonical_selection_id: str
     source_event_id: str
-
-    @classmethod
-    def from_loaded_snapshot(
-        cls,
-        *,
-        loaded_snapshot_id: str,
-        loaded_checksum_sha256: str,
-        loaded_provider_id: str,
-        loaded_sport: str,
-        loaded_verified: bool,
-        quote_row: dict[str, Any],
-        expected_snapshot_id: str,
-        expected_checksum_sha256: str,
-    ) -> VerifiedBookmakerQuote:
-        """Construct verified quote evidence from loader output fields and one quote row."""
-        if not loaded_verified:
-            msg = "verified quote requires a verified loaded snapshot"
-            raise PermanentSourceError(msg)
-        if loaded_snapshot_id != expected_snapshot_id:
-            msg = "quote snapshot_id does not match verified snapshot"
-            raise PermanentSourceError(msg)
-        if loaded_checksum_sha256 != expected_checksum_sha256:
-            msg = "quote snapshot checksum does not match verified snapshot"
-            raise PermanentSourceError(msg)
-        if str(quote_row.get("provider_id")) != loaded_provider_id:
-            msg = "quote provider_id does not match verified snapshot registration"
-            raise PermanentSourceError(msg)
-        sport = str(quote_row.get("sport_code", loaded_sport))
-        if sport != loaded_sport:
-            msg = "quote sport does not match verified snapshot registration"
-            raise PermanentSourceError(msg)
-        identity = bookmaker_quote_identity_from_row(quote_row)
-        observed_raw = quote_row.get("source_observed_at_utc")
-        if not isinstance(observed_raw, datetime):
-            msg = "quote row requires source_observed_at_utc timestamp"
-            raise PermanentSourceError(msg)
-        market_key = str(quote_row.get("market_key", ""))
-        canonical_market_definition_id = _canonical_market_definition_id(market_key)
-        outcome_key = str(quote_row.get("outcome_key", ""))
-        return cls(
-            snapshot_id=loaded_snapshot_id,
-            snapshot_checksum_sha256=loaded_checksum_sha256,
-            provider_id=loaded_provider_id,
-            sport=loaded_sport,
-            identity=identity,
-            decimal_odds=validate_decimal_odds(Decimal(str(quote_row["decimal_odds"]))),
-            observed_at_utc=require_utc(observed_raw, field_name="source_observed_at_utc"),
-            market_status=str(quote_row.get("market_status", "open")),
-            selection_status=str(quote_row.get("selection_status", "active")),
-            source_file_sha256=str(quote_row.get("source_file_sha256", "")),
-            canonical_market_definition_id=canonical_market_definition_id,
-            canonical_selection_id=outcome_key,
-            source_event_id=str(quote_row.get("source_event_id", "")),
-        )
 
     def is_fresh_at(self, *, evaluated_at_utc: datetime, maximum_age_seconds: int) -> bool:
         """Recalculate freshness at an explicit evaluation timestamp."""
@@ -142,11 +95,73 @@ class VerifiedBookmakerQuote:
             line=line,
             period=self.identity.market_period,
             participant_scope=self.identity.participant_scope,
+            overtime_scope=self.identity.overtime_scope,
+            rules_scope=self.identity.rules_scope,
             market_status=self.market_status,
             selection_status=self.selection_status,
             snapshot_id=self.snapshot_id,
             snapshot_checksum_sha256=self.snapshot_checksum_sha256,
         )
+
+
+def build_verified_quote_from_loaded_row(
+    *,
+    loaded_snapshot_id: str,
+    loaded_checksum_sha256: str,
+    loaded_provider_id: str,
+    loaded_sport: str,
+    quote_row: dict[str, Any],
+) -> VerifiedBookmakerQuote:
+    """Construct one verified quote from a loader-validated snapshot row.
+
+    This function is only called by the strict snapshot loader after verification.
+    """
+    identity = bookmaker_quote_identity_from_row(quote_row)
+    if identity.provider_id != loaded_provider_id:
+        msg = "quote provider_id does not match verified snapshot registration"
+        raise SnapshotVerificationError(msg)
+    sport = str(quote_row.get("sport_code", loaded_sport))
+    if sport != loaded_sport:
+        msg = "quote sport does not match verified snapshot registration"
+        raise SnapshotVerificationError(msg)
+    observed_raw = quote_row.get("source_observed_at_utc")
+    if not isinstance(observed_raw, datetime):
+        msg = "quote row requires source_observed_at_utc timestamp"
+        raise SnapshotVerificationError(msg)
+    canonical_market_definition_id = canonical_market_definition_id_from_row(quote_row)
+    overtime_scope = overtime_scope_from_definition_id(canonical_market_definition_id)
+    rules_scope = rules_scope_from_definition_id(canonical_market_definition_id)
+    identity = BookmakerQuoteIdentity(
+        canonical_event_id=identity.canonical_event_id,
+        provider_id=identity.provider_id,
+        market_key=identity.market_key,
+        market_period=identity.market_period,
+        participant_scope=identity.participant_scope,
+        canonical_participant_id=identity.canonical_participant_id,
+        line_type=identity.line_type,
+        line_value=identity.line_value,
+        outcome_key=identity.outcome_key,
+        quote_phase=identity.quote_phase,
+        quote_observation_id=identity.quote_observation_id,
+        overtime_scope=overtime_scope,
+        rules_scope=rules_scope,
+    )
+    outcome_key = str(quote_row.get("outcome_key", ""))
+    return VerifiedBookmakerQuote(
+        snapshot_id=loaded_snapshot_id,
+        snapshot_checksum_sha256=loaded_checksum_sha256,
+        provider_id=loaded_provider_id,
+        sport=loaded_sport,
+        identity=identity,
+        decimal_odds=validate_decimal_odds(Decimal(str(quote_row["decimal_odds"]))),
+        observed_at_utc=require_utc(observed_raw, field_name="source_observed_at_utc"),
+        market_status=str(quote_row.get("market_status", "open")),
+        selection_status=str(quote_row.get("selection_status", "active")),
+        source_file_sha256=str(quote_row.get("source_file_sha256", "")),
+        canonical_market_definition_id=canonical_market_definition_id,
+        canonical_selection_id=outcome_key,
+        source_event_id=str(quote_row.get("source_event_id", "")),
+    )
 
 
 def bookmaker_quote_identity_from_row(row: dict[str, Any]) -> BookmakerQuoteIdentity:
@@ -182,6 +197,8 @@ def quote_semantic_identity_key(identity: BookmakerQuoteIdentity) -> tuple[objec
         identity.line_value,
         identity.outcome_key,
         identity.quote_phase,
+        identity.overtime_scope,
+        identity.rules_scope,
     )
 
 
@@ -207,9 +224,22 @@ def verify_quote_row_identity(row: dict[str, Any]) -> BookmakerQuoteIdentity:
     return bookmaker_quote_identity_from_row(row)
 
 
-def _canonical_market_definition_id(market_key: str) -> str:
-    """Map persisted market_key to the canonical market definition identifier."""
-    parts = market_key.split(".")
-    if len(parts) >= 3:
-        return ".".join(parts[1:-1])
-    return market_key
+def leg_identity_from_verified_quote(quote: VerifiedBookmakerQuote) -> tuple[object, ...]:
+    """Return the full multiple-leg identity dimensions for one verified quote."""
+    identity = quote.identity
+    return (
+        quote.provider_id,
+        identity.canonical_event_id,
+        quote.canonical_market_definition_id,
+        quote.canonical_selection_id,
+        identity.canonical_participant_id,
+        identity.line_type,
+        identity.line_value,
+        identity.market_period,
+        identity.participant_scope,
+        identity.overtime_scope,
+        identity.rules_scope,
+        identity.quote_observation_id,
+        quote.snapshot_id,
+        quote.snapshot_checksum_sha256,
+    )

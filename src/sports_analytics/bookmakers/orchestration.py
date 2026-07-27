@@ -20,6 +20,7 @@ from sports_analytics.bookmakers.types import (
     PROVIDER_BETCLIC_PT,
     BookmakerIngestionResult,
     FailureClassification,
+    SelectionMode,
 )
 from sports_analytics.core.exceptions import PermanentJobError, RetryableJobError
 from sports_analytics.core.settings import BookmakersSettings
@@ -27,6 +28,17 @@ from sports_analytics.data.codec import parse_utc_timestamp
 from sports_analytics.data.database import connect_database, transaction
 from sports_analytics.data.repositories.bookmakers import BookmakerRepository
 from sports_analytics.data.types import JsonValue, normalize_uuid
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSubAttempt:
+    """One provider acquisition sub-attempt within a logical autonomous cycle."""
+
+    provider_id: str
+    acquisition_cycle_id: str
+    result: BookmakerIngestionResult | None
+    outcome: ProviderAttemptOutcome
+    skipped_cooldown: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,10 +51,11 @@ class OrchestratedAcquisitionResult:
     betano_result: BookmakerIngestionResult | None
     betclic_result: BookmakerIngestionResult | None
     selected_result: BookmakerIngestionResult | None
+    provider_sub_attempts: tuple[ProviderSubAttempt, ...] = ()
 
 
 class BookmakerAcquisitionOrchestrator:
-    """Coordinate Betano preferred / Betclic fallback acquisition cycles."""
+    """Coordinate Betano preferred / Betclic comparison acquisition cycles."""
 
     def __init__(
         self,
@@ -67,72 +80,100 @@ class BookmakerAcquisitionOrchestrator:
         sport: str,
         acquisition_cycle_id: str | None = None,
         observed_at_utc: datetime | None = None,
+        scheduled_for_utc: datetime | None = None,
         actor: str = "bookmaker-orchestrator",
         attempt_number: int = 1,
         maximum_attempts: int = 2,
     ) -> OrchestratedAcquisitionResult:
-        """Attempt Betano, then Betclic when policy permits, with explicit fallback."""
+        """Acquire providers per selection mode with independent sub-attempts."""
         cycle_id = (
             acquisition_cycle_id if acquisition_cycle_id is not None else normalize_uuid(None)
         )
-        observed_at = (
-            self._normalize_utc(observed_at_utc)
-            if observed_at_utc is not None
-            else self._normalize_utc(self._clock())
-        )
+        now = self._normalize_utc(self._clock())
+        observed_at = self._normalize_utc(observed_at_utc) if observed_at_utc is not None else now
+        _ = scheduled_for_utc
+        providers = _providers_for_selection_mode(self._bookmakers)
+        sub_attempts: list[ProviderSubAttempt] = []
+        retryable_providers: list[str] = []
         betano_result: BookmakerIngestionResult | None = None
         betclic_result: BookmakerIngestionResult | None = None
 
-        if self._bookmakers.betano.enabled:
-            betano_result = self._ingest_provider(
-                provider_id=PROVIDER_BETANO_PT,
-                sport=sport,
-                acquisition_cycle_id=f"{cycle_id}-betano",
-                observed_at_utc=observed_at,
-                actor=actor,
-                attempt_number=attempt_number,
-                maximum_attempts=maximum_attempts,
+        for provider_id in providers:
+            if not self._provider_eligible(provider_id=provider_id, sport=sport, now=now):
+                outcome = ProviderAttemptOutcome(
+                    provider_id=provider_id,
+                    success=False,
+                    failure_classification=FailureClassification.BLOCKED,
+                    block_or_failure_code="provider-cooldown",
+                )
+                sub_attempts.append(
+                    ProviderSubAttempt(
+                        provider_id=provider_id,
+                        acquisition_cycle_id=f"{cycle_id}-{provider_id.rsplit('-', 1)[-1]}",
+                        result=None,
+                        outcome=outcome,
+                        skipped_cooldown=True,
+                    )
+                )
+                continue
+            sub_cycle_id = f"{cycle_id}-{provider_id.rsplit('-', 1)[-1]}"
+            try:
+                result = self._ingest_provider(
+                    provider_id=provider_id,
+                    sport=sport,
+                    acquisition_cycle_id=sub_cycle_id,
+                    observed_at_utc=observed_at,
+                    actor=actor,
+                    attempt_number=attempt_number,
+                    maximum_attempts=maximum_attempts,
+                )
+            except RetryableJobError:
+                if attempt_number < maximum_attempts:
+                    retryable_providers.append(provider_id)
+                    outcome = ProviderAttemptOutcome(
+                        provider_id=provider_id,
+                        success=False,
+                        failure_classification=FailureClassification.RETRYABLE,
+                        block_or_failure_code="retryable-source-error",
+                    )
+                    sub_attempts.append(
+                        ProviderSubAttempt(
+                            provider_id=provider_id,
+                            acquisition_cycle_id=sub_cycle_id,
+                            result=None,
+                            outcome=outcome,
+                        )
+                    )
+                    continue
+                raise
+            outcome = _outcome_from_result(result, provider_id=provider_id)
+            sub_attempts.append(
+                ProviderSubAttempt(
+                    provider_id=provider_id,
+                    acquisition_cycle_id=sub_cycle_id,
+                    result=result,
+                    outcome=outcome,
+                )
             )
+            if provider_id == PROVIDER_BETANO_PT:
+                betano_result = result
+            elif provider_id == PROVIDER_BETCLIC_PT:
+                betclic_result = result
 
-        betano_attempt = _outcome_from_result(betano_result, provider_id=PROVIDER_BETANO_PT)
-        comparison_attempt: ProviderAttemptOutcome | None = None
-
-        if betano_attempt.success:
-            decision = resolve_provider_fallback(
-                preferred_attempt=betano_attempt,
-                comparison_attempt=None,
-            )
-            self._persist_fallback(decision)
-            return OrchestratedAcquisitionResult(
-                sport=sport,
-                acquisition_cycle_id=cycle_id,
-                fallback_decision=decision,
-                betano_result=betano_result,
-                betclic_result=None,
-                selected_result=betano_result,
-            )
-
-        if (
-            betano_attempt.failure_classification is FailureClassification.RETRYABLE
-            and attempt_number < maximum_attempts
-        ):
+        if retryable_providers and not _any_success(sub_attempts):
             raise RetryableJobError(
-                betano_attempt.block_or_failure_code or "retryable-betano-failure"
+                f"retryable failures for providers: {','.join(sorted(retryable_providers))}"
             )
 
-        if self._bookmakers.betclic.enabled and _should_attempt_fallback(betano_attempt):
-            betclic_result = self._ingest_provider(
-                provider_id=PROVIDER_BETCLIC_PT,
-                sport=sport,
-                acquisition_cycle_id=f"{cycle_id}-betclic",
-                observed_at_utc=observed_at,
-                actor=actor,
-                attempt_number=attempt_number,
-                maximum_attempts=maximum_attempts,
-            )
-            comparison_attempt = _outcome_from_result(
-                betclic_result,
-                provider_id=PROVIDER_BETCLIC_PT,
+        betano_attempt = _attempt_for_provider(sub_attempts, PROVIDER_BETANO_PT)
+        betclic_attempt = _attempt_for_provider(sub_attempts, PROVIDER_BETCLIC_PT)
+        comparison_attempt = betclic_attempt if betclic_attempt is not None else None
+        if betano_attempt is None:
+            betano_attempt = ProviderAttemptOutcome(
+                provider_id=PROVIDER_BETANO_PT,
+                success=False,
+                failure_classification=FailureClassification.PERMANENT,
+                block_or_failure_code="not-attempted",
             )
 
         cached = self._select_verified_cached_snapshot_reference(sport=sport)
@@ -154,7 +195,20 @@ class BookmakerAcquisitionOrchestrator:
             betano_result=betano_result,
             betclic_result=betclic_result,
             selected_result=selected,
+            provider_sub_attempts=tuple(sub_attempts),
         )
+
+    def _provider_eligible(self, *, provider_id: str, sport: str, now: datetime) -> bool:
+        with connect_database(self._database_path, read_only=True) as connection:
+            status = BookmakerRepository(connection).get_provider_status(provider_id, sport)
+        if status is None:
+            return True
+        if status.get("status") != "blocked":
+            return True
+        next_eligible_raw = status.get("next_eligible_at_utc")
+        if not isinstance(next_eligible_raw, str) or not next_eligible_raw:
+            return False
+        return parse_utc_timestamp(next_eligible_raw) <= now
 
     def _ingest_provider(
         self,
@@ -298,6 +352,20 @@ class BookmakerAcquisitionOrchestrator:
                 )
 
 
+def _providers_for_selection_mode(bookmakers: BookmakersSettings) -> tuple[str, ...]:
+    mode = SelectionMode(bookmakers.selection_mode)
+    if mode is SelectionMode.BETANO:
+        return (PROVIDER_BETANO_PT,) if bookmakers.betano.enabled else ()
+    if mode is SelectionMode.BETCLIC:
+        return (PROVIDER_BETCLIC_PT,) if bookmakers.betclic.enabled else ()
+    providers: list[str] = []
+    if bookmakers.betano.enabled:
+        providers.append(PROVIDER_BETANO_PT)
+    if bookmakers.betclic.enabled:
+        providers.append(PROVIDER_BETCLIC_PT)
+    return tuple(providers)
+
+
 def _outcome_from_result(
     result: BookmakerIngestionResult | None,
     *,
@@ -345,11 +413,15 @@ def _outcome_from_result(
     )
 
 
-def _should_attempt_fallback(attempt: ProviderAttemptOutcome) -> bool:
-    if attempt.success:
-        return False
-    if attempt.failure_classification is FailureClassification.BLOCKED:
-        return True
-    if attempt.failure_classification is FailureClassification.PERMANENT:
-        return True
-    return attempt.failure_classification is FailureClassification.RETRYABLE
+def _attempt_for_provider(
+    sub_attempts: tuple[ProviderSubAttempt, ...] | list[ProviderSubAttempt],
+    provider_id: str,
+) -> ProviderAttemptOutcome | None:
+    for item in sub_attempts:
+        if item.provider_id == provider_id:
+            return item.outcome
+    return None
+
+
+def _any_success(sub_attempts: tuple[ProviderSubAttempt, ...] | list[ProviderSubAttempt]) -> bool:
+    return any(item.outcome.success for item in sub_attempts)

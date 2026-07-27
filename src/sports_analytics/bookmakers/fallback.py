@@ -122,6 +122,24 @@ def resolve_provider_fallback(
     ]
 
     if preferred_attempt.success:
+        if comparison_attempt is not None:
+            attempted.append(comparison_attempt.provider_id)
+            classifications.append(
+                (comparison_attempt.provider_id, comparison_attempt.failure_classification)
+            )
+            if comparison_attempt.success:
+                return ProviderFallbackDecision(
+                    preferred_provider=PROVIDER_BETANO_PT,
+                    attempted_providers=tuple(attempted),
+                    failure_classifications=tuple(classifications),
+                    selected_provider=PROVIDER_BETANO_PT,
+                    cached_used=False,
+                    cached_age_seconds=None,
+                    cached_snapshot_id=None,
+                    cached_provider_id=None,
+                    reason_code=QuoteSelectionReason.BOTH_RETAINED,
+                    data_currency="current",
+                )
         return ProviderFallbackDecision(
             preferred_provider=PROVIDER_BETANO_PT,
             attempted_providers=tuple(attempted),

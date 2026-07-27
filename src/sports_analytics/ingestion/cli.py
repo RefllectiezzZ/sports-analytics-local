@@ -108,6 +108,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Verify a registered bookmaker snapshot summary read-only.",
     )
+    mode.add_argument(
+        "--probe-bookmaker",
+        action="store_true",
+        help="Run a visible localhost structural probe for one bookmaker provider.",
+    )
+    mode.add_argument(
+        "--smoke-bookmaker",
+        action="store_true",
+        help="Run a bounded localhost smoke test for one bookmaker provider.",
+    )
     parser.add_argument(
         "--competition",
         default=None,
@@ -149,6 +159,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="INTEGER",
         help="Optional maximum attempts (default depends on job type).",
+    )
+    parser.add_argument(
+        "--duration-seconds",
+        default=None,
+        metavar="INTEGER",
+        help="Bounded duration for --probe-bookmaker or --smoke-bookmaker.",
+    )
+    parser.add_argument(
+        "--diagnostic-directory",
+        default=None,
+        metavar="PATH",
+        help="Local-only diagnostic output directory (git-ignored by default).",
     )
     return parser
 
@@ -212,6 +234,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 maximum_attempts=args.maximum_attempts,
             )
 
+        if args.probe_bookmaker:
+            return bookmaker_cli.probe_bookmaker_cli(
+                provider=args.provider,
+                sport=args.sport,
+                duration_seconds=args.duration_seconds,
+                diagnostic_directory=args.diagnostic_directory,
+            )
+
+        if args.smoke_bookmaker:
+            return bookmaker_cli.smoke_bookmaker_cli(
+                config=args.config,
+                env_file=args.env_file,
+                provider=args.provider,
+                sport=args.sport,
+                duration_seconds=args.duration_seconds,
+                diagnostic_directory=args.diagnostic_directory,
+            )
+
         parser.error("select a scraper mode such as --list-competitions or --enqueue-football-data")
         return CONFIG_ERROR_EXIT
     except (
@@ -240,6 +280,8 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.provider_status,
         args.list_bookmaker_snapshots,
         args.verify_bookmaker_snapshot is not None,
+        args.probe_bookmaker,
+        args.smoke_bookmaker,
     ]
     if sum(1 for enabled in scraper_modes if enabled) > 1:
         parser.error("scraper modes are mutually exclusive")
@@ -265,16 +307,27 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         parser.error("--enqueue-football-data requires --competition and --season")
     if args.enqueue_bookmaker_acquisition and (args.provider is None or args.sport is None):
         parser.error("--enqueue-bookmaker-acquisition requires --provider and --sport")
+    if args.probe_bookmaker and (args.provider is None or args.sport is None):
+        parser.error("--probe-bookmaker requires --provider and --sport")
+    if args.smoke_bookmaker and (args.provider is None or args.sport is None):
+        parser.error("--smoke-bookmaker requires --provider and --sport")
     if args.sport is not None and not (
-        args.enqueue_bookmaker_acquisition or args.list_bookmaker_snapshots
+        args.enqueue_bookmaker_acquisition
+        or args.list_bookmaker_snapshots
+        or args.probe_bookmaker
+        or args.smoke_bookmaker
     ):
-        parser.error("--sport requires a bookmaker acquisition or snapshots mode")
+        parser.error("--sport requires a bookmaker acquisition, probe, smoke, or snapshots mode")
     if args.provider is not None and not (
         args.enqueue_bookmaker_acquisition
         or args.list_bookmaker_markets
         or args.list_bookmaker_snapshots
+        or args.probe_bookmaker
+        or args.smoke_bookmaker
     ):
-        parser.error("--provider requires a bookmaker markets, acquisition, or snapshots mode")
+        parser.error(
+            "--provider requires a bookmaker markets, acquisition, probe, smoke, or snapshots mode"
+        )
 
 
 def _validate_enqueue_arguments(args: argparse.Namespace) -> tuple[str, str, str | None, int, int]:

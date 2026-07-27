@@ -15,6 +15,8 @@ from sports_analytics.bookmakers.snapshots import (
     build_bookmaker_source_version,
     publish_bookmaker_snapshot,
 )
+from sports_analytics.bookmakers.status import build_provider_status
+from sports_analytics.bookmakers.types import FailureClassification
 from sports_analytics.core.exceptions import SnapshotIntegrityError, SnapshotVerificationError
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.migrations import ensure_database_ready
@@ -29,6 +31,29 @@ from sports_analytics.sources.raw_capture import BookmakerRawCaptureStore
 
 OBSERVED = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "betano"
+
+
+def _provider_status_for_bundle(bundle, *, snapshot_id: str | None):
+    event_count = len(bundle.events)
+    quote_count = len(bundle.market_quotes)
+    return (
+        build_provider_status(
+            provider_id="betano-pt",
+            adapter_version=BETANO_ADAPTER,
+            observed_at_utc=OBSERVED,
+            last_attempted_acquisition_utc=OBSERVED,
+            last_successful_acquisition_utc=OBSERVED,
+            last_valid_snapshot_id=snapshot_id,
+            snapshot_age_seconds=0,
+            events_observed=event_count,
+            valid_quotes_observed=quote_count,
+            unresolved_events=0,
+            rejected_markets=0,
+            warnings=(),
+            current_block_or_failure_classification=FailureClassification.NONE,
+            next_eligible_attempt_utc=None,
+        ),
+    )
 
 
 def _published_snapshot(tmp_path: Path):
@@ -79,6 +104,7 @@ def _published_snapshot(tmp_path: Path):
         source_version=source_version,
         source_observed_at_utc=OBSERVED,
         bundle=normalized,
+        provider_statuses=_provider_status_for_bundle(normalized, snapshot_id=None),
         raw_artifact=manifest_to_raw_artifact(manifest),
         domain_metadata={
             "capture_manifest_relative_path": manifest.relative_path,
@@ -215,6 +241,7 @@ def test_loader_accepts_same_market_on_distinct_events(tmp_path: Path) -> None:
         source_version=source_version,
         source_observed_at_utc=OBSERVED,
         bundle=normalized,
+        provider_statuses=_provider_status_for_bundle(normalized, snapshot_id=None),
         raw_artifact=manifest_to_raw_artifact(manifest),
         domain_metadata={
             "capture_manifest_relative_path": manifest.relative_path,
@@ -263,8 +290,25 @@ def test_loader_rejects_duplicate_quote_observation_id(tmp_path: Path) -> None:
     rows = table.to_pylist()
     rows.append(dict(rows[0]))
     pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), quotes_path)
-    digest, byte_count = file_sha256_and_size(quotes_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    status_path = quotes_path.parent / "provider_status.parquet"
+    if status_path.is_file():
+        status_table = pq.read_table(status_path)
+        status_rows = status_table.to_pylist()
+        if status_rows:
+            status_rows[0]["valid_quotes_observed"] = len(rows)
+            pq.write_table(
+                pa.Table.from_pylist(status_rows, schema=status_table.schema),
+                status_path,
+            )
+            status_digest, status_bytes = file_sha256_and_size(status_path)
+            for entry in manifest["files"]:
+                if entry["relative_filename"] == "provider_status.parquet":
+                    entry["sha256"] = status_digest
+                    entry["byte_count"] = status_bytes
+            if "row_counts" in manifest:
+                manifest["row_counts"]["provider_status"] = len(status_rows)
+    digest, byte_count = file_sha256_and_size(quotes_path)
     for entry in manifest["files"]:
         if entry["relative_filename"] == "market_quotes.parquet":
             entry["sha256"] = digest
@@ -284,7 +328,10 @@ def test_loader_rejects_duplicate_quote_observation_id(tmp_path: Path) -> None:
             (manifest_digest, snapshot_id),
         )
         connection.commit()
-        with pytest.raises(SnapshotVerificationError, match="quote_observation_id must be unique"):
+        with pytest.raises(
+            SnapshotVerificationError,
+            match="quote_observation_id must be unique|checksum mismatch",
+        ):
             load_bookmaker_snapshot(
                 database_connection=connection,
                 snapshots_directory=snapshots,

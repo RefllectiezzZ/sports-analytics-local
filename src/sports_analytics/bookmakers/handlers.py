@@ -128,9 +128,17 @@ def ingest_bookmaker_current_odds_handler(
 
 def validate_autonomous_cycle_payload(
     payload: dict[str, object],
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None, str | None]:
     """Validate an autonomous sport acquisition job payload."""
-    allowed = {"sport", "observed_at_utc", "acquisition_cycle_id"}
+    allowed = {
+        "sport",
+        "observed_at_utc",
+        "acquisition_cycle_id",
+        "scheduled_for_utc",
+        "enqueued_at_utc",
+        "acquisition_started_at_utc",
+        "acquisition_finished_at_utc",
+    }
     unknown = sorted(set(payload) - allowed)
     if unknown:
         msg = f"unknown payload keys: {', '.join(unknown)}"
@@ -147,14 +155,11 @@ def validate_autonomous_cycle_payload(
     if sport_code not in SUPPORTED_BOOKMAKER_SPORTS:
         msg = f"unsupported bookmaker sport: {sport_code}"
         raise PermanentJobError(msg)
-    observed_raw = payload.get("observed_at_utc")
-    observed_at: str | None = None
-    if observed_raw is not None:
-        if not isinstance(observed_raw, str):
-            msg = "observed_at_utc must be a string or null"
-            raise PermanentJobError(msg)
-        parse_utc_timestamp(observed_raw)
-        observed_at = observed_raw
+    observed_at = _optional_timestamp(payload.get("observed_at_utc"), field_name="observed_at_utc")
+    scheduled_for = _optional_timestamp(
+        payload.get("scheduled_for_utc"),
+        field_name="scheduled_for_utc",
+    )
     cycle_raw = payload.get("acquisition_cycle_id")
     cycle_id: str | None = None
     if cycle_raw is not None:
@@ -162,7 +167,26 @@ def validate_autonomous_cycle_payload(
             msg = "acquisition_cycle_id must be a string or null"
             raise PermanentJobError(msg)
         cycle_id = validate_identifier(cycle_raw, field_name="acquisition_cycle_id")
-    return sport_code, observed_at, cycle_id
+    return (
+        sport_code,
+        observed_at,
+        cycle_id,
+        scheduled_for,
+        _optional_timestamp(
+            payload.get("enqueued_at_utc"),
+            field_name="enqueued_at_utc",
+        ),
+    )
+
+
+def _optional_timestamp(value: object, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        msg = f"{field_name} must be a string or null"
+        raise PermanentJobError(msg)
+    parse_utc_timestamp(value)
+    return value
 
 
 def ingest_bookmaker_autonomous_cycle_handler(
@@ -172,10 +196,11 @@ def ingest_bookmaker_autonomous_cycle_handler(
     """Execute one autonomous Betano-first / Betclic-fallback sport cycle."""
     database_path, raw_directory, snapshots_directory, bookmakers = _require_runtime(context)
     payload_object = _require_payload_object(payload)
-    sport, observed_raw, cycle_id = validate_autonomous_cycle_payload(
+    sport, observed_raw, cycle_id, scheduled_raw, _enqueued_raw = validate_autonomous_cycle_payload(
         {key: value for key, value in payload_object.items()}
     )
     observed_at = parse_utc_timestamp(observed_raw) if observed_raw is not None else None
+    scheduled_for = parse_utc_timestamp(scheduled_raw) if scheduled_raw is not None else None
     service = BookmakerIngestionService(
         database_path=database_path,
         raw_directory=raw_directory,
@@ -197,6 +222,7 @@ def ingest_bookmaker_autonomous_cycle_handler(
             sport=sport,
             acquisition_cycle_id=cycle_id,
             observed_at_utc=observed_at,
+            scheduled_for_utc=scheduled_for,
             actor="worker",
             attempt_number=context.attempt,
             maximum_attempts=context.maximum_attempts,

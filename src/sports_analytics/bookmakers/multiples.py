@@ -18,7 +18,10 @@ from sports_analytics.bookmakers.types import (
     PROVIDER_BETCLIC_PT,
     QuoteSelectionReason,
 )
-from sports_analytics.bookmakers.verified_evidence import VerifiedBookmakerQuote
+from sports_analytics.bookmakers.verified_evidence import (
+    VerifiedBookmakerQuote,
+    leg_identity_from_verified_quote,
+)
 from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.markets.contracts import validate_decimal_odds
 from sports_analytics.sports.contracts import require_utc
@@ -34,8 +37,18 @@ class BookmakerMultipleLeg:
     canonical_event_id: str
     canonical_market_definition_id: str
     canonical_selection_id: str
-    decimal_odds: Decimal
+    canonical_participant_id: str | None
+    line_type: str
+    line_value: Decimal | None
+    period: str
+    participant_scope: str
+    overtime_scope: str | None
+    rules_scope: str | None
+    quote_observation_id: str
     observed_at_utc: datetime
+    snapshot_id: str
+    snapshot_checksum_sha256: str
+    decimal_odds: Decimal
     leg_key: str
 
     def __post_init__(self) -> None:
@@ -45,11 +58,30 @@ class BookmakerMultipleLeg:
         if not self.leg_key.strip():
             msg = "leg_key must be non-empty"
             raise PermanentSourceError(msg)
+        if not self.snapshot_id or not self.snapshot_checksum_sha256:
+            msg = "multiple leg requires verified snapshot id and checksum"
+            raise PermanentSourceError(msg)
         object.__setattr__(self, "decimal_odds", validate_decimal_odds(self.decimal_odds))
         object.__setattr__(
             self,
             "observed_at_utc",
             require_utc(self.observed_at_utc, field_name="observed_at_utc"),
+        )
+
+    def material_identity(self) -> tuple[object, ...]:
+        """Return materially relevant dimensions for eligibility comparison."""
+        return (
+            self.bookmaker_id,
+            self.canonical_event_id,
+            self.canonical_market_definition_id,
+            self.canonical_selection_id,
+            self.canonical_participant_id,
+            self.line_type,
+            self.line_value,
+            self.period,
+            self.participant_scope,
+            self.overtime_scope,
+            self.rules_scope,
         )
 
 
@@ -95,11 +127,33 @@ class RequestedMultipleLegSpec:
     canonical_event_id: str
     canonical_market_definition_id: str
     canonical_selection_id: str
+    canonical_participant_id: str | None = None
+    line_type: str = "none"
+    line_value: Decimal | None = None
+    period: str = "full-match"
+    participant_scope: str = "event"
+    overtime_scope: str | None = None
+    rules_scope: str | None = "regulation-only"
 
     def __post_init__(self) -> None:
         if not self.leg_key.strip():
             msg = "leg_key must be non-empty"
             raise PermanentSourceError(msg)
+
+    def material_identity(self) -> tuple[object, ...]:
+        """Return materially relevant dimensions for eligibility comparison."""
+        return (
+            self.canonical_event_id,
+            self.canonical_market_definition_id,
+            self.canonical_selection_id,
+            self.canonical_participant_id,
+            self.line_type,
+            self.line_value,
+            self.period,
+            self.participant_scope,
+            self.overtime_scope,
+            self.rules_scope,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +196,7 @@ def compare_provider_multiples(
     *,
     evaluated_at_utc: datetime,
     quote_maximum_age_seconds: int,
+    allow_mixed_snapshots: bool = False,
 ) -> ProviderMultipleComparison:
     """Compare complete Betano-only and Betclic-only multiples.
 
@@ -162,11 +217,13 @@ def compare_provider_multiples(
         betano_quotes_by_leg_key,
         evaluated_at_utc=evaluated_at,
         quote_maximum_age_seconds=quote_maximum_age_seconds,
+        allow_mixed_snapshots=allow_mixed_snapshots,
     )
     _reject_mixed_observation_windows(
         betclic_quotes_by_leg_key,
         evaluated_at_utc=evaluated_at,
         quote_maximum_age_seconds=quote_maximum_age_seconds,
+        allow_mixed_snapshots=allow_mixed_snapshots,
     )
 
     betano_multiple, betano_eligible = _build_provider_multiple(
@@ -250,6 +307,39 @@ def build_cross_bookmaker_singles_comparison(
     return CrossBookmakerSinglesComparison(legs=legs)
 
 
+def quote_matches_requested_leg(
+    spec: RequestedMultipleLegSpec,
+    verified: VerifiedBookmakerQuote,
+) -> bool:
+    """Return whether one verified quote matches every requested leg dimension."""
+    identity = verified.identity
+    if spec.material_identity() != (
+        spec.canonical_event_id,
+        spec.canonical_market_definition_id,
+        spec.canonical_selection_id,
+        spec.canonical_participant_id,
+        spec.line_type,
+        spec.line_value,
+        spec.period,
+        spec.participant_scope,
+        spec.overtime_scope,
+        spec.rules_scope,
+    ):
+        return False
+    return (
+        verified.identity.canonical_event_id == spec.canonical_event_id
+        and verified.canonical_market_definition_id == spec.canonical_market_definition_id
+        and verified.canonical_selection_id == spec.canonical_selection_id
+        and identity.canonical_participant_id == spec.canonical_participant_id
+        and identity.line_type == spec.line_type
+        and identity.line_value == spec.line_value
+        and identity.market_period == spec.period
+        and identity.participant_scope == spec.participant_scope
+        and identity.overtime_scope == spec.overtime_scope
+        and identity.rules_scope == spec.rules_scope
+    )
+
+
 def _build_provider_multiple(
     *,
     provider_id: str,
@@ -263,28 +353,35 @@ def _build_provider_multiple(
         verified = quotes_by_leg_key.get(spec.leg_key)
         if verified is None or verified.provider_id != provider_id:
             return None, False
+        if not quote_matches_requested_leg(spec, verified):
+            return None, False
         quote = verified.to_priced_quote(
             evaluated_at_utc=evaluated_at_utc,
             maximum_age_seconds=quote_maximum_age_seconds,
         )
         if not quote.fresh:
             return None, False
-        if (
-            quote.canonical_event_id != spec.canonical_event_id
-            or quote.canonical_market_definition_id != spec.canonical_market_definition_id
-            or quote.canonical_selection_id != spec.canonical_selection_id
-        ):
-            return None, False
         if quote.market_status != "open" or quote.selection_status != "active":
             return None, False
+        identity = verified.identity
         legs.append(
             BookmakerMultipleLeg(
                 bookmaker_id=provider_id,
                 canonical_event_id=spec.canonical_event_id,
                 canonical_market_definition_id=spec.canonical_market_definition_id,
                 canonical_selection_id=spec.canonical_selection_id,
-                decimal_odds=quote.decimal_odds,
+                canonical_participant_id=identity.canonical_participant_id,
+                line_type=identity.line_type,
+                line_value=identity.line_value,
+                period=identity.market_period,
+                participant_scope=identity.participant_scope,
+                overtime_scope=identity.overtime_scope,
+                rules_scope=identity.rules_scope,
+                quote_observation_id=identity.quote_observation_id,
                 observed_at_utc=quote.observed_at_utc,
+                snapshot_id=verified.snapshot_id,
+                snapshot_checksum_sha256=verified.snapshot_checksum_sha256,
+                decimal_odds=quote.decimal_odds,
                 leg_key=spec.leg_key,
             )
         )
@@ -301,13 +398,9 @@ def _product(values: tuple[Decimal, ...]) -> Decimal:
 def _reject_duplicate_canonical_identities(
     specs: tuple[RequestedMultipleLegSpec, ...],
 ) -> None:
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[object, ...]] = set()
     for spec in specs:
-        identity = (
-            spec.canonical_event_id,
-            spec.canonical_market_definition_id,
-            spec.canonical_selection_id,
-        )
+        identity = spec.material_identity()
         if identity in seen:
             msg = "duplicate canonical bet identities are rejected across leg keys"
             raise PermanentSourceError(msg)
@@ -319,8 +412,10 @@ def _reject_mixed_observation_windows(
     *,
     evaluated_at_utc: datetime,
     quote_maximum_age_seconds: int,
+    allow_mixed_snapshots: bool,
 ) -> None:
     observed: set[datetime] = set()
+    snapshots: set[tuple[str, str]] = set()
     for verified in quotes_by_leg_key.values():
         quote = verified.to_priced_quote(
             evaluated_at_utc=evaluated_at_utc,
@@ -330,7 +425,12 @@ def _reject_mixed_observation_windows(
             if not quote.snapshot_id or not quote.snapshot_checksum_sha256:
                 msg = "verified quote evidence requires snapshot id and checksum"
                 raise PermanentSourceError(msg)
+            snapshots.add((quote.snapshot_id, quote.snapshot_checksum_sha256))
         observed.add(quote.observed_at_utc)
+        _ = leg_identity_from_verified_quote(verified)
     if len(observed) > 1:
         msg = "mixed observation windows are rejected for multiples"
+        raise PermanentSourceError(msg)
+    if not allow_mixed_snapshots and len(snapshots) > 1:
+        msg = "mixed snapshots are rejected for multiples"
         raise PermanentSourceError(msg)

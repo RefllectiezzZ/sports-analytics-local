@@ -39,6 +39,23 @@ def test_preferred_success_short_circuits_fallback() -> None:
     assert decision.reason_code is QuoteSelectionReason.PREFERRED_ONLY
 
 
+def test_both_successful_providers_retained() -> None:
+    decision = resolve_provider_fallback(
+        preferred_attempt=ProviderAttemptOutcome(
+            provider_id=PROVIDER_BETANO_PT,
+            success=True,
+            failure_classification=FailureClassification.NONE,
+        ),
+        comparison_attempt=ProviderAttemptOutcome(
+            provider_id=PROVIDER_BETCLIC_PT,
+            success=True,
+            failure_classification=FailureClassification.NONE,
+        ),
+    )
+    assert decision.selected_provider == PROVIDER_BETANO_PT
+    assert decision.reason_code is QuoteSelectionReason.BOTH_RETAINED
+
+
 def test_comparison_fallback_when_preferred_fails() -> None:
     decision = resolve_provider_fallback(
         preferred_attempt=ProviderAttemptOutcome(

@@ -220,7 +220,11 @@ def atomic_enqueue_autonomous_cycle(
     payload: dict[str, JsonValue] = {
         "sport": sport_code,
         "acquisition_cycle_id": acquisition_cycle_id,
+        "scheduled_for_utc": format_utc_timestamp(scheduled),
+        "enqueued_at_utc": format_utc_timestamp(now),
+        "acquisition_started_at_utc": None,
         "observed_at_utc": None,
+        "acquisition_finished_at_utc": None,
     }
     try:
         with connect_database(database_path) as connection:

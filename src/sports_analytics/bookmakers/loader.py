@@ -20,6 +20,8 @@ from sports_analytics.bookmakers.schemas import (
 from sports_analytics.bookmakers.snapshots import parse_bookmaker_source_version
 from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION, BOOKMAKER_SNAPSHOT_TYPE
 from sports_analytics.bookmakers.verified_evidence import (
+    VerifiedBookmakerQuote,
+    build_verified_quote_from_loaded_row,
     quote_semantic_identity_key,
     verify_quote_row_identity,
 )
@@ -57,6 +59,10 @@ class LoadedBookmakerSnapshot:
     registration_only: bool = False
     event_count: int = 0
     quote_count: int = 0
+    verified_quotes_by_observation_id: tuple[tuple[str, VerifiedBookmakerQuote], ...] = ()
+    verified_quotes_by_semantic_identity: tuple[
+        tuple[tuple[object, ...], VerifiedBookmakerQuote], ...
+    ] = ()
 
 
 def load_bookmaker_snapshot(
@@ -161,13 +167,17 @@ def load_bookmaker_snapshot(
 
     manifest_parent = PurePosixPath(record.relative_path).parent.as_posix()
     snapshot_dir = resolve_snapshot_dir(snapshots_directory, manifest_parent)
-    event_count, quote_count = _verify_semantic_datasets(
-        snapshot_dir=snapshot_dir,
-        verification=result,
-        sport_code=sport_code,
-        provider_id=provider_id,
-        acquisition_cycle_id=acquisition_cycle_id,
-        capture_checksums={entry.checksum_sha256 for entry in manifest.entries},
+    event_count, quote_count, verified_by_observation, verified_by_semantic = (
+        _verify_semantic_datasets(
+            snapshot_dir=snapshot_dir,
+            verification=result,
+            sport_code=sport_code,
+            provider_id=provider_id,
+            acquisition_cycle_id=acquisition_cycle_id,
+            capture_checksums={entry.checksum_sha256 for entry in manifest.entries},
+            snapshot_id=snapshot_id,
+            checksum_sha256=result.manifest_checksum_sha256,
+        )
     )
 
     return LoadedBookmakerSnapshot(
@@ -181,7 +191,28 @@ def load_bookmaker_snapshot(
         registration_only=False,
         event_count=event_count,
         quote_count=quote_count,
+        verified_quotes_by_observation_id=verified_by_observation,
+        verified_quotes_by_semantic_identity=verified_by_semantic,
     )
+
+
+def load_verified_bookmaker_quotes(
+    *,
+    database_connection: sqlite3.Connection,
+    snapshots_directory: Path,
+    raw_directory: Path,
+    snapshot_id: str,
+) -> LoadedBookmakerSnapshot:
+    """Load and verify a snapshot, returning immutable verified quote evidence."""
+    loaded = load_bookmaker_snapshot(
+        database_connection=database_connection,
+        snapshots_directory=snapshots_directory,
+        raw_directory=raw_directory,
+        snapshot_id=snapshot_id,
+    )
+    if not loaded.verified:
+        raise SnapshotVerificationError("snapshot verification did not produce verified quotes")
+    return loaded
 
 
 def _read_dataset(snapshot_dir: Path, dataset_name: str) -> list[dict[str, Any]]:
@@ -203,7 +234,14 @@ def _verify_semantic_datasets(
     provider_id: str,
     acquisition_cycle_id: str,
     capture_checksums: set[str],
-) -> tuple[int, int]:
+    snapshot_id: str,
+    checksum_sha256: str,
+) -> tuple[
+    int,
+    int,
+    tuple[tuple[str, VerifiedBookmakerQuote], ...],
+    tuple[tuple[tuple[object, ...], VerifiedBookmakerQuote], ...],
+]:
     suite = bookmaker_snapshot_suite(sport_code=sport_code)
     for descriptor in suite.descriptors:
         expected_rows = verification.row_count(descriptor.dataset_name)
@@ -239,12 +277,17 @@ def _verify_semantic_datasets(
     provider_status_for_provider = [
         row for row in provider_status_rows if str(row.get("provider_id")) == provider_id
     ]
-    if provider_status_rows:
-        if len(provider_status_for_provider) != 1:
-            raise SnapshotVerificationError("provider status must contain exactly one provider row")
-        provider_status = provider_status_for_provider[0]
-        if int(provider_status.get("valid_quotes_observed", -1)) != len(quotes):
-            raise SnapshotVerificationError("provider status valid_quotes_observed mismatch")
+    if len(provider_status_rows) != 1:
+        raise SnapshotVerificationError("provider status must contain exactly one admitted row")
+    if len(provider_status_for_provider) != 1:
+        raise SnapshotVerificationError("provider status must contain exactly one provider row")
+    provider_status = provider_status_for_provider[0]
+    if str(provider_status.get("provider_id")) != provider_id:
+        raise SnapshotVerificationError("provider status provider_id mismatch")
+    if int(provider_status.get("valid_quotes_observed", -1)) != len(quotes):
+        raise SnapshotVerificationError("provider status valid_quotes_observed mismatch")
+    if int(provider_status.get("events_observed", -1)) != len(events):
+        raise SnapshotVerificationError("provider status events_observed mismatch")
 
     _verify_source_participant_graph(
         source_participants=source_participants,
@@ -268,6 +311,8 @@ def _verify_semantic_datasets(
 
     observation_ids: set[str] = set()
     semantic_keys: set[tuple[object, ...]] = set()
+    verified_by_observation: dict[str, VerifiedBookmakerQuote] = {}
+    verified_by_semantic: dict[tuple[object, ...], VerifiedBookmakerQuote] = {}
     for row in quotes:
         identity = verify_quote_row_identity(row)
         if identity.provider_id != provider_id:
@@ -292,6 +337,42 @@ def _verify_semantic_datasets(
         semantic_keys.add(semantic_key)
         if str(row.get("sport_code")) != sport_code:
             raise SnapshotVerificationError("quote sport mismatch with registration")
+        verified = build_verified_quote_from_loaded_row(
+            loaded_snapshot_id=snapshot_id,
+            loaded_checksum_sha256=checksum_sha256,
+            loaded_provider_id=provider_id,
+            loaded_sport=sport_code,
+            quote_row=row,
+        )
+        verified_by_observation[identity.quote_observation_id] = verified
+        verified_by_semantic[semantic_key] = verified
+
+    eligibility_keys: set[tuple[str, str, str, str]] = set()
+    for row in eligibility:
+        if str(row.get("provider_id")) != provider_id:
+            raise SnapshotVerificationError("eligibility provider_id mismatch")
+        if not bool(row.get("eligible")):
+            continue
+        event_id = str(row["canonical_event_id"])
+        market_id = str(row["canonical_market_definition_id"])
+        selection_id = str(row["canonical_selection_id"])
+        key = (event_id, market_id, selection_id, provider_id)
+        if key in eligibility_keys:
+            raise SnapshotVerificationError("duplicate eligibility evidence for quote identity")
+        eligibility_keys.add(key)
+        matched = False
+        for verified in verified_by_observation.values():
+            if (
+                verified.identity.canonical_event_id == event_id
+                and verified.canonical_market_definition_id == market_id
+                and verified.canonical_selection_id == selection_id
+            ):
+                matched = True
+                break
+        if not matched:
+            raise SnapshotVerificationError(
+                "eligible comparison row references missing verified quote identity"
+            )
 
     for row in drift_findings:
         if str(row.get("provider_id")) != provider_id:
@@ -299,11 +380,12 @@ def _verify_semantic_datasets(
         if str(row.get("acquisition_cycle_id")) != acquisition_cycle_id:
             raise SnapshotVerificationError("drift finding acquisition_cycle_id mismatch")
 
-    for row in eligibility:
-        if str(row.get("provider_id")) != provider_id:
-            raise SnapshotVerificationError("eligibility provider_id mismatch")
-
-    return len(events), len(quotes)
+    return (
+        len(events),
+        len(quotes),
+        tuple(sorted(verified_by_observation.items())),
+        tuple(sorted(verified_by_semantic.items())),
+    )
 
 
 def _verify_source_participant_graph(

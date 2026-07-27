@@ -22,6 +22,9 @@ def verified_quote(
     snapshot_checksum_sha256: str = "a" * 64,
     selection_id: str = "home",
     market_key: str = "football.match-result.1x2.full-match",
+    canonical_market_definition_id: str = "football-match-result-1x2",
+    line_type: str = "none",
+    line_value: Decimal | None = None,
     source_file_sha256: str = "b" * 64,
 ) -> VerifiedBookmakerQuote:
     observed = observed_at - timedelta(seconds=age_seconds)
@@ -32,11 +35,13 @@ def verified_quote(
         market_period="full-match",
         participant_scope="event",
         canonical_participant_id=None,
-        line_type="none",
-        line_value=None,
+        line_type=line_type,
+        line_value=line_value,
         outcome_key=selection_id,
         quote_phase="current",
         quote_observation_id=f"obs-{provider_id}-{leg_key}-{selection_id}",
+        overtime_scope=None,
+        rules_scope="regulation-only",
     )
     return VerifiedBookmakerQuote(
         snapshot_id=snapshot_id,
@@ -49,7 +54,7 @@ def verified_quote(
         market_status="open",
         selection_status="active",
         source_file_sha256=source_file_sha256,
-        canonical_market_definition_id="football-match-result-1x2",
+        canonical_market_definition_id=canonical_market_definition_id,
         canonical_selection_id=selection_id,
         source_event_id=f"source-{leg_key}",
     )
