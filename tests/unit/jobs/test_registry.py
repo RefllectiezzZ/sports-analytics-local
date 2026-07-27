@@ -38,6 +38,7 @@ def test_duplicate_unknown_and_invalid_job_types_raise_registry_error() -> None:
 def test_default_registry_contains_frozen_system_noop_handler() -> None:
     registry = build_default_registry()
     assert registry.list_job_types() == (
+        "ingest.bookmaker-autonomous-cycle",
         "ingest.bookmaker-current-odds",
         "ingest.football-data-csv",
         "monitoring.run",
@@ -46,6 +47,7 @@ def test_default_registry_contains_frozen_system_noop_handler() -> None:
     )
     handler = registry.get(SYSTEM_NOOP_JOB_TYPE)
     assert callable(handler)
+    assert callable(registry.get("ingest.bookmaker-autonomous-cycle"))
     assert callable(registry.get("ingest.bookmaker-current-odds"))
     assert callable(registry.get("ingest.football-data-csv"))
     assert callable(registry.get("monitoring.run"))

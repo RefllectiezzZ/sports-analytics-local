@@ -35,6 +35,7 @@ from sports_analytics.sources.browser.errors import (
     raise_for_classified_error,
 )
 from sports_analytics.sources.browser.readiness import (
+    ReadinessBlockedError,
     classify_readiness_block,
     readiness_predicate_for_provider,
     wait_for_readiness,
@@ -194,6 +195,21 @@ class PlaywrightBrowserSession:
                                 predicate=readiness_predicate,
                                 page_route_id=page_route_id,
                             )
+                        except ReadinessBlockedError as exc:
+                            block_reason = exc.block_reason
+                            pages.append(
+                                BrowserPageObservation(
+                                    provider_id=provider_id,
+                                    page_route_id=page_route_id,
+                                    final_url=page.url,
+                                    observed_at_utc=self._clock(),
+                                    title=page.title() or None,
+                                    sanitized_dom_fragment=None,
+                                    block_reason=block_reason,
+                                    warnings=(),
+                                )
+                            )
+                            break
                         except RetryableSourceError as exc:
                             raise_for_classified_error(classify_navigation_timeout(str(exc)))
                         except PlaywrightError as exc:

@@ -6,10 +6,17 @@ from datetime import datetime
 from pathlib import Path
 
 from sports_analytics.core.exceptions import PermanentSourceError
-from sports_analytics.sources.betclic.catalog import ADAPTER_VERSION, BETCLIC_CATALOG, PROVIDER_ID
-from sports_analytics.sources.betclic.parser import parse_betclic_acquisition
+from sports_analytics.sources.betclic.catalog import (
+    ADAPTER_VERSION,
+    BETCLIC_CATALOG,
+    PARSER_VERSION,
+    PROVIDER_ID,
+)
 from sports_analytics.sources.bookmaker_catalog import reject_forbidden_job_controls
 from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
+from sports_analytics.sources.bookmaker_extraction.contracts import ExtractionProfile
+from sports_analytics.sources.bookmaker_extraction.pipeline import apply_extraction_profile
+from sports_analytics.sources.bookmaker_extraction.registry import get_verified_extraction_profile
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult, BrowserMode
 from sports_analytics.sources.browser.playwright_runtime import (
     BrowserSession,
@@ -27,6 +34,7 @@ def acquire_betclic_current_odds(
     browser_mode: BrowserMode = BrowserMode.VISIBLE,
     session: BrowserSession | None = None,
     maximum_capture_bytes: int = 2_097_152,
+    extraction_profile: ExtractionProfile | None = None,
 ) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[BookmakerRawCapture, ...]]:
     """Acquire Betclic pre-match fixtures/odds via ordinary visible browser automation."""
     catalog = BETCLIC_CATALOG
@@ -66,7 +74,20 @@ def acquire_betclic_current_odds(
                 source_url=page.final_url,
             )
             captures.append(artifact)
-    bundle = parse_betclic_acquisition(result, adapter_version=ADAPTER_VERSION)
+    profile = (
+        extraction_profile
+        if extraction_profile is not None
+        else get_verified_extraction_profile(PROVIDER_ID)
+    )
+    bundle = apply_extraction_profile(
+        profile=profile,
+        browser_result=result,
+        captures=tuple(captures),
+        adapter_version=ADAPTER_VERSION,
+        parser_version=PARSER_VERSION,
+        observed_at_utc=observed_at_utc,
+        sport=sport,
+    )
     return result, bundle, tuple(captures)
 
 

@@ -44,6 +44,8 @@ def _quote(
     odds: str,
     *,
     fresh: bool = True,
+    snapshot_id: str = "snap-1",
+    snapshot_checksum_sha256: str = "a" * 64,
 ) -> BookmakerPricedQuote:
     return BookmakerPricedQuote(
         provider_id=provider_id,
@@ -53,7 +55,18 @@ def _quote(
         canonical_market_definition_id="football-match-result-1x2",
         canonical_selection_id="home",
         fresh=fresh,
+        snapshot_id=snapshot_id,
+        snapshot_checksum_sha256=snapshot_checksum_sha256,
     )
+
+
+def test_duplicate_canonical_identities_rejected_across_leg_keys() -> None:
+    specs = (
+        RequestedMultipleLegSpec("a", "event-a", "football-match-result-1x2", "home"),
+        RequestedMultipleLegSpec("b", "event-a", "football-match-result-1x2", "home"),
+    )
+    with pytest.raises(PermanentSourceError, match="duplicate canonical bet identities"):
+        compare_provider_multiples(specs, {}, {})
 
 
 def test_same_bookmaker_multiple_builds_product_total() -> None:

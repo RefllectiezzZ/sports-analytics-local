@@ -16,6 +16,8 @@ SUPPORTED_BOOKMAKER_PROVIDERS: Final[tuple[str, ...]] = (
 )
 
 INGEST_BOOKMAKER_CURRENT_ODDS_JOB_TYPE: Final[str] = "ingest.bookmaker-current-odds"
+INGEST_BOOKMAKER_AUTONOMOUS_CYCLE_JOB_TYPE: Final[str] = "ingest.bookmaker-autonomous-cycle"
+BOOKMAKER_AUTONOMOUS_SCHEDULER_PROVIDER: Final[str] = "bookmaker-autonomous"
 DEFAULT_BOOKMAKER_INGESTION_MAXIMUM_ATTEMPTS: Final[int] = 2
 BOOKMAKER_SNAPSHOT_TYPE: Final[str] = "current-bookmaker-odds"
 BOOKMAKER_SCHEMA_VERSION: Final[str] = "bookmaker-canonical-v1"

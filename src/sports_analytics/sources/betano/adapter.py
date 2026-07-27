@@ -6,10 +6,17 @@ from datetime import datetime
 from pathlib import Path
 
 from sports_analytics.core.exceptions import PermanentSourceError
-from sports_analytics.sources.betano.catalog import ADAPTER_VERSION, BETANO_CATALOG, PROVIDER_ID
-from sports_analytics.sources.betano.parser import parse_betano_acquisition
+from sports_analytics.sources.betano.catalog import (
+    ADAPTER_VERSION,
+    BETANO_CATALOG,
+    PARSER_VERSION,
+    PROVIDER_ID,
+)
 from sports_analytics.sources.bookmaker_catalog import reject_forbidden_job_controls
 from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
+from sports_analytics.sources.bookmaker_extraction.contracts import ExtractionProfile
+from sports_analytics.sources.bookmaker_extraction.pipeline import apply_extraction_profile
+from sports_analytics.sources.bookmaker_extraction.registry import get_verified_extraction_profile
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult, BrowserMode
 from sports_analytics.sources.browser.playwright_runtime import (
     BrowserSession,
@@ -27,6 +34,7 @@ def acquire_betano_current_odds(
     browser_mode: BrowserMode = BrowserMode.VISIBLE,
     session: BrowserSession | None = None,
     maximum_capture_bytes: int = 2_097_152,
+    extraction_profile: ExtractionProfile | None = None,
 ) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[BookmakerRawCapture, ...]]:
     """Acquire Betano pre-match fixtures/odds via ordinary visible browser automation."""
     catalog = BETANO_CATALOG
@@ -43,7 +51,7 @@ def acquire_betano_current_odds(
     )
     store = BookmakerRawCaptureStore(raw_directory)
     captures: list[BookmakerRawCapture] = []
-    for index, response in enumerate(result.responses):
+    for response in result.responses:
         artifact = store.store_text(
             source_name=PROVIDER_ID,
             capture_kind="provider-json",
@@ -54,7 +62,6 @@ def acquire_betano_current_odds(
             source_url=response.response_url,
         )
         captures.append(artifact)
-        del index
     for page in result.pages:
         if page.sanitized_dom_fragment:
             artifact = store.store_text(
@@ -67,7 +74,20 @@ def acquire_betano_current_odds(
                 source_url=page.final_url,
             )
             captures.append(artifact)
-    bundle = parse_betano_acquisition(result, adapter_version=ADAPTER_VERSION)
+    profile = (
+        extraction_profile
+        if extraction_profile is not None
+        else get_verified_extraction_profile(PROVIDER_ID)
+    )
+    bundle = apply_extraction_profile(
+        profile=profile,
+        browser_result=result,
+        captures=tuple(captures),
+        adapter_version=ADAPTER_VERSION,
+        parser_version=PARSER_VERSION,
+        observed_at_utc=observed_at_utc,
+        sport=sport,
+    )
     return result, bundle, tuple(captures)
 
 

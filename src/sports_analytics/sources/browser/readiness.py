@@ -1,11 +1,11 @@
-"""Provider-specific browser readiness predicates with bounded waits."""
+"""Browser readiness polling with immediate block detection."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from sports_analytics.core.exceptions import RetryableSourceError
+from sports_analytics.core.exceptions import PermanentSourceError, RetryableSourceError
 from sports_analytics.sources.browser.contracts import BrowserBlockReason
 from sports_analytics.sources.browser.safety import classify_block_signals
 
@@ -26,6 +26,27 @@ class ReadinessPage(Protocol):
 ReadinessPredicate = Callable[[ReadinessPage], bool]
 
 
+class ReadinessBlockedError(PermanentSourceError):
+    """Raised when block signals are detected during readiness polling."""
+
+    def __init__(self, block_reason: BrowserBlockReason, *, page_route_id: str) -> None:
+        self.block_reason = block_reason
+        super().__init__(f"readiness blocked for route {page_route_id}: {block_reason.value}")
+
+
+def classify_readiness_block(page: Any) -> BrowserBlockReason | None:
+    """Classify block signals from the current page state."""
+    try:
+        title = page.title()
+        body = page.inner_text("body")
+    except Exception:  # noqa: BLE001
+        return BrowserBlockReason.PAGE_UNAVAILABLE
+    lowered_title = (title or "").strip().lower()
+    if "splash screen" in lowered_title or "just a moment" in lowered_title:
+        return BrowserBlockReason.ANTI_AUTOMATION
+    return classify_block_signals(title=title, body_text=body)
+
+
 def wait_for_readiness(
     page: ReadinessPage,
     *,
@@ -34,12 +55,15 @@ def wait_for_readiness(
     poll_ms: int = DEFAULT_READINESS_POLL_MS,
     page_route_id: str,
 ) -> None:
-    """Wait until ``predicate`` returns true or raise a retryable timeout."""
+    """Wait until ``predicate`` returns true or raise on block/timeout."""
     if timeout_ms < 1 or poll_ms < 1:
         msg = "readiness timeout and poll intervals must be positive"
         raise RetryableSourceError(msg)
     elapsed = 0
     while elapsed < timeout_ms:
+        blocked = classify_readiness_block(page)
+        if blocked is not None:
+            raise ReadinessBlockedError(blocked, page_route_id=page_route_id)
         if predicate(page):
             return
         page.wait_for_timeout(poll_ms)
@@ -51,7 +75,7 @@ def wait_for_readiness(
 def betano_readiness_predicate(page: ReadinessPage) -> bool:
     """Betano: page title must not be the Cloudflare splash and body must exist."""
     title = (page.title() or "").strip().lower()
-    if "splash screen" in title:
+    if "splash screen" in title or "just a moment" in title:
         return False
     try:
         body = page.inner_text("body")
@@ -86,13 +110,3 @@ def readiness_predicate_for_provider(provider_id: str) -> ReadinessPredicate:
         return betclic_readiness_predicate
     msg = f"no readiness predicate for provider {provider_id}"
     raise RetryableSourceError(msg)
-
-
-def classify_readiness_block(page: Any) -> BrowserBlockReason | None:
-    """Classify block signals after readiness wait completes."""
-    try:
-        title = page.title()
-        body = page.inner_text("body")
-    except Exception:  # noqa: BLE001
-        return BrowserBlockReason.PAGE_UNAVAILABLE
-    return classify_block_signals(title=title, body_text=body)

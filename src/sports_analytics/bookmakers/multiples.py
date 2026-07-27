@@ -152,6 +152,9 @@ def compare_provider_multiples(
     if len(keys) != len(set(keys)):
         msg = "requested multiple leg keys must be unique"
         raise PermanentSourceError(msg)
+    _reject_duplicate_canonical_identities(specs)
+    _reject_mixed_observation_windows(betano_quotes_by_leg_key)
+    _reject_mixed_observation_windows(betclic_quotes_by_leg_key)
 
     betano_multiple, betano_eligible = _build_provider_multiple(
         provider_id=PROVIDER_BETANO_PT,
@@ -266,3 +269,32 @@ def _product(values: tuple[Decimal, ...]) -> Decimal:
     for value in values:
         total *= value
     return validate_decimal_odds(total)
+
+
+def _reject_duplicate_canonical_identities(
+    specs: tuple[RequestedMultipleLegSpec, ...],
+) -> None:
+    seen: set[tuple[str, str, str]] = set()
+    for spec in specs:
+        identity = (
+            spec.canonical_event_id,
+            spec.canonical_market_definition_id,
+            spec.canonical_selection_id,
+        )
+        if identity in seen:
+            msg = "duplicate canonical bet identities are rejected across leg keys"
+            raise PermanentSourceError(msg)
+        seen.add(identity)
+
+
+def _reject_mixed_observation_windows(quotes_by_leg_key: dict[str, BookmakerPricedQuote]) -> None:
+    observed: set[datetime] = set()
+    for quote in quotes_by_leg_key.values():
+        if quote.fresh:
+            if not quote.snapshot_id or not quote.snapshot_checksum_sha256:
+                msg = "verified quote evidence requires snapshot id and checksum"
+                raise PermanentSourceError(msg)
+        observed.add(quote.observed_at_utc)
+    if len(observed) > 1:
+        msg = "mixed observation windows are rejected for multiples"
+        raise PermanentSourceError(msg)

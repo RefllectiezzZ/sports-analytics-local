@@ -1,7 +1,7 @@
 """Deterministic local bookmaker acquisition scheduler (no network server).
 
-Uses SQLite + JobRepository to enqueue acquisition jobs on provider-specific
-intervals. Does not start when ``bookmakers.enabled`` is false.
+Uses SQLite + JobRepository to enqueue autonomous sport-level acquisition jobs.
+Does not start when ``bookmakers.enabled`` is false.
 """
 
 from __future__ import annotations
@@ -13,16 +13,15 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 from typing import Final
 
-from sports_analytics.bookmakers.enqueue import enqueue_bookmaker_acquisition
-from sports_analytics.bookmakers.types import (
-    DEFAULT_BOOKMAKER_INGESTION_MAXIMUM_ATTEMPTS,
-    PROVIDER_BETANO_PT,
-    PROVIDER_BETCLIC_PT,
+from sports_analytics.bookmakers.scheduler_ops import (
+    atomic_enqueue_autonomous_cycle,
+    ensure_scheduler_anchor,
+    resolve_next_scheduled_for,
 )
 from sports_analytics.core.cli import CONFIG_ERROR_EXIT, SUCCESS_EXIT, handle_common_modes
 from sports_analytics.core.cli import build_argument_parser as build_common_argument_parser
@@ -34,10 +33,7 @@ from sports_analytics.core.exceptions import (
     SportsAnalyticsError,
 )
 from sports_analytics.core.runtime import bootstrap_runtime
-from sports_analytics.core.settings import BookmakerProviderSettings, BookmakersSettings, Settings
-from sports_analytics.data.codec import parse_utc_timestamp
-from sports_analytics.data.database import connect_database, transaction
-from sports_analytics.data.repositories.bookmakers import BookmakerRepository
+from sports_analytics.core.settings import BookmakersSettings, Settings
 from sports_analytics.jobs.errors import sanitize_error_text
 from sports_analytics.sources.bookmaker_catalog import SUPPORTED_BOOKMAKER_SPORTS
 
@@ -49,7 +45,7 @@ SignalHandler = signal.Handlers | int | Callable[[int, FrameType | None], object
 
 
 class BookmakerScheduler:
-    """Enqueue bookmaker acquisition jobs on a deterministic local cadence."""
+    """Enqueue autonomous bookmaker acquisition jobs on a deterministic local cadence."""
 
     def __init__(
         self,
@@ -98,166 +94,81 @@ class BookmakerScheduler:
             self._restore_signal_handlers(originals)
 
     def tick(self) -> int:
-        """Evaluate due provider/sport cycles once and enqueue missing jobs.
+        """Evaluate due sport cycles once and enqueue missing jobs.
 
         Returns the number of newly enqueued jobs.
         """
         if not self._bookmakers.enabled:
             return 0
-        now = self._clock()
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=UTC)
-        else:
-            now = now.astimezone(UTC)
+        now = self._normalize_now(self._clock())
         enqueued = 0
-        for provider_id, provider_settings in self._enabled_providers():
-            for sport in SUPPORTED_BOOKMAKER_SPORTS:
-                if self._enqueue_if_due(
-                    provider_id=provider_id,
-                    sport=sport,
-                    provider_settings=provider_settings,
-                    now=now,
-                ):
-                    enqueued += 1
+        for sport in SUPPORTED_BOOKMAKER_SPORTS:
+            if self._enqueue_sport_if_due(sport=sport, now=now):
+                enqueued += 1
         return enqueued
 
-    def _enabled_providers(self) -> list[tuple[str, BookmakerProviderSettings]]:
-        providers: list[tuple[str, BookmakerProviderSettings]] = []
-        if self._bookmakers.betano.enabled:
-            providers.append((PROVIDER_BETANO_PT, self._bookmakers.betano))
-        if self._bookmakers.betclic.enabled:
-            providers.append((PROVIDER_BETCLIC_PT, self._bookmakers.betclic))
-        return providers
-
-    def _enqueue_if_due(
-        self,
-        *,
-        provider_id: str,
-        sport: str,
-        provider_settings: BookmakerProviderSettings,
-        now: datetime,
-    ) -> bool:
-        scheduled_for = self._next_scheduled_for(
-            provider_id=provider_id,
-            sport=sport,
-            provider_settings=provider_settings,
-            now=now,
-        )
-        if scheduled_for > now:
-            return False
-        # Align to the interval boundary so restarts recover deterministically.
-        scheduled_for = self._align_scheduled_for(
-            provider_settings=provider_settings,
-            candidate=scheduled_for,
-            now=now,
-        )
-        idempotency_key = (
-            f"bookmaker-acq:{provider_id}:{sport}:{scheduled_for.strftime('%Y%m%dT%H%M%SZ')}"
-        )
+    def _enqueue_sport_if_due(self, *, sport: str, now: datetime) -> bool:
         try:
-            job = enqueue_bookmaker_acquisition(
+            anchor_state = ensure_scheduler_anchor(
                 database_path=self._database_path,
                 bookmakers=self._bookmakers,
-                provider_id=provider_id,
                 sport=sport,
-                acquisition_cycle_id=idempotency_key.replace(":", "-"),
-                maximum_attempts=DEFAULT_BOOKMAKER_INGESTION_MAXIMUM_ATTEMPTS,
-                actor="bookmaker-scheduler",
-                created_at=now,
-                idempotency_key=idempotency_key,
+                now=now,
             )
         except (ConfigurationError, RepositoryError, SportsAnalyticsError) as exc:
             _LOGGER.warning(
-                "scheduler enqueue skipped provider=%s sport=%s error=%s",
-                provider_id,
+                "scheduler anchor skipped sport=%s error=%s",
                 sport,
                 sanitize_error_text(exc),
             )
             return False
 
-        with connect_database(self._database_path) as connection:
-            with transaction(connection, immediate=True):
-                repo = BookmakerRepository(connection)
-                anchor = repo.get_scheduler_anchor(provider_id=provider_id, sport=sport)
-                if anchor is None:
-                    repo.upsert_scheduler_anchor(
-                        provider_id=provider_id,
-                        sport=sport,
-                        first_due_at=scheduled_for,
-                        anchor_set_at=now,
-                    )
-                _cycle_id, inserted = repo.insert_scheduler_cycle(
-                    provider_id=provider_id,
-                    sport=sport,
-                    scheduled_for=scheduled_for,
-                    enqueued_at=now,
-                    job_id=job.id,
-                    suppressed_duplicate=False,
-                )
-        if not inserted:
+        scheduled_for = resolve_next_scheduled_for(
+            database_path=self._database_path,
+            sport=sport,
+            now=now,
+            acquisition_interval_seconds=self._bookmakers.betano.acquisition_interval_seconds,
+        )
+        if scheduled_for > now:
+            return False
+
+        try:
+            result = atomic_enqueue_autonomous_cycle(
+                database_path=self._database_path,
+                bookmakers=self._bookmakers,
+                sport=sport,
+                scheduled_for=scheduled_for,
+                now=now,
+            )
+        except (ConfigurationError, RepositoryError, SportsAnalyticsError) as exc:
+            _LOGGER.warning(
+                "scheduler enqueue skipped sport=%s error=%s",
+                sport,
+                sanitize_error_text(exc),
+            )
+            return False
+
+        if not result.inserted:
             _LOGGER.debug(
-                "scheduler suppressed duplicate cycle provider=%s sport=%s scheduled_for=%s",
-                provider_id,
+                "scheduler suppressed duplicate cycle sport=%s scheduled_for=%s",
                 sport,
                 scheduled_for.isoformat(),
             )
             return False
         _LOGGER.info(
-            "scheduler enqueued provider=%s sport=%s job_id=%s scheduled_for=%s",
-            provider_id,
+            "scheduler enqueued sport=%s job_id=%s scheduled_for=%s anchor_created=%s",
             sport,
-            job.id,
+            result.job.id if result.job is not None else None,
             scheduled_for.isoformat(),
+            anchor_state.anchor_created,
         )
         return True
 
-    def _next_scheduled_for(
-        self,
-        *,
-        provider_id: str,
-        sport: str,
-        provider_settings: BookmakerProviderSettings,
-        now: datetime,
-    ) -> datetime:
-        with connect_database(self._database_path, read_only=True) as connection:
-            repo = BookmakerRepository(connection)
-            latest = repo.latest_scheduler_cycle(provider_id=provider_id, sport=sport)
-            anchor = repo.get_scheduler_anchor(provider_id=provider_id, sport=sport)
-            status = repo.get_provider_status(provider_id, sport)
-
-        if latest is None:
-            if anchor is not None:
-                return parse_utc_timestamp(str(anchor["first_due_at_utc"]))
-            return now + timedelta(seconds=provider_settings.initial_delay_seconds)
-
-        last_scheduled = parse_utc_timestamp(str(latest["scheduled_for_utc"]))
-        next_from_interval = last_scheduled + timedelta(
-            seconds=provider_settings.acquisition_interval_seconds
-        )
-
-        next_eligible = now
-        if status is not None:
-            next_eligible_raw = status.get("next_eligible_at_utc")
-            if isinstance(next_eligible_raw, str) and next_eligible_raw:
-                next_eligible = parse_utc_timestamp(next_eligible_raw)
-            if status.get("status") == "blocked":
-                # Blocked providers wait for cooldown rather than aggressive retry.
-                return max(next_from_interval, next_eligible)
-
-        return max(next_from_interval, next_eligible)
-
     @staticmethod
-    def _align_scheduled_for(
-        *,
-        provider_settings: BookmakerProviderSettings,
-        candidate: datetime,
-        now: datetime,
-    ) -> datetime:
-        """Clamp a due candidate so concurrent ticks do not invent new slots."""
-        del provider_settings
-        if candidate > now:
-            return candidate
-        return candidate
+    def _normalize_now(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     def request_stop(self) -> None:
         """Request cooperative scheduler shutdown."""

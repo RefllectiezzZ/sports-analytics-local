@@ -188,5 +188,114 @@ def verify_capture_manifest(
     if len(payload) != manifest.byte_count:
         msg = "capture manifest byte count mismatch"
         raise SnapshotIntegrityError(msg)
+    if not manifest.entries:
+        msg = "capture manifest must contain at least one entry for admitted acquisition"
+        raise SnapshotIntegrityError(msg)
     for entry in manifest.entries:
         verify_capture_entry(raw_directory=raw_directory, entry=entry)
+
+
+def parse_capture_manifest_from_bytes(
+    *,
+    manifest_bytes: bytes,
+    relative_path: str,
+    expected_provider_id: str | None = None,
+    expected_acquisition_cycle_id: str | None = None,
+) -> CaptureManifest:
+    """Parse and validate a capture manifest from canonical JSON bytes."""
+    if not manifest_bytes:
+        msg = "capture manifest bytes must be non-empty"
+        raise SnapshotIntegrityError(msg)
+    checksum = hashlib.sha256(manifest_bytes).hexdigest()
+    try:
+        document = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        msg = "capture manifest is not valid UTF-8 JSON"
+        raise SnapshotIntegrityError(msg) from exc
+    if not isinstance(document, dict):
+        msg = "capture manifest must be a JSON object"
+        raise SnapshotIntegrityError(msg)
+    schema = document.get("schema")
+    if schema != CAPTURE_MANIFEST_SCHEMA:
+        msg = f"unexpected capture manifest schema: {schema!r}"
+        raise SnapshotIntegrityError(msg)
+    provider_id = document.get("provider_id")
+    acquisition_cycle_id = document.get("acquisition_cycle_id")
+    if not isinstance(provider_id, str) or not provider_id.strip():
+        msg = "capture manifest provider_id must be a non-empty string"
+        raise SnapshotIntegrityError(msg)
+    if not isinstance(acquisition_cycle_id, str) or not acquisition_cycle_id.strip():
+        msg = "capture manifest acquisition_cycle_id must be a non-empty string"
+        raise SnapshotIntegrityError(msg)
+    if expected_provider_id is not None and provider_id != expected_provider_id:
+        msg = "capture manifest provider_id mismatch"
+        raise SnapshotIntegrityError(msg)
+    if (
+        expected_acquisition_cycle_id is not None
+        and acquisition_cycle_id != expected_acquisition_cycle_id
+    ):
+        msg = "capture manifest acquisition_cycle_id mismatch"
+        raise SnapshotIntegrityError(msg)
+    captures_raw = document.get("captures")
+    if not isinstance(captures_raw, list) or not captures_raw:
+        msg = "capture manifest captures must be a non-empty list"
+        raise SnapshotIntegrityError(msg)
+    entries: list[CaptureManifestEntry] = []
+    seen_paths: set[str] = set()
+    for index, item in enumerate(captures_raw):
+        if not isinstance(item, dict):
+            msg = f"capture manifest entry {index} must be an object"
+            raise SnapshotIntegrityError(msg)
+        relative = item.get("relative_path")
+        entry_checksum = item.get("checksum_sha256")
+        byte_count = item.get("byte_count")
+        capture_type = item.get("capture_type")
+        observed_raw = item.get("observed_at_utc")
+        source_url = item.get("source_url")
+        if not isinstance(relative, str) or not relative.strip():
+            msg = f"capture manifest entry {index} missing relative_path"
+            raise SnapshotIntegrityError(msg)
+        relative_path_entry = validate_relative_snapshot_path(relative)
+        if relative_path_entry in seen_paths:
+            msg = f"duplicate capture manifest entry path: {relative_path_entry}"
+            raise SnapshotIntegrityError(msg)
+        seen_paths.add(relative_path_entry)
+        if not isinstance(entry_checksum, str):
+            msg = f"capture manifest entry {index} missing checksum_sha256"
+            raise SnapshotIntegrityError(msg)
+        entry_checksum = validate_sha256_checksum(entry_checksum)
+        if not isinstance(byte_count, int) or byte_count < 1:
+            msg = f"capture manifest entry {index} byte_count must be positive"
+            raise SnapshotIntegrityError(msg)
+        if not isinstance(capture_type, str) or not capture_type.strip():
+            msg = f"capture manifest entry {index} capture_type must be non-empty"
+            raise SnapshotIntegrityError(msg)
+        if not isinstance(observed_raw, str) or not observed_raw.strip():
+            msg = f"capture manifest entry {index} observed_at_utc must be non-empty"
+            raise SnapshotIntegrityError(msg)
+        from sports_analytics.data.codec import parse_utc_timestamp
+
+        observed_at = parse_utc_timestamp(observed_raw)
+        if source_url is not None and not isinstance(source_url, str):
+            msg = f"capture manifest entry {index} source_url must be string or null"
+            raise SnapshotIntegrityError(msg)
+        entries.append(
+            CaptureManifestEntry(
+                relative_path=relative_path_entry,
+                checksum_sha256=entry_checksum,
+                byte_count=byte_count,
+                capture_type=capture_type,
+                source_url=source_url,
+                observed_at_utc=observed_at,
+            )
+        )
+    sorted_entries = tuple(sorted(entries, key=lambda entry: entry.relative_path))
+    return CaptureManifest(
+        schema=CAPTURE_MANIFEST_SCHEMA,
+        provider_id=provider_id,
+        acquisition_cycle_id=acquisition_cycle_id,
+        entries=sorted_entries,
+        manifest_bytes=manifest_bytes,
+        checksum_sha256=checksum,
+        relative_path=validate_relative_snapshot_path(relative_path),
+    )

@@ -253,16 +253,16 @@ class BookmakerIngestionService:
             )
             raise PermanentJobError(str(exc)) from exc
 
-        native_recognized = _native_payload_recognized(bundle)
+        native_recognized = _verified_extraction_applied(bundle)
         admission = evaluate_admission(
             browser_result=browser_result,
             bundle=bundle,
             normalized=normalized,
             valid_quote_count=len(normalized.market_quotes),
             unresolved_event_count=len(reconciliations.unresolved_event_reconciliations),
-            native_payload_recognized=native_recognized,
+            verified_extraction_applied=native_recognized,
         )
-        if not admission.may_publish:
+        if admission.outcome is not AdmissionOutcome.ADMITTED:
             finished_at = self._normalize_utc(self._clock())
             status = _ingestion_status_for_admission(admission)
             self._persist_rejected(
@@ -329,7 +329,7 @@ class BookmakerIngestionService:
             current_block_or_failure_classification=FailureClassification.NONE,
             next_eligible_attempt_utc=None,
             drift_detected=bool(bundle.drift_codes),
-            acquisition_partial=admission.outcome is AdmissionOutcome.PARTIAL,
+            acquisition_partial=False,
         )
         try:
             publication = publish_bookmaker_snapshot(
@@ -363,6 +363,18 @@ class BookmakerIngestionService:
                 detail_code="snapshot-busy",
                 warnings=[warning.code for warning in bundle.warnings],
             )
+            if attempt_number >= maximum_attempts:
+                self._finalize_terminal_failure(
+                    provider_id=provider,
+                    sport=sport_code,
+                    acquisition_cycle_id=cycle_id,
+                    adapter_version=adapter_version,
+                    observed_at=observed_at,
+                    finished_at=finished_at,
+                    failure_classification="retry-exhausted",
+                    warnings=[warning.code for warning in bundle.warnings],
+                )
+                raise PermanentJobError("retry attempts exhausted") from exc
             raise RetryableJobError(str(exc)) from exc
         except (SnapshotIntegrityError, PermanentSourceError, OSError) as exc:
             finished_at = self._normalize_utc(self._clock())
@@ -404,11 +416,7 @@ class BookmakerIngestionService:
             warnings=warning_codes,
             drift_codes=list(bundle.drift_codes),
             acquisition_interval_seconds=provider_settings.acquisition_interval_seconds,
-            provider_status_code=(
-                ProviderStatusCode.PARTIAL.value
-                if admission.outcome is AdmissionOutcome.PARTIAL
-                else ProviderStatusCode.OPERATIONAL.value
-            ),
+            provider_status_code=ProviderStatusCode.OPERATIONAL.value,
         )
         return BookmakerIngestionResult(
             provider_id=provider,
@@ -950,8 +958,15 @@ class BookmakerIngestionService:
                     )
 
 
-def _native_payload_recognized(bundle: ProviderAcquisitionBundle) -> bool:
-    rejected = frozenset({"synthetic-schema-rejected", "no-native-payload", "unknown-schema"})
+def _verified_extraction_applied(bundle: ProviderAcquisitionBundle) -> bool:
+    rejected = frozenset(
+        {
+            "unverified-extraction-profile",
+            "no-verified-extraction-profile",
+            "no-adapter-contract",
+            "unknown-schema",
+        }
+    )
     if any(code in rejected for code in bundle.drift_codes):
         return False
     return len(bundle.events) > 0

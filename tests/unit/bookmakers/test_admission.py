@@ -71,21 +71,75 @@ def test_blocked_browser_never_admits() -> None:
         normalized=_normalized(),
         valid_quote_count=0,
         unresolved_event_count=0,
-        native_payload_recognized=False,
+        verified_extraction_applied=False,
     )
     assert decision.outcome is AdmissionOutcome.BLOCKED
     assert decision.may_publish is False
     assert decision.may_replace_last_valid is False
 
 
-def test_empty_native_payload_rejected() -> None:
+def test_empty_unverified_extraction_rejected() -> None:
     decision = evaluate_admission(
         browser_result=_browser(),
-        bundle=_bundle(drift=("no-native-payload",)),
+        bundle=_bundle(drift=("no-verified-extraction-profile",)),
         normalized=_normalized(),
         valid_quote_count=0,
         unresolved_event_count=0,
-        native_payload_recognized=False,
+        verified_extraction_applied=False,
     )
     assert decision.outcome is AdmissionOutcome.UNAVAILABLE
+    assert decision.may_replace_last_valid is False
+
+
+def test_partial_never_replaces_valid_snapshot() -> None:
+    from datetime import timedelta
+
+    from sports_analytics.sources.bookmaker_contracts import (
+        ProviderEventObservation,
+        ProviderEventState,
+        ProviderParticipantObservation,
+    )
+
+    event = ProviderEventObservation(
+        source_event_id="e1",
+        source_competition_id="c1",
+        sport="football",
+        scheduled_start_utc=OBSERVED + timedelta(hours=2),
+        event_state=ProviderEventState.PRE_MATCH,
+        participants=(
+            ProviderParticipantObservation(
+                source_participant_id="p1",
+                display_name="Home",
+                role="home",
+            ),
+            ProviderParticipantObservation(
+                source_participant_id="p2",
+                display_name="Away",
+                role="away",
+            ),
+        ),
+        markets=(),
+        source_page_route_id="football-prematch",
+    )
+    bundle = ProviderAcquisitionBundle(
+        provider_id="betano-pt",
+        adapter_version="betano-pt-adapter-v1",
+        acquisition_cycle_id="cycle-1",
+        observed_at_utc=OBSERVED,
+        sport="football",
+        events=(event,),
+        warnings=(),
+        drift_codes=(),
+        provenance=(),
+    )
+    decision = evaluate_admission(
+        browser_result=_browser(),
+        bundle=bundle,
+        normalized=_normalized(),
+        valid_quote_count=1,
+        unresolved_event_count=1,
+        verified_extraction_applied=True,
+    )
+    assert decision.outcome is AdmissionOutcome.PARTIAL
+    assert decision.may_publish is False
     assert decision.may_replace_last_valid is False

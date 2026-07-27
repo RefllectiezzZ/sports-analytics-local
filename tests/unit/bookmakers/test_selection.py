@@ -30,6 +30,8 @@ def _quote(
     age_seconds: int = 0,
     fresh: bool = True,
     selection_id: str = "sel-home",
+    snapshot_id: str | None = "snap-1",
+    snapshot_checksum_sha256: str | None = "a" * 64,
 ) -> BookmakerPricedQuote:
     return BookmakerPricedQuote(
         provider_id=provider_id,
@@ -39,10 +41,23 @@ def _quote(
         canonical_market_definition_id="football-match-result-1x2",
         canonical_selection_id=selection_id,
         fresh=fresh,
+        snapshot_id=snapshot_id,
+        snapshot_checksum_sha256=snapshot_checksum_sha256,
     )
 
 
-def test_policy_requires_betano_preferred_and_betclic_comparison() -> None:
+def test_verified_selectable_quote_requires_snapshot_evidence() -> None:
+    quote = BookmakerPricedQuote(
+        provider_id=PROVIDER_BETANO_PT,
+        decimal_odds=Decimal("2.00"),
+        observed_at_utc=NOW,
+        canonical_event_id="event-1",
+        canonical_market_definition_id="football-match-result-1x2",
+        canonical_selection_id="home",
+        fresh=True,
+    )
+    with pytest.raises(PermanentSourceError, match="verified snapshot_id"):
+        select_quote_pair(quote, None, BookmakerSelectionPolicy(), NOW)
     with pytest.raises(PermanentSourceError, match="preferred_bookmaker"):
         BookmakerSelectionPolicy(preferred_bookmaker="other")
     with pytest.raises(PermanentSourceError, match="comparison_bookmaker"):

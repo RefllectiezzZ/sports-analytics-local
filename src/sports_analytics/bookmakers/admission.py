@@ -39,7 +39,7 @@ def evaluate_admission(
     normalized: NormalizedBookmakerBundle,
     valid_quote_count: int,
     unresolved_event_count: int,
-    native_payload_recognized: bool,
+    verified_extraction_applied: bool,
 ) -> AdmissionDecision:
     """Decide whether a current snapshot may replace the last valid snapshot."""
     warnings = tuple(sorted({warning.code for warning in bundle.warnings}))
@@ -51,10 +51,10 @@ def evaluate_admission(
             may_replace_last_valid=False,
             warnings=warnings,
         )
-    if not native_payload_recognized:
+    if not verified_extraction_applied:
         return AdmissionDecision(
             outcome=AdmissionOutcome.UNAVAILABLE,
-            reason_code="no-native-payload",
+            reason_code="no-verified-extraction-profile",
             may_publish=False,
             may_replace_last_valid=False,
             warnings=warnings,
@@ -105,8 +105,8 @@ def evaluate_admission(
         return AdmissionDecision(
             outcome=AdmissionOutcome.PARTIAL,
             reason_code="partial-acquisition",
-            may_publish=True,
-            may_replace_last_valid=True,
+            may_publish=False,
+            may_replace_last_valid=False,
             warnings=warnings,
         )
     return AdmissionDecision(

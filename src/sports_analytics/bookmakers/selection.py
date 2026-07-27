@@ -235,6 +235,10 @@ def select_quote_pair(
 
     usable_betano = betano if betano is not None and betano_fresh is True else None
     usable_betclic = betclic if betclic is not None and betclic_fresh is True else None
+    if usable_betano is not None:
+        _require_verified_selectable_quote(usable_betano)
+    if usable_betclic is not None:
+        _require_verified_selectable_quote(usable_betclic)
 
     if policy.selection_mode is SelectionMode.BOTH:
         return _comparison(
@@ -369,6 +373,17 @@ def select_quote_pair(
     raise PermanentSourceError(msg)
 
 
+def _require_verified_selectable_quote(quote: BookmakerPricedQuote) -> None:
+    if not quote.fresh:
+        return
+    if not quote.snapshot_id or not quote.snapshot_checksum_sha256:
+        msg = "selectable quote requires verified snapshot_id and checksum"
+        raise PermanentSourceError(msg)
+    if quote.market_status != "open" or quote.selection_status != "active":
+        msg = "selectable quote requires open market and active selection"
+        raise PermanentSourceError(msg)
+
+
 def _validated_side(
     quote: BookmakerPricedQuote | None,
     *,
@@ -391,6 +406,15 @@ def _with_fresh(quote: BookmakerPricedQuote, fresh: bool) -> BookmakerPricedQuot
         canonical_market_definition_id=quote.canonical_market_definition_id,
         canonical_selection_id=quote.canonical_selection_id,
         fresh=fresh,
+        line=quote.line,
+        period=quote.period,
+        participant_scope=quote.participant_scope,
+        overtime_scope=quote.overtime_scope,
+        rules_scope=quote.rules_scope,
+        market_status=quote.market_status,
+        selection_status=quote.selection_status,
+        snapshot_id=quote.snapshot_id,
+        snapshot_checksum_sha256=quote.snapshot_checksum_sha256,
     )
 
 

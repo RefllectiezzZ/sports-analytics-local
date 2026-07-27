@@ -13,6 +13,7 @@ from sports_analytics.bookmakers.fallback import (
     ProviderFallbackDecision,
     resolve_provider_fallback,
 )
+from sports_analytics.bookmakers.loader import load_bookmaker_snapshot
 from sports_analytics.bookmakers.service import BookmakerIngestionService
 from sports_analytics.bookmakers.types import (
     PROVIDER_BETANO_PT,
@@ -20,7 +21,7 @@ from sports_analytics.bookmakers.types import (
     BookmakerIngestionResult,
     FailureClassification,
 )
-from sports_analytics.core.exceptions import PermanentJobError
+from sports_analytics.core.exceptions import PermanentJobError, RetryableJobError
 from sports_analytics.core.settings import BookmakersSettings
 from sports_analytics.data.codec import parse_utc_timestamp
 from sports_analytics.data.database import connect_database, transaction
@@ -49,11 +50,15 @@ class BookmakerAcquisitionOrchestrator:
         service: BookmakerIngestionService,
         bookmakers: BookmakersSettings,
         database_path: Path,
+        raw_directory: Path,
+        snapshots_directory: Path,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._service = service
         self._bookmakers = bookmakers
         self._database_path = database_path
+        self._raw_directory = raw_directory
+        self._snapshots_directory = snapshots_directory
         self._clock = clock if clock is not None else (lambda: datetime.now(tz=UTC))
 
     def run_autonomous_cycle(
@@ -62,6 +67,8 @@ class BookmakerAcquisitionOrchestrator:
         sport: str,
         acquisition_cycle_id: str | None = None,
         actor: str = "bookmaker-orchestrator",
+        attempt_number: int = 1,
+        maximum_attempts: int = 2,
     ) -> OrchestratedAcquisitionResult:
         """Attempt Betano, then Betclic when policy permits, with explicit fallback."""
         cycle_id = (
@@ -71,11 +78,13 @@ class BookmakerAcquisitionOrchestrator:
         betclic_result: BookmakerIngestionResult | None = None
 
         if self._bookmakers.betano.enabled:
-            betano_result = self._safe_ingest(
+            betano_result = self._ingest_provider(
                 provider_id=PROVIDER_BETANO_PT,
                 sport=sport,
                 acquisition_cycle_id=f"{cycle_id}-betano",
                 actor=actor,
+                attempt_number=attempt_number,
+                maximum_attempts=maximum_attempts,
             )
 
         betano_attempt = _outcome_from_result(betano_result, provider_id=PROVIDER_BETANO_PT)
@@ -96,19 +105,32 @@ class BookmakerAcquisitionOrchestrator:
                 selected_result=betano_result,
             )
 
+        if (
+            betano_attempt.failure_classification is FailureClassification.RETRYABLE
+            and attempt_number < maximum_attempts
+        ):
+            raise RetryableJobError(
+                betano_attempt.block_or_failure_code or "retryable-betano-failure"
+            )
+
         if self._bookmakers.betclic.enabled and _should_attempt_fallback(betano_attempt):
-            betclic_result = self._safe_ingest(
+            betclic_result = self._ingest_provider(
                 provider_id=PROVIDER_BETCLIC_PT,
                 sport=sport,
                 acquisition_cycle_id=f"{cycle_id}-betclic",
                 actor=actor,
+                attempt_number=attempt_number,
+                maximum_attempts=maximum_attempts,
             )
             comparison_attempt = _outcome_from_result(
                 betclic_result,
                 provider_id=PROVIDER_BETCLIC_PT,
             )
 
-        cached = self._cached_snapshot_reference(provider_id=PROVIDER_BETANO_PT, sport=sport)
+        cached = self._verified_cached_snapshot_reference(
+            provider_id=PROVIDER_BETANO_PT,
+            sport=sport,
+        )
         decision = resolve_provider_fallback(
             preferred_attempt=betano_attempt,
             comparison_attempt=comparison_attempt,
@@ -129,13 +151,15 @@ class BookmakerAcquisitionOrchestrator:
             selected_result=selected,
         )
 
-    def _safe_ingest(
+    def _ingest_provider(
         self,
         *,
         provider_id: str,
         sport: str,
         acquisition_cycle_id: str,
         actor: str,
+        attempt_number: int,
+        maximum_attempts: int,
     ) -> BookmakerIngestionResult:
         try:
             return self._service.ingest(
@@ -143,7 +167,11 @@ class BookmakerAcquisitionOrchestrator:
                 sport=sport,
                 acquisition_cycle_id=acquisition_cycle_id,
                 actor=actor,
+                attempt_number=attempt_number,
+                maximum_attempts=maximum_attempts,
             )
+        except RetryableJobError:
+            raise
         except PermanentJobError:
             return BookmakerIngestionResult(
                 provider_id=provider_id,
@@ -164,7 +192,7 @@ class BookmakerAcquisitionOrchestrator:
                 drift_codes=(),
             )
 
-    def _cached_snapshot_reference(
+    def _verified_cached_snapshot_reference(
         self,
         *,
         provider_id: str,
@@ -178,13 +206,24 @@ class BookmakerAcquisitionOrchestrator:
         if not isinstance(snap_id, str) or not snap_id:
             return None
         observed_raw = status.get("last_successful_at_utc")
-        age = status.get("snapshot_age_seconds")
-        if not isinstance(observed_raw, str) or not isinstance(age, int):
+        if not isinstance(observed_raw, str) or not observed_raw:
+            return None
+        observed_at = parse_utc_timestamp(observed_raw)
+        now = self._clock()
+        age_seconds = max(0, int((now - observed_at).total_seconds()))
+        with connect_database(self._database_path, read_only=True) as connection:
+            loaded = load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=self._snapshots_directory,
+                raw_directory=self._raw_directory,
+                snapshot_id=snap_id,
+            )
+        if loaded.provider_id != provider_id or loaded.sport != sport:
             return None
         return CachedSnapshotReference(
             snapshot_id=snap_id,
-            observed_at_utc=parse_utc_timestamp(observed_raw),
-            age_seconds=age,
+            observed_at_utc=observed_at,
+            age_seconds=age_seconds,
             is_current=False,
         )
 
@@ -233,6 +272,13 @@ def _outcome_from_result(
             success=False,
             failure_classification=FailureClassification.BLOCKED,
             block_or_failure_code=result.block_reason,
+        )
+    if result.failure_classification == FailureClassification.RETRYABLE.value:
+        return ProviderAttemptOutcome(
+            provider_id=provider_id,
+            success=False,
+            failure_classification=FailureClassification.RETRYABLE,
+            block_or_failure_code=result.failure_classification or result.status,
         )
     if result.status in {"partial", "drift-detected", "unavailable"}:
         return ProviderAttemptOutcome(
