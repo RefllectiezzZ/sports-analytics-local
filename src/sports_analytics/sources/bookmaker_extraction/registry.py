@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from sports_analytics.sources.betano.catalog import PROVIDER_ID as BETANO_PROVIDER_ID
 from sports_analytics.sources.betclic.catalog import PROVIDER_ID as BETCLIC_PROVIDER_ID
+from sports_analytics.sources.bookmaker_extraction.betano_topeventsv2 import (
+    BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
+)
 from sports_analytics.sources.bookmaker_extraction.contracts import ExtractionProfile
 
 VERIFICATION_PROCEDURE: str = """
@@ -25,13 +28,17 @@ Local verification procedure for installing a verified extraction profile
 
 Until step 6 completes, production adapters remain ``experimental-unverified`` and
 admission rejects cycles with ``no-verified-extraction-profile``.
+
+Betano football ``topEventsV2`` was registered after sanitized fixture recognition,
+drift fail-closed tests, and snapshot publish/reload verification. Betclic remains
+unregistered pending event/odds discovery.
 """.strip()
 
 
 def get_verified_extraction_profile(provider_id: str) -> ExtractionProfile | None:
     """Return the installed verified extraction profile, or ``None`` when unverified."""
     if provider_id == BETANO_PROVIDER_ID:
-        return None
+        return BETANO_FOOTBALL_TOPEVENTSV2_PROFILE
     if provider_id == BETCLIC_PROVIDER_ID:
         return None
     return None

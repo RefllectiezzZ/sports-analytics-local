@@ -199,26 +199,24 @@ def compare_provider_multiples(
     evaluated_at_utc: datetime,
     quote_maximum_age_seconds: int,
     allow_mixed_snapshots: bool = False,
-    betano_catalogue: VerifiedQuoteCatalogue | None = None,
-    betclic_catalogue: VerifiedQuoteCatalogue | None = None,
+    betano_catalogue: VerifiedQuoteCatalogue,
+    betclic_catalogue: VerifiedQuoteCatalogue,
 ) -> ProviderMultipleComparison:
     """Compare complete Betano-only and Betclic-only multiples.
 
     Incomplete provider coverage makes that provider ineligible. Equal complete
     totals select Betano. Best individual legs are never mixed across providers.
-    When catalogues are supplied, every quote must be an exact catalogue member.
+    Every quote must be an exact member of the corresponding loader catalogue.
     """
     evaluated_at = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
-    if betano_catalogue is not None:
-        betano_quotes_by_leg_key = {
-            key: require_catalogue_quote(quote, catalogue=betano_catalogue)
-            for key, quote in betano_quotes_by_leg_key.items()
-        }
-    if betclic_catalogue is not None:
-        betclic_quotes_by_leg_key = {
-            key: require_catalogue_quote(quote, catalogue=betclic_catalogue)
-            for key, quote in betclic_quotes_by_leg_key.items()
-        }
+    betano_quotes_by_leg_key = {
+        key: require_catalogue_quote(quote, catalogue=betano_catalogue)
+        for key, quote in betano_quotes_by_leg_key.items()
+    }
+    betclic_quotes_by_leg_key = {
+        key: require_catalogue_quote(quote, catalogue=betclic_catalogue)
+        for key, quote in betclic_quotes_by_leg_key.items()
+    }
     specs = tuple(requested_leg_specs)
     if len(specs) < MIN_MULTIPLE_LEGS:
         msg = f"requested multiple requires at least {MIN_MULTIPLE_LEGS} legs"

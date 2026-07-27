@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION, PROVIDER_ID
+from sports_analytics.sources.betclic.catalog import PROVIDER_ID as BETCLIC_PROVIDER_ID
 from sports_analytics.sources.bookmaker_extraction.adapter_contract import (
     ADAPTER_CONTRACT_SCHEMA,
     parse_adapter_contract_payloads,
@@ -112,5 +113,8 @@ def test_adapter_contract_fail_closed_on_missing_state() -> None:
 
 
 def test_production_profile_defaults_to_none() -> None:
-    assert get_verified_extraction_profile(PROVIDER_ID) is None
+    betano_profile = get_verified_extraction_profile(PROVIDER_ID)
+    assert betano_profile is not None
+    assert betano_profile.verified is True
+    assert get_verified_extraction_profile(BETCLIC_PROVIDER_ID) is None
     assert EXAMPLE_BETANO_SYNTHETIC_PROFILE.verified is False

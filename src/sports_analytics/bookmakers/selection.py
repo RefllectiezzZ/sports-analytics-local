@@ -103,12 +103,12 @@ def select_quote_pair(
     policy: BookmakerSelectionPolicy,
     evaluated_at_utc: datetime,
     *,
-    betano_catalogue: VerifiedQuoteCatalogue | None = None,
-    betclic_catalogue: VerifiedQuoteCatalogue | None = None,
+    betano_catalogue: VerifiedQuoteCatalogue,
+    betclic_catalogue: VerifiedQuoteCatalogue,
 ) -> BookmakerQuoteComparison:
     """Select a bookmaker quote under the configured preference policy.
 
-    When catalogues are supplied, quotes must be exact loader catalogue members.
+    Quotes must be exact members of the supplied loader-produced catalogues.
     """
     compared_at = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
     betano_verified = _validated_verified_side(
@@ -323,16 +323,18 @@ def _validated_verified_side(
     quote: VerifiedBookmakerQuote | None,
     *,
     expected: str,
-    catalogue: VerifiedQuoteCatalogue | None = None,
+    catalogue: VerifiedQuoteCatalogue,
 ) -> VerifiedBookmakerQuote | None:
     if quote is None:
         return None
     if quote.provider_id != expected:
         msg = f"expected provider {expected}, got {quote.provider_id}"
         raise PermanentSourceError(msg)
-    if catalogue is not None:
-        return require_catalogue_quote(quote, catalogue=catalogue)
-    return quote
+    admitted = require_catalogue_quote(quote, catalogue=catalogue)
+    if admitted.provider_id != catalogue.provider_id or admitted.sport != catalogue.sport:
+        msg = "quote provider/sport does not match verified catalogue"
+        raise PermanentSourceError(msg)
+    return admitted
 
 
 def _with_fresh(quote: BookmakerPricedQuote, fresh: bool) -> BookmakerPricedQuote:

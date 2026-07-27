@@ -8,6 +8,7 @@ from decimal import Decimal
 from sports_analytics.bookmakers.verified_evidence import (
     BookmakerQuoteIdentity,
     VerifiedBookmakerQuote,
+    VerifiedQuoteCatalogue,
 )
 
 
@@ -58,4 +59,40 @@ def verified_quote(
         canonical_selection_id=selection_id,
         source_event_id=f"source-{leg_key}",
         comparable=True,
+    )
+
+
+def catalogue_for(*quotes: VerifiedBookmakerQuote) -> VerifiedQuoteCatalogue:
+    """Build a synthetic loader-style catalogue from exact quote objects."""
+    if not quotes:
+        msg = "catalogue_for requires at least one quote"
+        raise ValueError(msg)
+    first = quotes[0]
+    return VerifiedQuoteCatalogue(
+        snapshot_id=first.snapshot_id,
+        snapshot_checksum_sha256=first.snapshot_checksum_sha256,
+        provider_id=first.provider_id,
+        sport=first.sport,
+        quotes_by_observation_id=tuple(
+            (quote.identity.quote_observation_id, quote) for quote in quotes
+        ),
+        quotes_by_semantic_identity=(),
+    )
+
+
+def empty_catalogue(
+    *,
+    provider_id: str,
+    sport: str = "football",
+    snapshot_id: str = "snap-empty",
+    snapshot_checksum_sha256: str = "c" * 64,
+) -> VerifiedQuoteCatalogue:
+    """Empty catalogue for a provider side with no quotes in a comparison."""
+    return VerifiedQuoteCatalogue(
+        snapshot_id=snapshot_id,
+        snapshot_checksum_sha256=snapshot_checksum_sha256,
+        provider_id=provider_id,
+        sport=sport,
+        quotes_by_observation_id=(),
+        quotes_by_semantic_identity=(),
     )

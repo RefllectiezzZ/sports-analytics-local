@@ -16,7 +16,11 @@ from sports_analytics.bookmakers.types import (
 )
 from sports_analytics.bookmakers.verified_evidence import VerifiedBookmakerQuote
 from sports_analytics.core.exceptions import PermanentSourceError
-from tests.unit.bookmakers.verified_quote_helpers import verified_quote
+from tests.unit.bookmakers.verified_quote_helpers import (
+    catalogue_for,
+    empty_catalogue,
+    verified_quote,
+)
 
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 
@@ -58,7 +62,14 @@ def test_verified_selectable_quote_requires_snapshot_evidence() -> None:
         source_event_id="source-a",
     )
     with pytest.raises(PermanentSourceError, match="verified snapshot_id"):
-        select_quote_pair(quote, None, BookmakerSelectionPolicy(), NOW)
+        select_quote_pair(
+            quote,
+            None,
+            BookmakerSelectionPolicy(),
+            NOW,
+            betano_catalogue=catalogue_for(quote),
+            betclic_catalogue=empty_catalogue(provider_id=PROVIDER_BETCLIC_PT),
+        )
     with pytest.raises(PermanentSourceError, match="preferred_bookmaker"):
         BookmakerSelectionPolicy(preferred_bookmaker="other")
     with pytest.raises(PermanentSourceError, match="comparison_bookmaker"):
@@ -66,11 +77,14 @@ def test_verified_selectable_quote_requires_snapshot_evidence() -> None:
 
 
 def test_preferred_only_when_betclic_missing() -> None:
+    betano = _quote(PROVIDER_BETANO_PT, "1.90")
     result = select_quote_pair(
-        _quote(PROVIDER_BETANO_PT, "1.90"),
+        betano,
         None,
         BookmakerSelectionPolicy(),
         NOW,
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=empty_catalogue(provider_id=PROVIDER_BETCLIC_PT),
     )
     assert result.selected_bookmaker_id == PROVIDER_BETANO_PT
     assert result.reason_code is QuoteSelectionReason.PREFERRED_ONLY
@@ -79,22 +93,29 @@ def test_preferred_only_when_betclic_missing() -> None:
 
 
 def test_comparison_fallback_when_betano_missing() -> None:
+    betclic = _quote(PROVIDER_BETCLIC_PT, "2.10")
     result = select_quote_pair(
         None,
-        _quote(PROVIDER_BETCLIC_PT, "2.10"),
+        betclic,
         BookmakerSelectionPolicy(),
         NOW,
+        betano_catalogue=empty_catalogue(provider_id=PROVIDER_BETANO_PT),
+        betclic_catalogue=catalogue_for(betclic),
     )
     assert result.selected_bookmaker_id == PROVIDER_BETCLIC_PT
     assert result.reason_code is QuoteSelectionReason.COMPARISON_FALLBACK
 
 
 def test_higher_fresh_odds_selected() -> None:
+    betano = _quote(PROVIDER_BETANO_PT, "1.90")
+    betclic = _quote(PROVIDER_BETCLIC_PT, "2.05")
     result = select_quote_pair(
-        _quote(PROVIDER_BETANO_PT, "1.90"),
-        _quote(PROVIDER_BETCLIC_PT, "2.05"),
+        betano,
+        betclic,
         BookmakerSelectionPolicy(),
         NOW,
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=catalogue_for(betclic),
     )
     assert result.selected_bookmaker_id == PROVIDER_BETCLIC_PT
     assert result.reason_code is QuoteSelectionReason.HIGHER_ODDS
@@ -103,22 +124,30 @@ def test_higher_fresh_odds_selected() -> None:
 
 
 def test_equal_odds_select_betano() -> None:
+    betano = _quote(PROVIDER_BETANO_PT, "2.00")
+    betclic = _quote(PROVIDER_BETCLIC_PT, "2.00")
     result = select_quote_pair(
-        _quote(PROVIDER_BETANO_PT, "2.00"),
-        _quote(PROVIDER_BETCLIC_PT, "2.00"),
+        betano,
+        betclic,
         BookmakerSelectionPolicy(),
         NOW,
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=catalogue_for(betclic),
     )
     assert result.selected_bookmaker_id == PROVIDER_BETANO_PT
     assert result.reason_code is QuoteSelectionReason.EQUAL_ODDS_PREFERRED
 
 
 def test_stale_betclic_does_not_replace_fresh_betano() -> None:
+    betano = _quote(PROVIDER_BETANO_PT, "1.80")
+    betclic = _quote(PROVIDER_BETCLIC_PT, "2.50", age_seconds=10_000)
     result = select_quote_pair(
-        _quote(PROVIDER_BETANO_PT, "1.80"),
-        _quote(PROVIDER_BETCLIC_PT, "2.50", age_seconds=10_000),
+        betano,
+        betclic,
         BookmakerSelectionPolicy(quote_maximum_age_seconds=300),
         NOW,
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=catalogue_for(betclic),
     )
     assert result.selected_bookmaker_id == PROVIDER_BETANO_PT
     assert result.reason_code is QuoteSelectionReason.PREFERRED_RETAINED_STALE_COMPARISON
@@ -126,11 +155,15 @@ def test_stale_betclic_does_not_replace_fresh_betano() -> None:
 
 
 def test_neither_available_when_both_stale_or_missing() -> None:
+    betano = _quote(PROVIDER_BETANO_PT, "1.80", age_seconds=9999)
+    betclic = _quote(PROVIDER_BETCLIC_PT, "2.00", age_seconds=9999)
     result = select_quote_pair(
-        _quote(PROVIDER_BETANO_PT, "1.80", age_seconds=9999),
-        _quote(PROVIDER_BETCLIC_PT, "2.00", age_seconds=9999),
+        betano,
+        betclic,
         BookmakerSelectionPolicy(quote_maximum_age_seconds=60),
         NOW,
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=catalogue_for(betclic),
     )
     assert result.selected_quote is None
     assert result.reason_code is QuoteSelectionReason.NEITHER_AVAILABLE
@@ -138,11 +171,15 @@ def test_neither_available_when_both_stale_or_missing() -> None:
 
 def test_both_mode_retains_separate_quotes_without_winner() -> None:
     policy = BookmakerSelectionPolicy(selection_mode=SelectionMode.BOTH)
+    betano = _quote(PROVIDER_BETANO_PT, "1.90")
+    betclic = _quote(PROVIDER_BETCLIC_PT, "2.10")
     result = select_quote_pair(
-        _quote(PROVIDER_BETANO_PT, "1.90"),
-        _quote(PROVIDER_BETCLIC_PT, "2.10"),
+        betano,
+        betclic,
         policy,
         NOW,
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=catalogue_for(betclic),
     )
     assert result.selected_quote is None
     assert result.reason_code is QuoteSelectionReason.BOTH_RETAINED
@@ -153,14 +190,18 @@ def test_both_mode_retains_separate_quotes_without_winner() -> None:
 def test_forced_modes_and_best_mode() -> None:
     betano = _quote(PROVIDER_BETANO_PT, "1.90")
     betclic = _quote(PROVIDER_BETCLIC_PT, "2.20")
+    catalogues = dict(
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=catalogue_for(betclic),
+    )
     forced_betano = select_quote_pair(
-        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BETANO), NOW
+        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BETANO), NOW, **catalogues
     )
     forced_betclic = select_quote_pair(
-        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BETCLIC), NOW
+        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BETCLIC), NOW, **catalogues
     )
     best = select_quote_pair(
-        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BEST), NOW
+        betano, betclic, BookmakerSelectionPolicy(selection_mode=SelectionMode.BEST), NOW, **catalogues
     )
     assert forced_betano.reason_code is QuoteSelectionReason.MODE_FORCED_PREFERRED
     assert forced_betano.selected_bookmaker_id == PROVIDER_BETANO_PT
@@ -171,11 +212,15 @@ def test_forced_modes_and_best_mode() -> None:
 
 
 def test_every_quote_retains_source_identity() -> None:
+    betano = _quote(PROVIDER_BETANO_PT, "1.95")
+    betclic = _quote(PROVIDER_BETCLIC_PT, "2.00")
     result = select_quote_pair(
-        _quote(PROVIDER_BETANO_PT, "1.95"),
-        _quote(PROVIDER_BETCLIC_PT, "2.00"),
+        betano,
+        betclic,
         BookmakerSelectionPolicy(),
         NOW,
+        betano_catalogue=catalogue_for(betano),
+        betclic_catalogue=catalogue_for(betclic),
     )
     assert result.betano_quote is not None
     assert result.betclic_quote is not None
@@ -193,6 +238,13 @@ def test_future_observed_timestamp_is_not_fresh() -> None:
         observed_at=future,
         age_seconds=0,
     )
-    result = select_quote_pair(quote, None, BookmakerSelectionPolicy(), NOW)
+    result = select_quote_pair(
+        quote,
+        None,
+        BookmakerSelectionPolicy(),
+        NOW,
+        betano_catalogue=catalogue_for(quote),
+        betclic_catalogue=empty_catalogue(provider_id=PROVIDER_BETCLIC_PT),
+    )
     assert result.selected_quote is None
     assert result.reason_code is QuoteSelectionReason.NEITHER_AVAILABLE

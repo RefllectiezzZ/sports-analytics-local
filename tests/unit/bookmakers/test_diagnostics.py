@@ -26,7 +26,11 @@ from sports_analytics.sources.browser.contracts import (
     BrowserPageObservation,
     BrowserResponseObservation,
 )
-from tests.unit.bookmakers.verified_quote_helpers import verified_quote
+from tests.unit.bookmakers.verified_quote_helpers import (
+    catalogue_for,
+    empty_catalogue,
+    verified_quote,
+)
 
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 
@@ -173,5 +177,7 @@ def test_total_line_mismatch_rejected_in_multiples() -> None:
         {},
         evaluated_at_utc=NOW,
         quote_maximum_age_seconds=300,
+        betano_catalogue=catalogue_for(over25, betano_b),
+        betclic_catalogue=empty_catalogue(provider_id="betclic-pt"),
     )
     assert comparison.betano_eligible is False

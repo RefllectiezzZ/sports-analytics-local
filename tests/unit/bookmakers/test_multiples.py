@@ -22,7 +22,11 @@ from sports_analytics.bookmakers.types import (
 )
 from sports_analytics.bookmakers.verified_evidence import VerifiedBookmakerQuote
 from sports_analytics.core.exceptions import PermanentSourceError
-from tests.unit.bookmakers.verified_quote_helpers import verified_quote
+from tests.unit.bookmakers.verified_quote_helpers import (
+    catalogue_for,
+    empty_catalogue,
+    verified_quote,
+)
 
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 MAX_AGE = 300
@@ -71,6 +75,8 @@ def test_duplicate_canonical_identities_rejected_across_leg_keys() -> None:
             {},
             evaluated_at_utc=NOW,
             quote_maximum_age_seconds=MAX_AGE,
+            betano_catalogue=empty_catalogue(provider_id=PROVIDER_BETANO_PT),
+            betclic_catalogue=empty_catalogue(provider_id=PROVIDER_BETCLIC_PT),
         )
 
 
@@ -95,18 +101,18 @@ def test_provider_totals_calculated_separately_and_best_complete_selected() -> N
         RequestedMultipleLegSpec("a", "event-a", "football-match-result-1x2", "home"),
         RequestedMultipleLegSpec("b", "event-b", "football-match-result-1x2", "home"),
     )
+    betano_a = _quote(PROVIDER_BETANO_PT, "a", "1.50")
+    betano_b = _quote(PROVIDER_BETANO_PT, "b", "2.00")
+    betclic_a = _quote(PROVIDER_BETCLIC_PT, "a", "1.60")
+    betclic_b = _quote(PROVIDER_BETCLIC_PT, "b", "2.10")
     comparison = compare_provider_multiples(
         specs,
-        {
-            "a": _quote(PROVIDER_BETANO_PT, "a", "1.50"),
-            "b": _quote(PROVIDER_BETANO_PT, "b", "2.00"),
-        },
-        {
-            "a": _quote(PROVIDER_BETCLIC_PT, "a", "1.60"),
-            "b": _quote(PROVIDER_BETCLIC_PT, "b", "2.10"),
-        },
+        {"a": betano_a, "b": betano_b},
+        {"a": betclic_a, "b": betclic_b},
         evaluated_at_utc=NOW,
         quote_maximum_age_seconds=MAX_AGE,
+        betano_catalogue=catalogue_for(betano_a, betano_b),
+        betclic_catalogue=catalogue_for(betclic_a, betclic_b),
     )
     assert comparison.betano_eligible and comparison.betclic_eligible
     assert comparison.betano_multiple is not None
@@ -122,18 +128,18 @@ def test_equal_complete_totals_select_betano() -> None:
         RequestedMultipleLegSpec("a", "event-a", "football-match-result-1x2", "home"),
         RequestedMultipleLegSpec("b", "event-b", "football-match-result-1x2", "home"),
     )
+    betano_a = _quote(PROVIDER_BETANO_PT, "a", "1.50")
+    betano_b = _quote(PROVIDER_BETANO_PT, "b", "2.00")
+    betclic_a = _quote(PROVIDER_BETCLIC_PT, "a", "1.50")
+    betclic_b = _quote(PROVIDER_BETCLIC_PT, "b", "2.00")
     comparison = compare_provider_multiples(
         specs,
-        {
-            "a": _quote(PROVIDER_BETANO_PT, "a", "1.50"),
-            "b": _quote(PROVIDER_BETANO_PT, "b", "2.00"),
-        },
-        {
-            "a": _quote(PROVIDER_BETCLIC_PT, "a", "1.50"),
-            "b": _quote(PROVIDER_BETCLIC_PT, "b", "2.00"),
-        },
+        {"a": betano_a, "b": betano_b},
+        {"a": betclic_a, "b": betclic_b},
         evaluated_at_utc=NOW,
         quote_maximum_age_seconds=MAX_AGE,
+        betano_catalogue=catalogue_for(betano_a, betano_b),
+        betclic_catalogue=catalogue_for(betclic_a, betclic_b),
     )
     assert comparison.selected_multiple is comparison.betano_multiple
     assert comparison.reason_code is QuoteSelectionReason.EQUAL_ODDS_PREFERRED
@@ -144,15 +150,17 @@ def test_incomplete_provider_coverage_is_ineligible() -> None:
         RequestedMultipleLegSpec("a", "event-a", "football-match-result-1x2", "home"),
         RequestedMultipleLegSpec("b", "event-b", "football-match-result-1x2", "home"),
     )
+    betano_a = _quote(PROVIDER_BETANO_PT, "a", "1.50")
+    betano_b = _quote(PROVIDER_BETANO_PT, "b", "2.00")
+    betclic_a = _quote(PROVIDER_BETCLIC_PT, "a", "1.80")
     comparison = compare_provider_multiples(
         specs,
-        {
-            "a": _quote(PROVIDER_BETANO_PT, "a", "1.50"),
-            "b": _quote(PROVIDER_BETANO_PT, "b", "2.00"),
-        },
-        {"a": _quote(PROVIDER_BETCLIC_PT, "a", "1.80")},
+        {"a": betano_a, "b": betano_b},
+        {"a": betclic_a},
         evaluated_at_utc=NOW,
         quote_maximum_age_seconds=MAX_AGE,
+        betano_catalogue=catalogue_for(betano_a, betano_b),
+        betclic_catalogue=catalogue_for(betclic_a),
     )
     assert comparison.betano_eligible is True
     assert comparison.betclic_eligible is False
@@ -185,30 +193,30 @@ def test_stale_quote_makes_provider_ineligible() -> None:
         RequestedMultipleLegSpec("a", "event-a", "football-match-result-1x2", "home"),
         RequestedMultipleLegSpec("b", "event-b", "football-match-result-1x2", "home"),
     )
+    betano_a = verified_quote(
+        provider_id=PROVIDER_BETANO_PT,
+        odds="1.50",
+        leg_key="a",
+        observed_at=NOW,
+        age_seconds=9999,
+    )
+    betano_b = verified_quote(
+        provider_id=PROVIDER_BETANO_PT,
+        odds="2.00",
+        leg_key="b",
+        observed_at=NOW,
+        age_seconds=9999,
+    )
+    betclic_a = _quote(PROVIDER_BETCLIC_PT, "a", "1.60")
+    betclic_b = _quote(PROVIDER_BETCLIC_PT, "b", "2.10")
     comparison = compare_provider_multiples(
         specs,
-        {
-            "a": verified_quote(
-                provider_id=PROVIDER_BETANO_PT,
-                odds="1.50",
-                leg_key="a",
-                observed_at=NOW,
-                age_seconds=9999,
-            ),
-            "b": verified_quote(
-                provider_id=PROVIDER_BETANO_PT,
-                odds="2.00",
-                leg_key="b",
-                observed_at=NOW,
-                age_seconds=9999,
-            ),
-        },
-        {
-            "a": _quote(PROVIDER_BETCLIC_PT, "a", "1.60"),
-            "b": _quote(PROVIDER_BETCLIC_PT, "b", "2.10"),
-        },
+        {"a": betano_a, "b": betano_b},
+        {"a": betclic_a, "b": betclic_b},
         evaluated_at_utc=NOW,
         quote_maximum_age_seconds=MAX_AGE,
+        betano_catalogue=catalogue_for(betano_a, betano_b),
+        betclic_catalogue=catalogue_for(betclic_a, betclic_b),
     )
     assert comparison.betano_eligible is False
     assert comparison.betclic_eligible is True

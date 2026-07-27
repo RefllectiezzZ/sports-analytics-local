@@ -1,0 +1,400 @@
+{
+  "data": {
+    "topEventsV2": {
+      "eventIdList": [
+        "synth-event-alpha",
+        "synth-event-beta",
+        "synth-event-live",
+        "synth-event-basket",
+        "synth-event-missing"
+      ],
+      "events": {
+        "synth-event-alpha": {
+          "id": "synth-event-alpha",
+          "leagueId": "synth-league-1",
+          "sportId": "FOOT",
+          "startTime": 2088124800000,
+          "participants": [
+            {
+              "name": "Synthetic Home Alpha",
+              "shortName": "SHA",
+              "teamId": "synth-team-alpha-home"
+            },
+            {
+              "name": "Synthetic Away Alpha",
+              "shortName": "SAA",
+              "teamId": "synth-team-alpha-away"
+            }
+          ],
+          "marketIdList": [
+            "synth-mkt-alpha-1x2",
+            "synth-mkt-alpha-total",
+            "synth-mkt-alpha-btts",
+            "synth-mkt-alpha-unsupported",
+            "synth-mkt-missing"
+          ],
+          "totalMarketsAvailable": 5,
+          "zoneId": "synth-zone-1"
+        },
+        "synth-event-beta": {
+          "id": "synth-event-beta",
+          "leagueId": "synth-league-1",
+          "sportId": "FOOT",
+          "startTime": 2088211200000,
+          "participants": [
+            {
+              "name": "Synthetic Home Beta",
+              "shortName": "SHB",
+              "teamId": "synth-team-beta-home"
+            },
+            {
+              "name": "Synthetic Away Beta",
+              "shortName": "SAB",
+              "teamId": "synth-team-beta-away"
+            }
+          ],
+          "marketIdList": [
+            "synth-mkt-beta-1x2",
+            "synth-mkt-beta-total",
+            "synth-mkt-beta-btts",
+            "synth-mkt-beta-suspended"
+          ],
+          "totalMarketsAvailable": 4,
+          "zoneId": "synth-zone-1"
+        },
+        "synth-event-live": {
+          "id": "synth-event-live",
+          "leagueId": "synth-league-1",
+          "sportId": "FOOT",
+          "startTime": 2088124800000,
+          "isLive": true,
+          "participants": [
+            {
+              "name": "Synthetic Live Home",
+              "shortName": "SLH",
+              "teamId": "synth-team-live-home"
+            },
+            {
+              "name": "Synthetic Live Away",
+              "shortName": "SLA",
+              "teamId": "synth-team-live-away"
+            }
+          ],
+          "marketIdList": ["synth-mkt-live-1x2"],
+          "totalMarketsAvailable": 1,
+          "zoneId": "synth-zone-1"
+        },
+        "synth-event-basket": {
+          "id": "synth-event-basket",
+          "leagueId": "synth-league-bask",
+          "sportId": "BASK",
+          "startTime": 2088124800000,
+          "participants": [
+            {
+              "name": "Synthetic Bask Home",
+              "shortName": "SBH",
+              "teamId": "synth-team-bask-home"
+            },
+            {
+              "name": "Synthetic Bask Away",
+              "shortName": "SBA",
+              "teamId": "synth-team-bask-away"
+            }
+          ],
+          "marketIdList": ["synth-mkt-bask-winner"],
+          "totalMarketsAvailable": 1,
+          "zoneId": "synth-zone-2"
+        }
+      },
+      "leagues": {
+        "synth-league-1": {
+          "id": "synth-league-1",
+          "name": "Synthetic Football League"
+        },
+        "synth-league-bask": {
+          "id": "synth-league-bask",
+          "name": "Synthetic Basketball League"
+        }
+      },
+      "markets": {
+        "synth-mkt-alpha-1x2": {
+          "id": "synth-mkt-alpha-1x2",
+          "type": "MRES",
+          "typeId": 1,
+          "name": "Resultado Final",
+          "selectionIdList": [
+            "synth-sel-alpha-home",
+            "synth-sel-alpha-draw",
+            "synth-sel-alpha-away"
+          ]
+        },
+        "synth-mkt-alpha-total": {
+          "id": "synth-mkt-alpha-total",
+          "type": "HCTG",
+          "typeId": 13,
+          "name": "Total de Golos 2.5",
+          "selectionIdList": [
+            "synth-sel-alpha-over",
+            "synth-sel-alpha-under"
+          ]
+        },
+        "synth-mkt-alpha-btts": {
+          "id": "synth-mkt-alpha-btts",
+          "type": "BTSC",
+          "typeId": 15,
+          "name": "Ambas as Equipas Marcam",
+          "selectionIdList": [
+            "synth-sel-alpha-yes",
+            "synth-sel-alpha-no"
+          ]
+        },
+        "synth-mkt-alpha-unsupported": {
+          "id": "synth-mkt-alpha-unsupported",
+          "type": "XXXX",
+          "typeId": 999,
+          "name": "Unsupported Synthetic Market",
+          "selectionIdList": ["synth-sel-unsupported"]
+        },
+        "synth-mkt-beta-1x2": {
+          "id": "synth-mkt-beta-1x2",
+          "type": "MRES",
+          "typeId": 1,
+          "name": "Resultado Final",
+          "selectionIdList": [
+            "synth-sel-beta-home",
+            "synth-sel-beta-draw",
+            "synth-sel-beta-away"
+          ]
+        },
+        "synth-mkt-beta-total": {
+          "id": "synth-mkt-beta-total",
+          "type": "HCTG",
+          "typeId": 13,
+          "name": "Total de Golos 3.5",
+          "selectionIdList": [
+            "synth-sel-beta-over",
+            "synth-sel-beta-under"
+          ]
+        },
+        "synth-mkt-beta-btts": {
+          "id": "synth-mkt-beta-btts",
+          "type": "BTSC",
+          "typeId": 15,
+          "name": "Ambas as Equipas Marcam",
+          "selectionIdList": [
+            "synth-sel-beta-yes",
+            "synth-sel-beta-no"
+          ]
+        },
+        "synth-mkt-beta-suspended": {
+          "id": "synth-mkt-beta-suspended",
+          "type": "MRES",
+          "typeId": 1,
+          "name": "Resultado Final",
+          "isSuspended": true,
+          "selectionIdList": [
+            "synth-sel-beta-sus-home",
+            "synth-sel-beta-sus-draw",
+            "synth-sel-beta-sus-away"
+          ]
+        },
+        "synth-mkt-live-1x2": {
+          "id": "synth-mkt-live-1x2",
+          "type": "MRES",
+          "typeId": 1,
+          "name": "Resultado Final",
+          "selectionIdList": [
+            "synth-sel-live-home",
+            "synth-sel-live-draw",
+            "synth-sel-live-away"
+          ]
+        },
+        "synth-mkt-bask-winner": {
+          "id": "synth-mkt-bask-winner",
+          "type": "MWIN",
+          "typeId": 50,
+          "name": "Vencedor",
+          "selectionIdList": ["synth-sel-bask-home", "synth-sel-bask-away"]
+        }
+      },
+      "selections": {
+        "synth-sel-alpha-home": {
+          "id": "synth-sel-alpha-home",
+          "name": "1",
+          "fullName": "Synthetic Home Alpha",
+          "price": 1.85,
+          "typeId": 1
+        },
+        "synth-sel-alpha-draw": {
+          "id": "synth-sel-alpha-draw",
+          "name": "X",
+          "fullName": "Empate",
+          "price": 3.4,
+          "typeId": 2
+        },
+        "synth-sel-alpha-away": {
+          "id": "synth-sel-alpha-away",
+          "name": "2",
+          "fullName": "Synthetic Away Alpha",
+          "price": 4.2,
+          "typeId": 3
+        },
+        "synth-sel-alpha-over": {
+          "id": "synth-sel-alpha-over",
+          "name": "Mais",
+          "fullName": "Mais de 2.5",
+          "price": 1.9,
+          "typeId": 39,
+          "handicap": 2.5
+        },
+        "synth-sel-alpha-under": {
+          "id": "synth-sel-alpha-under",
+          "name": "Menos",
+          "fullName": "Menos de 2.5",
+          "price": 1.95,
+          "typeId": 40,
+          "handicap": 2.5
+        },
+        "synth-sel-alpha-yes": {
+          "id": "synth-sel-alpha-yes",
+          "name": "Sim",
+          "fullName": "Sim",
+          "price": 1.75,
+          "typeId": 43
+        },
+        "synth-sel-alpha-no": {
+          "id": "synth-sel-alpha-no",
+          "name": "Não",
+          "fullName": "Não",
+          "price": 2.1,
+          "typeId": 44
+        },
+        "synth-sel-unsupported": {
+          "id": "synth-sel-unsupported",
+          "name": "Other",
+          "fullName": "Other",
+          "price": 1.5,
+          "typeId": 1
+        },
+        "synth-sel-beta-home": {
+          "id": "synth-sel-beta-home",
+          "name": "1",
+          "fullName": "Synthetic Home Beta",
+          "price": 2.05,
+          "typeId": 1
+        },
+        "synth-sel-beta-draw": {
+          "id": "synth-sel-beta-draw",
+          "name": "X",
+          "fullName": "Empate",
+          "price": 3.25,
+          "typeId": 2
+        },
+        "synth-sel-beta-away": {
+          "id": "synth-sel-beta-away",
+          "name": "2",
+          "fullName": "Synthetic Away Beta",
+          "price": 3.6,
+          "typeId": 3
+        },
+        "synth-sel-beta-over": {
+          "id": "synth-sel-beta-over",
+          "name": "Mais",
+          "fullName": "Mais de 3.5",
+          "price": 2.2,
+          "typeId": 39,
+          "handicap": 3.5
+        },
+        "synth-sel-beta-under": {
+          "id": "synth-sel-beta-under",
+          "name": "Menos",
+          "fullName": "Menos de 3.5",
+          "price": 1.7,
+          "typeId": 40,
+          "handicap": 3.5
+        },
+        "synth-sel-beta-yes": {
+          "id": "synth-sel-beta-yes",
+          "name": "Sim",
+          "fullName": "Sim",
+          "price": 1.8,
+          "typeId": 43
+        },
+        "synth-sel-beta-no": {
+          "id": "synth-sel-beta-no",
+          "name": "Não",
+          "fullName": "Não",
+          "price": 2.0,
+          "typeId": 44
+        },
+        "synth-sel-beta-sus-home": {
+          "id": "synth-sel-beta-sus-home",
+          "name": "1",
+          "fullName": "Synthetic Home Beta",
+          "price": 1.5,
+          "typeId": 1,
+          "isSuspended": true
+        },
+        "synth-sel-beta-sus-draw": {
+          "id": "synth-sel-beta-sus-draw",
+          "name": "X",
+          "fullName": "Empate",
+          "price": 3.0,
+          "typeId": 2,
+          "isSuspended": true
+        },
+        "synth-sel-beta-sus-away": {
+          "id": "synth-sel-beta-sus-away",
+          "name": "2",
+          "fullName": "Synthetic Away Beta",
+          "price": 4.0,
+          "typeId": 3,
+          "isSuspended": true
+        },
+        "synth-sel-live-home": {
+          "id": "synth-sel-live-home",
+          "name": "1",
+          "fullName": "Synthetic Live Home",
+          "price": 1.6,
+          "typeId": 1
+        },
+        "synth-sel-live-draw": {
+          "id": "synth-sel-live-draw",
+          "name": "X",
+          "fullName": "Empate",
+          "price": 3.8,
+          "typeId": 2
+        },
+        "synth-sel-live-away": {
+          "id": "synth-sel-live-away",
+          "name": "2",
+          "fullName": "Synthetic Live Away",
+          "price": 5.0,
+          "typeId": 3
+        },
+        "synth-sel-bask-home": {
+          "id": "synth-sel-bask-home",
+          "name": "1",
+          "fullName": "Synthetic Bask Home",
+          "price": 1.7,
+          "typeId": 1
+        },
+        "synth-sel-bask-away": {
+          "id": "synth-sel-bask-away",
+          "name": "2",
+          "fullName": "Synthetic Bask Away",
+          "price": 2.2,
+          "typeId": 3
+        }
+      },
+      "sports": {
+        "FOOT": {"id": "FOOT", "name": "Futebol"},
+        "BASK": {"id": "BASK", "name": "Basquetebol"}
+      },
+      "sportsLayout": {},
+      "zones": {
+        "synth-zone-1": {"id": "synth-zone-1", "name": "Synthetic Zone"}
+      }
+    }
+  }
+}
