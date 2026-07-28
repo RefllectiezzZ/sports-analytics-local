@@ -176,8 +176,12 @@ def _parse_event(raw: dict[str, Any]) -> ProviderEventObservation:
         for item in raw.get("participants", [])
         if isinstance(item, dict)
     )
+    native_market_payload = raw.get("nativeMarkets", raw.get("markets", []))
+    native_markets = tuple(
+        _parse_market(item) for item in native_market_payload if isinstance(item, dict)
+    )
     markets = tuple(
-        _parse_market(item) for item in raw.get("markets", []) if isinstance(item, dict)
+        market for market in native_markets if market.canonical_market_definition_id is not None
     )
     start = raw.get("startTimeUtc")
     if not isinstance(start, str):
@@ -203,15 +207,13 @@ def _parse_event(raw: dict[str, Any]) -> ProviderEventObservation:
         competition_display_name=(
             str(raw["competitionName"]) if raw.get("competitionName") is not None else None
         ),
+        native_markets=native_markets,
     )
 
 
 def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
     type_code = str(raw.get("marketTypeCode") or "")
     canonical = _map_market_type(type_code)
-    if canonical is None:
-        msg = f"unsupported market type code {type_code!r}"
-        raise ParserError(msg)
     status_raw = str(raw.get("status") or "").upper()
     if not status_raw:
         msg = "missing market status"
@@ -225,8 +227,11 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
     if period_code is not None:
         period = _PERIOD_CODES.get(str(period_code).upper())
         if period is None:
-            msg = f"unsupported market period {period_code!r}"
-            raise ParserError(msg)
+            if canonical is None:
+                period = str(period_code)
+            else:
+                msg = f"unsupported market period {period_code!r}"
+                raise ParserError(msg)
     overtime_scope = raw.get("overtimeScope")
     if overtime_scope is not None and str(overtime_scope) not in {"none", "including-overtime"}:
         msg = f"unsupported overtime scope {overtime_scope!r}"
@@ -270,6 +275,10 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 decimal_odds=odds,
                 selection_status=sel_status,
                 line=line,
+                provider_selection_type=(
+                    str(item["providerTypeId"]) if item.get("providerTypeId") is not None else None
+                ),
+                provider_order=len(selections),
             )
         )
     market_line = None
@@ -285,6 +294,10 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
         overtime_scope=(str(overtime_scope) if overtime_scope is not None else None),
         rules_scope=(str(rules_scope) if rules_scope is not None else None),
         canonical_market_definition_id=canonical,
+        provider_market_type=(
+            str(raw["providerType"]) if raw.get("providerType") is not None else type_code
+        ),
+        provider_order=0,
     )
 
 

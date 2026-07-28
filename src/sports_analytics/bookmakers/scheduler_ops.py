@@ -13,6 +13,7 @@ from sports_analytics.bookmakers.types import (
     PROVIDER_BETANO_PT,
     PROVIDER_BETCLIC_PT,
 )
+from sports_analytics.bookmakers.window import rolling_acquisition_window
 from sports_analytics.core.exceptions import (
     ConfigurationError,
     RepositoryError,
@@ -215,7 +216,16 @@ def atomic_enqueue_autonomous_cycle(
     sport_code = validate_identifier(sport, field_name="sport")
     provider_id = BOOKMAKER_AUTONOMOUS_SCHEDULER_PROVIDER
     scheduled = scheduled_for
-    idempotency_key = f"bookmaker-auto:{sport_code}:{scheduled.strftime('%Y%m%dT%H%M%SZ')}"
+    acquisition_window = rolling_acquisition_window(
+        now,
+        window_hours=bookmakers.default_window_hours,
+        maximum_events=bookmakers.maximum_events_per_sport,
+        maximum_window_hours=bookmakers.maximum_window_hours,
+    )
+    idempotency_key = (
+        f"bookmaker-auto:{sport_code}:{scheduled.strftime('%Y%m%dT%H%M%SZ')}:"
+        f"window:{acquisition_window.identity_digest[:16]}"
+    )
     acquisition_cycle_id = idempotency_key.replace(":", "-")
     payload: dict[str, JsonValue] = {
         "sport": sport_code,
@@ -225,6 +235,7 @@ def atomic_enqueue_autonomous_cycle(
         "acquisition_started_at_utc": None,
         "observed_at_utc": None,
         "acquisition_finished_at_utc": None,
+        "acquisition_window": acquisition_window.as_payload(),
     }
     try:
         with connect_database(database_path) as connection:

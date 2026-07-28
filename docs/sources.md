@@ -43,16 +43,58 @@ Only implemented adapters appear in the catalog.
 | `betano-pt` | Betano Portugal | `bookmaker` | `betano-pt-adapter-v1` | `current-fixtures`, `current-odds` | `basketball`, `football`, `tennis` |
 | `betclic-pt` | Betclic Portugal | `bookmaker` | `betclic-pt-adapter-v1` | `current-fixtures`, `current-odds` | `basketball`, `football`, `tennis` |
 
-Betano/Betclic adapters acquire only allowlisted public HTTPS routes through a
-visible Playwright Chromium session. They do not accept arbitrary URLs, do not
-log in, do not place bets, and do not bypass CAPTCHA or anti-bot controls.
+Betano/Betclic adapters acquire only allowlisted public HTTPS routes through an
+ordinary Playwright Chromium session. Headless is the default; visible modes
+follow the same policy. They do not accept arbitrary URLs, do not log in, do not
+place bets, and do not bypass CAPTCHA or anti-bot controls.
 Blocked pages stop the acquisition attempt and are classified explicitly.
 Offline synthetic fixtures under `tests/fixtures/betano/` and
 `tests/fixtures/betclic/` drive parser tests without live pages.
 
+Bookmaker structured data is consumed only from responses naturally received by
+the active Playwright page/context. Approved JSON is retained from the
+`page.on("response")` callback after bounded reading and reviewed structural
+classification. Betclic gRPC-Web bodies use the bounded envelope inspector only;
+field decoding remains disabled until real structures are proven. WebSocket
+connection metadata may be recorded, but frames are never captured.
+
+Provider production modules do not use the repository's independent historical
+CSV HTTP transport. They do not use `requests`, `httpx`, Playwright
+`APIRequestContext`, copied endpoints, copied cURL, copied browser headers,
+cookies, tokens, or request bodies. Chromium supplies ordinary request headers
+from a fresh non-persistent context.
+
 Live browser acquisition is best-effort and not guaranteed to keep working as
 provider sites change. Operators remain responsible for reviewing current
 provider terms before enabling acquisition.
+Technical profile verification does not encode legal permission. Localhost,
+private use, or educational purpose does not automatically authorize access to
+an undocumented transport, and captured data is not intended for republication.
+
+## Provider priority and verified capability
+
+Betclic is the next priority provider integration, not an operational current-
+odds source: its football, basketball, and tennis public pages/configuration
+were observed, but none has a verified event transport or extraction profile.
+Basketball and tennis follow after the first verified Betclic football vertical
+slice. Betano remains experimental and lower priority: football has only a
+reviewed, non-exhaustive landing/popular inventory profile and was headless-
+blocked in the tested environment; basketball and tennis have no verified
+profile and were also headless-blocked there. These environment observations do
+not establish permanent provider behavior. Betano limitations must not block
+the rest of the product workflow.
+
+This PR establishes a browser-observed acquisition foundation, not exhaustive
+live provider support. Static route declarations and catalogued sports do not
+constitute verified extraction support.
+
+Catalogued sports are not equivalent to verified extraction profiles. Profile
+lookup is keyed by exact provider and sport. The reviewed Betano football
+`topEventsV2` shape is a landing-inventory profile only and cannot prove all
+event markets. Betano basketball/tennis and every Betclic sport remain
+unregistered pending real, sanitized event-detail evidence. Betclic gRPC-web
+inspection remains transport-only; no protobuf field number or meaning is
+guessed.
 
 `scraper.py --list-sources` prints one tab-separated descriptor line per adapter
 with no database or network access:

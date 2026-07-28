@@ -7,10 +7,12 @@ these typed observations only.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.data.types import validate_identifier, validate_sha256_checksum
@@ -77,10 +79,44 @@ class BrowserBlockReason(StrEnum):
 
 
 class BrowserMode(StrEnum):
-    """Visible browser launch modes. Headless production scraping is forbidden."""
+    """Ordinary Chromium presentation modes for the same acquisition policy."""
 
+    HEADLESS = "headless"
     VISIBLE = "visible"
     VISIBLE_MINIMIZED = "visible-minimized"
+
+
+class BrowserTransportType(StrEnum):
+    """Safe classification of transport Chromium naturally received."""
+
+    DOCUMENT = "document"
+    FETCH = "fetch"
+    XHR = "xhr"
+    GRPC_WEB = "grpc-web"
+    WEBSOCKET = "websocket"
+    EVENTSOURCE = "eventsource"
+    SCRIPT_CONFIGURATION = "script-configuration"
+    OTHER_APPROVED = "other-approved"
+
+
+class BrowserBodyCaptureState(StrEnum):
+    """Why a browser-observed response body was or was not retained."""
+
+    CAPTURED = "captured"
+    NOT_APPROVED = "not-approved"
+    METADATA_ONLY = "metadata-only"
+    DECLARED_SIZE_REJECTED = "declared-size-rejected"
+    ACTUAL_SIZE_REJECTED = "actual-size-rejected"
+    TOTAL_BUDGET_REJECTED = "total-budget-rejected"
+    READ_FAILED = "read-failed"
+    UNSUPPORTED_CONTENT = "unsupported-content"
+
+
+class BrowserRedirectClassification(StrEnum):
+    """Safe redirect relationship without retaining redirect URLs."""
+
+    NONE = "none"
+    REDIRECTED_REQUEST = "redirected-request"
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,21 +270,115 @@ class BrowserPageObservation:
 
 @dataclass(frozen=True, slots=True)
 class BrowserResponseObservation:
-    """First-party JSON response observed while loading an allowlisted page."""
+    """Approved body genuinely received by the active Chromium page.
+
+    ``response_url`` is ephemeral routing input and is intentionally excluded
+    from repr/comparison and every persisted projection. Safe provenance uses
+    the approved hostname, route ID/path hash, page route, sport, and cycle.
+    """
 
     provider_id: str
     page_route_id: str
-    response_url: str
+    response_url: str = field(repr=False, compare=False)
     observed_at_utc: datetime
     content_type: str | None
     body_text: str
     status_code: int
     warnings: tuple[str, ...]
+    sport: str | None = None
+    acquisition_cycle_id: str | None = None
+    source_event_id: str | None = None
+    request_method: str = "GET"
+    transport_type: BrowserTransportType = BrowserTransportType.OTHER_APPROVED
+    hostname: str | None = None
+    sanitized_path_hash: str | None = None
+    approved_route_id: str | None = None
+    approved_path_template: str | None = None
+    declared_content_length: int | None = None
+    actual_captured_byte_length: int | None = None
+    redirect_classification: BrowserRedirectClassification = BrowserRedirectClassification.NONE
+    body_capture_state: BrowserBodyCaptureState = BrowserBodyCaptureState.CAPTURED
+    contributing_capture_checksum: str | None = None
 
     def __post_init__(self) -> None:
         validate_identifier(self.provider_id, field_name="provider_id")
         if not self.response_url.startswith("https://"):
             msg = "response_url must be HTTPS"
+            raise PermanentSourceError(msg)
+        split = urlsplit(self.response_url)
+        resolved_hostname = self.hostname or split.hostname
+        if (
+            resolved_hostname is None
+            or len(resolved_hostname) > 253
+            or re.fullmatch(r"(?i)[a-z0-9.-]+", resolved_hostname) is None
+        ):
+            msg = "response hostname must be a bounded bare hostname"
+            raise PermanentSourceError(msg)
+        object.__setattr__(self, "hostname", resolved_hostname)
+        path_digest = self.sanitized_path_hash or sha256(split.path.encode("utf-8")).hexdigest()
+        object.__setattr__(
+            self,
+            "sanitized_path_hash",
+            validate_sha256_checksum(path_digest),
+        )
+        if self.sport is not None:
+            validate_identifier(self.sport, field_name="sport")
+        if self.acquisition_cycle_id is not None:
+            validate_identifier(
+                self.acquisition_cycle_id,
+                field_name="acquisition_cycle_id",
+            )
+        if self.source_event_id is not None:
+            validate_identifier(self.source_event_id, field_name="source_event_id")
+        if (
+            not self.request_method
+            or len(self.request_method) > 16
+            or re.fullmatch(r"[A-Z]+", self.request_method) is None
+        ):
+            msg = "request_method must be a bounded uppercase token"
+            raise PermanentSourceError(msg)
+        if not isinstance(self.transport_type, BrowserTransportType):
+            msg = "transport_type must be a BrowserTransportType"
+            raise PermanentSourceError(msg)
+        for field_name, value in (
+            ("declared_content_length", self.declared_content_length),
+            ("actual_captured_byte_length", self.actual_captured_byte_length),
+        ):
+            if isinstance(value, bool) or (value is not None and value < 0):
+                msg = f"{field_name} must be a non-negative integer or None"
+                raise PermanentSourceError(msg)
+        if not isinstance(self.body_capture_state, BrowserBodyCaptureState):
+            msg = "body_capture_state must be a BrowserBodyCaptureState"
+            raise PermanentSourceError(msg)
+        if not isinstance(self.redirect_classification, BrowserRedirectClassification):
+            msg = "redirect_classification must be a BrowserRedirectClassification"
+            raise PermanentSourceError(msg)
+        actual_length = len(self.body_text.encode("utf-8"))
+        if self.body_capture_state is not BrowserBodyCaptureState.CAPTURED:
+            msg = "retained response body requires captured body state"
+            raise PermanentSourceError(msg)
+        if self.actual_captured_byte_length is None:
+            object.__setattr__(self, "actual_captured_byte_length", actual_length)
+        elif self.actual_captured_byte_length != actual_length:
+            msg = "actual captured byte length does not match response body"
+            raise PermanentSourceError(msg)
+        checksum = (
+            self.contributing_capture_checksum or sha256(self.body_text.encode("utf-8")).hexdigest()
+        )
+        object.__setattr__(
+            self,
+            "contributing_capture_checksum",
+            validate_sha256_checksum(checksum),
+        )
+        if self.approved_path_template is not None and (
+            not self.approved_path_template.startswith("/")
+            or "?" in self.approved_path_template
+            or "#" in self.approved_path_template
+        ):
+            msg = "approved_path_template must be a static absolute path"
+            raise PermanentSourceError(msg)
+        if (self.approved_route_id is None) != (self.approved_path_template is None):
+            msg = "approved route ID and path template must be provided together"
             raise PermanentSourceError(msg)
         if self.status_code < 100 or self.status_code > 599:
             msg = "status_code must be an HTTP status"
@@ -290,6 +420,21 @@ class BrowserNetworkMetadata:
     grpc_web_body_read: bool = False
     grpc_web_evidence_stored: bool = False
     grpc_web_malformed_or_truncated: bool = False
+    provider_id: str | None = None
+    sport: str | None = None
+    acquisition_cycle_id: str | None = None
+    page_route_id: str | None = None
+    source_event_id: str | None = None
+    request_method: str | None = None
+    transport_type: BrowserTransportType | None = None
+    declared_content_length: int | None = None
+    actual_captured_byte_length: int | None = None
+    redirect_classification: BrowserRedirectClassification = BrowserRedirectClassification.NONE
+    body_capture_state: BrowserBodyCaptureState = BrowserBodyCaptureState.NOT_APPROVED
+    contributing_capture_checksum: str | None = None
+    event_candidate_count: int = 0
+    market_candidate_count: int = 0
+    selection_candidate_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -309,6 +454,59 @@ class BrowserNetworkMetadata:
         if self.byte_size is not None and self.byte_size < 0:
             msg = "byte_size must be non-negative"
             raise PermanentSourceError(msg)
+        for field_name, value in (
+            ("declared_content_length", self.declared_content_length),
+            ("actual_captured_byte_length", self.actual_captured_byte_length),
+        ):
+            if isinstance(value, bool) or (value is not None and value < 0):
+                msg = f"{field_name} must be a non-negative integer or None"
+                raise PermanentSourceError(msg)
+        for field_name, value in (
+            ("event_candidate_count", self.event_candidate_count),
+            ("market_candidate_count", self.market_candidate_count),
+            ("selection_candidate_count", self.selection_candidate_count),
+        ):
+            if isinstance(value, bool) or value < 0 or value > 1_000_000:
+                msg = f"{field_name} must be inside the structural count bound"
+                raise PermanentSourceError(msg)
+        for identifier_field, identifier_value in (
+            ("provider_id", self.provider_id),
+            ("sport", self.sport),
+            ("acquisition_cycle_id", self.acquisition_cycle_id),
+            ("source_event_id", self.source_event_id),
+        ):
+            if identifier_value is not None:
+                validate_identifier(
+                    identifier_value,
+                    field_name=identifier_field,
+                )
+        if self.page_route_id is not None and (
+            not self.page_route_id or len(self.page_route_id) > MAX_PAGE_ROUTE_ID_LENGTH
+        ):
+            msg = "page_route_id must be a non-empty bounded identifier"
+            raise PermanentSourceError(msg)
+        if self.request_method is not None and (
+            len(self.request_method) > 16 or re.fullmatch(r"[A-Z]+", self.request_method) is None
+        ):
+            msg = "request_method must be a bounded uppercase token"
+            raise PermanentSourceError(msg)
+        if self.transport_type is not None and not isinstance(
+            self.transport_type, BrowserTransportType
+        ):
+            msg = "transport_type must be a BrowserTransportType"
+            raise PermanentSourceError(msg)
+        if not isinstance(self.body_capture_state, BrowserBodyCaptureState):
+            msg = "body_capture_state must be a BrowserBodyCaptureState"
+            raise PermanentSourceError(msg)
+        if not isinstance(self.redirect_classification, BrowserRedirectClassification):
+            msg = "redirect_classification must be a BrowserRedirectClassification"
+            raise PermanentSourceError(msg)
+        if self.contributing_capture_checksum is not None:
+            object.__setattr__(
+                self,
+                "contributing_capture_checksum",
+                validate_sha256_checksum(self.contributing_capture_checksum),
+            )
         object.__setattr__(
             self,
             "observed_at_utc",
@@ -316,6 +514,14 @@ class BrowserNetworkMetadata:
         )
         if self.body_captured and not self.hostname_approved:
             msg = "body capture requires an approved hostname"
+            raise PermanentSourceError(msg)
+        if self.body_captured != (self.body_capture_state is BrowserBodyCaptureState.CAPTURED):
+            msg = "body_captured must agree with body_capture_state"
+            raise PermanentSourceError(msg)
+        if self.body_captured and (
+            self.actual_captured_byte_length is None or self.contributing_capture_checksum is None
+        ):
+            msg = "captured body metadata requires byte length and checksum"
             raise PermanentSourceError(msg)
         if self.approved_path_template is not None:
             if (
@@ -423,3 +629,48 @@ class BrowserAcquisitionResult:
         if tuple(sorted(self.warnings)) != self.warnings:
             msg = "warnings must be sorted"
             raise PermanentSourceError(msg)
+        linked_responses: list[BrowserResponseObservation] = []
+        for response in self.responses:
+            if response.provider_id != self.provider_id:
+                msg = "response provider does not match active browser cycle"
+                raise PermanentSourceError(msg)
+            if response.sport not in {None, self.sport}:
+                msg = "response sport does not match active browser cycle"
+                raise PermanentSourceError(msg)
+            if response.acquisition_cycle_id not in {
+                None,
+                self.acquisition_cycle_id,
+            }:
+                msg = "response acquisition_cycle_id does not match active browser cycle"
+                raise PermanentSourceError(msg)
+            linked_responses.append(
+                replace(
+                    response,
+                    sport=self.sport,
+                    acquisition_cycle_id=self.acquisition_cycle_id,
+                )
+            )
+        object.__setattr__(self, "responses", tuple(linked_responses))
+        for item in self.network_metadata:
+            if item.provider_id not in {None, self.provider_id}:
+                msg = "network metadata provider does not match active browser cycle"
+                raise PermanentSourceError(msg)
+            if item.sport not in {None, self.sport}:
+                msg = "network metadata sport does not match active browser cycle"
+                raise PermanentSourceError(msg)
+            if item.acquisition_cycle_id not in {
+                None,
+                self.acquisition_cycle_id,
+            }:
+                msg = "network metadata cycle does not match active browser cycle"
+                raise PermanentSourceError(msg)
+
+    @property
+    def truncated_response_count(self) -> int:
+        """Count responses rejected by per-body or total capture bounds."""
+        truncated_states = {
+            BrowserBodyCaptureState.DECLARED_SIZE_REJECTED,
+            BrowserBodyCaptureState.ACTUAL_SIZE_REJECTED,
+            BrowserBodyCaptureState.TOTAL_BUDGET_REJECTED,
+        }
+        return sum(item.body_capture_state in truncated_states for item in self.network_metadata)

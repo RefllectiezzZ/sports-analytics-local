@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 from sports_analytics.sources.bookmaker_contracts import (
+    CompletenessState,
+    EventCompletenessEvidence,
     ParserDriftSeverity,
     ProviderAcquisitionBundle,
     ProviderParserWarning,
@@ -89,6 +92,47 @@ def _bundle_from_extraction(
         parser_version=parser_version,
     )
     merged_drift = tuple(sorted(set(bundle.drift_codes) | set(extraction.drift_codes)))
+    truncated_count = browser_result.truncated_response_count
+    if truncated_count:
+        merged_drift = tuple(sorted(set(merged_drift) | {"response-capture-truncated"}))
+        bundle = replace(
+            bundle,
+            events=tuple(
+                replace(
+                    event,
+                    completeness=EventCompletenessEvidence(
+                        provider_declared_market_references=(
+                            event.completeness.provider_declared_market_references
+                        ),
+                        market_groups_observed=(event.completeness.market_groups_observed),
+                        markets_observed=event.completeness.markets_observed,
+                        markets_parsed=event.completeness.markets_parsed,
+                        markets_rejected=event.completeness.markets_rejected,
+                        selections_observed=(event.completeness.selections_observed),
+                        selections_parsed=event.completeness.selections_parsed,
+                        selections_rejected=(event.completeness.selections_rejected),
+                        markets_with_valid_price=(event.completeness.markets_with_valid_price),
+                        source_responses_contributing=(
+                            event.completeness.source_responses_contributing
+                        ),
+                        event_detail_surface_visited=(
+                            event.completeness.event_detail_surface_visited
+                        ),
+                        event_detail_readiness_reached=(
+                            event.completeness.event_detail_readiness_reached
+                        ),
+                        truncated_response_count=(
+                            event.completeness.truncated_response_count + truncated_count
+                        ),
+                        bounded_response_rejection_count=(
+                            event.completeness.bounded_response_rejection_count + truncated_count
+                        ),
+                        completeness_state=(CompletenessState.PARTIAL_TRUNCATED_RESPONSE),
+                    ),
+                )
+                for event in bundle.events
+            ),
+        )
     if not extraction.verified:
         merged_drift = tuple(sorted(set(merged_drift) | {"unverified-extraction-profile"}))
     return ProviderAcquisitionBundle(

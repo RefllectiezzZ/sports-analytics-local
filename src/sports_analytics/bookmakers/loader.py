@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,11 @@ import pyarrow.parquet as pq
 from sports_analytics.bookmakers.canonical_mapping import (
     canonical_market_definition_id_from_row,
     quote_is_comparable,
+)
+from sports_analytics.bookmakers.native_inventory import (
+    DATASET_PROVIDER_NATIVE_EVENTS,
+    DATASET_PROVIDER_NATIVE_MARKETS,
+    DATASET_PROVIDER_NATIVE_SELECTIONS,
 )
 from sports_analytics.bookmakers.schemas import (
     DATASET_ACQUISITION_METADATA,
@@ -22,7 +29,12 @@ from sports_analytics.bookmakers.schemas import (
     bookmaker_snapshot_suite,
 )
 from sports_analytics.bookmakers.snapshots import parse_bookmaker_source_version
-from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION, BOOKMAKER_SNAPSHOT_TYPE
+from sports_analytics.bookmakers.types import (
+    BOOKMAKER_SCHEMA_VERSION,
+    BOOKMAKER_SCHEMA_VERSION_V2,
+    BOOKMAKER_SNAPSHOT_TYPE,
+    SUPPORTED_BOOKMAKER_SNAPSHOT_SCHEMAS,
+)
 from sports_analytics.bookmakers.verified_evidence import (
     VerifiedBookmakerQuote,
     VerifiedQuoteCatalogue,
@@ -64,6 +76,9 @@ class LoadedBookmakerSnapshot:
     registration_only: bool = False
     event_count: int = 0
     quote_count: int = 0
+    native_event_count: int = 0
+    native_market_count: int = 0
+    native_selection_count: int = 0
     verified_quotes_by_observation_id: tuple[tuple[str, VerifiedBookmakerQuote], ...] = ()
     verified_quotes_by_semantic_identity: tuple[
         tuple[tuple[object, ...], VerifiedBookmakerQuote], ...
@@ -114,7 +129,7 @@ def load_bookmaker_snapshot(
         raise SnapshotVerificationError(
             f"snapshot {snapshot_id} has unexpected type {record.snapshot_type!r}"
         )
-    if record.schema_version != BOOKMAKER_SCHEMA_VERSION:
+    if record.schema_version not in SUPPORTED_BOOKMAKER_SNAPSHOT_SCHEMAS:
         raise SnapshotVerificationError(
             f"snapshot {snapshot_id} has unexpected schema {record.schema_version!r}"
         )
@@ -125,7 +140,10 @@ def load_bookmaker_snapshot(
     result = verify_snapshot_directory(
         snapshots_directory=snapshots_directory,
         relative_manifest_path=record.relative_path,
-        suite=bookmaker_snapshot_suite(sport_code=sport_code),
+        suite=bookmaker_snapshot_suite(
+            sport_code=sport_code,
+            schema_version=record.schema_version,
+        ),
         expected_snapshot=record,
     )
 
@@ -173,6 +191,14 @@ def load_bookmaker_snapshot(
 
     manifest_parent = PurePosixPath(record.relative_path).parent.as_posix()
     snapshot_dir = resolve_snapshot_dir(snapshots_directory, manifest_parent)
+    native_counts = (0, 0, 0)
+    if record.schema_version == BOOKMAKER_SCHEMA_VERSION_V2:
+        native_counts = _verify_native_inventory(
+            snapshot_dir=snapshot_dir,
+            provider_id=provider_id,
+            sport_code=sport_code,
+            capture_checksums={entry.checksum_sha256 for entry in manifest.entries},
+        )
     event_count, quote_count, verified_by_observation, verified_by_semantic = (
         _verify_semantic_datasets(
             snapshot_dir=snapshot_dir,
@@ -183,6 +209,8 @@ def load_bookmaker_snapshot(
             capture_checksums={entry.checksum_sha256 for entry in manifest.entries},
             snapshot_id=snapshot_id,
             checksum_sha256=result.manifest_checksum_sha256,
+            schema_version=record.schema_version,
+            native_event_count=native_counts[0],
         )
     )
 
@@ -197,6 +225,9 @@ def load_bookmaker_snapshot(
         registration_only=False,
         event_count=event_count,
         quote_count=quote_count,
+        native_event_count=native_counts[0],
+        native_market_count=native_counts[1],
+        native_selection_count=native_counts[2],
         verified_quotes_by_observation_id=verified_by_observation,
         verified_quotes_by_semantic_identity=verified_by_semantic,
         catalogue=VerifiedQuoteCatalogue(
@@ -240,6 +271,140 @@ def _read_dataset(snapshot_dir: Path, dataset_name: str) -> list[dict[str, Any]]
     return rows
 
 
+def _verify_native_inventory(
+    *,
+    snapshot_dir: Path,
+    provider_id: str,
+    sport_code: str,
+    capture_checksums: set[str],
+) -> tuple[int, int, int]:
+    """Verify native event -> market -> selection graph and evidence linkage."""
+    events = _read_dataset(snapshot_dir, DATASET_PROVIDER_NATIVE_EVENTS)
+    markets = _read_dataset(snapshot_dir, DATASET_PROVIDER_NATIVE_MARKETS)
+    selections = _read_dataset(snapshot_dir, DATASET_PROVIDER_NATIVE_SELECTIONS)
+    if not events or not markets or not selections:
+        raise SnapshotVerificationError(
+            "provider-native snapshot requires non-empty events, markets, and selections"
+        )
+    event_ids = [str(row.get("source_event_id", "")) for row in events]
+    if any(not value for value in event_ids) or len(event_ids) != len(set(event_ids)):
+        raise SnapshotVerificationError("provider-native event identities must be unique")
+    event_set = set(event_ids)
+    market_keys = [
+        (str(row.get("source_event_id", "")), str(row.get("source_market_id", "")))
+        for row in markets
+    ]
+    if any(not event_id or not market_id for event_id, market_id in market_keys):
+        raise SnapshotVerificationError("provider-native market identity is missing")
+    if len(market_keys) != len(set(market_keys)):
+        raise SnapshotVerificationError("provider-native market identities must be unique")
+    if any(event_id not in event_set for event_id, _ in market_keys):
+        raise SnapshotVerificationError("provider-native market orphan")
+    market_set = set(market_keys)
+    selection_keys = [
+        (
+            str(row.get("source_event_id", "")),
+            str(row.get("source_market_id", "")),
+            str(row.get("source_selection_id", "")),
+        )
+        for row in selections
+    ]
+    if any(
+        not event_id or not market_id or not selection_id
+        for event_id, market_id, selection_id in selection_keys
+    ):
+        raise SnapshotVerificationError("provider-native selection identity is missing")
+    if len(selection_keys) != len(set(selection_keys)):
+        raise SnapshotVerificationError("provider-native selection identities must be unique")
+    if any((event_id, market_id) not in market_set for event_id, market_id, _ in selection_keys):
+        raise SnapshotVerificationError("provider-native selection orphan")
+
+    for row in (*events, *markets, *selections):
+        if str(row.get("provider_id")) != provider_id:
+            raise SnapshotVerificationError("provider-native provider mismatch")
+        if str(row.get("sport")) != sport_code:
+            raise SnapshotVerificationError("provider-native sport mismatch")
+    for row in events:
+        try:
+            references = json.loads(str(row.get("source_capture_ids", "")))
+        except json.JSONDecodeError as exc:
+            raise SnapshotVerificationError("native event capture references malformed") from exc
+        if (
+            not isinstance(references, list)
+            or not references
+            or any(
+                not isinstance(item, str) or item not in capture_checksums for item in references
+            )
+        ):
+            raise SnapshotVerificationError("native event capture reference mismatch")
+        event_id = str(row["source_event_id"])
+        event_markets = sum(1 for key in market_keys if key[0] == event_id)
+        event_selections = sum(1 for key in selection_keys if key[0] == event_id)
+        if int(row.get("markets_parsed", -1)) != event_markets:
+            raise SnapshotVerificationError("native event parsed market count mismatch")
+        if int(row.get("selections_parsed", -1)) != event_selections:
+            raise SnapshotVerificationError("native event parsed selection count mismatch")
+        state = str(row.get("completeness_state"))
+        if state.startswith("complete-") and not (
+            bool(row.get("event_detail_surface_visited"))
+            and bool(row.get("event_detail_readiness_reached"))
+            and int(row.get("truncated_response_count", -1)) == 0
+            and int(row.get("bounded_response_rejection_count", -1)) == 0
+            and int(row.get("markets_rejected", -1)) == 0
+            and int(row.get("selections_rejected", -1)) == 0
+        ):
+            raise SnapshotVerificationError("native complete state lacks clean detail evidence")
+    for row in (*markets, *selections):
+        capture_id = row.get("source_capture_id")
+        if not isinstance(capture_id, str) or capture_id not in capture_checksums:
+            raise SnapshotVerificationError("native row capture reference mismatch")
+    for row in selections:
+        try:
+            odds = Decimal(str(row.get("decimal_odds")))
+        except InvalidOperation as exc:
+            raise SnapshotVerificationError("native decimal odds malformed") from exc
+        if not odds.is_finite() or odds <= Decimal("1"):
+            raise SnapshotVerificationError("native decimal odds invalid")
+        _verify_optional_decimal(row.get("selection_line"), field_name="selection_line")
+    for row in markets:
+        _verify_optional_decimal(row.get("market_line"), field_name="market_line")
+    expected_market_order = sorted(
+        markets,
+        key=lambda row: (
+            str(row["source_event_id"]),
+            int(row["provider_order"]),
+            str(row["source_market_id"]),
+        ),
+    )
+    if markets != expected_market_order:
+        raise SnapshotVerificationError("provider-native markets are not deterministically ordered")
+    expected_selection_order = sorted(
+        selections,
+        key=lambda row: (
+            str(row["source_event_id"]),
+            str(row["source_market_id"]),
+            int(row["provider_order"]),
+            str(row["source_selection_id"]),
+        ),
+    )
+    if selections != expected_selection_order:
+        raise SnapshotVerificationError(
+            "provider-native selections are not deterministically ordered"
+        )
+    return len(events), len(markets), len(selections)
+
+
+def _verify_optional_decimal(value: object, *, field_name: str) -> None:
+    if value is None:
+        return
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise SnapshotVerificationError(f"native {field_name} malformed") from exc
+    if not parsed.is_finite():
+        raise SnapshotVerificationError(f"native {field_name} must be finite")
+
+
 def _verify_semantic_datasets(
     *,
     snapshot_dir: Path,
@@ -250,13 +415,18 @@ def _verify_semantic_datasets(
     capture_checksums: set[str],
     snapshot_id: str,
     checksum_sha256: str,
+    schema_version: str,
+    native_event_count: int,
 ) -> tuple[
     int,
     int,
     tuple[tuple[str, VerifiedBookmakerQuote], ...],
     tuple[tuple[tuple[object, ...], VerifiedBookmakerQuote], ...],
 ]:
-    suite = bookmaker_snapshot_suite(sport_code=sport_code)
+    suite = bookmaker_snapshot_suite(
+        sport_code=sport_code,
+        schema_version=schema_version,
+    )
     for descriptor in suite.descriptors:
         expected_rows = verification.row_count(descriptor.dataset_name)
         rows = _read_dataset(snapshot_dir, descriptor.dataset_name)
@@ -285,7 +455,10 @@ def _verify_semantic_datasets(
         raise SnapshotVerificationError("acquisition metadata sport mismatch")
     if str(acquisition.get("acquisition_cycle_id")) != acquisition_cycle_id:
         raise SnapshotVerificationError("acquisition metadata acquisition_cycle_id mismatch")
-    if int(acquisition.get("event_count", -1)) != len(events):
+    expected_event_count = (
+        native_event_count if schema_version == BOOKMAKER_SCHEMA_VERSION_V2 else len(events)
+    )
+    if int(acquisition.get("event_count", -1)) != expected_event_count:
         raise SnapshotVerificationError("acquisition metadata event_count mismatch")
 
     provider_status_for_provider = [
@@ -300,7 +473,7 @@ def _verify_semantic_datasets(
         raise SnapshotVerificationError("provider status provider_id mismatch")
     if int(provider_status.get("valid_quotes_observed", -1)) != len(quotes):
         raise SnapshotVerificationError("provider status valid_quotes_observed mismatch")
-    if int(provider_status.get("events_observed", -1)) != len(events):
+    if int(provider_status.get("events_observed", -1)) != expected_event_count:
         raise SnapshotVerificationError("provider status events_observed mismatch")
 
     _verify_source_participant_graph(
@@ -320,7 +493,7 @@ def _verify_semantic_datasets(
         canonical_events=events,
     )
 
-    if len(events) < 1 or len(quotes) < 1:
+    if schema_version == BOOKMAKER_SCHEMA_VERSION and (len(events) < 1 or len(quotes) < 1):
         raise SnapshotVerificationError("admitted snapshot must contain events and quotes")
     event_ids = {str(row["canonical_event_id"]) for row in events}
     if len(event_ids) != len(events):

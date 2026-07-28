@@ -407,7 +407,17 @@ class BookmakersSettings(_FrozenModel):
     preferred_provider: str = "betano-pt"
     comparison_provider: str = "betclic-pt"
     selection_mode: str = "preferred-unless-better"
-    browser_mode: Literal["visible", "visible-minimized"] = "visible"
+    browser_mode: Literal["headless", "visible", "visible-minimized"] = "headless"
+    default_window_hours: int = Field(default=48, ge=1, le=168)
+    maximum_window_hours: int = Field(default=168, ge=1, le=168)
+    maximum_events_per_sport: int = Field(default=100, ge=1, le=500)
+    market_depth: Literal["all-observed-markets"] = "all-observed-markets"
+    maximum_response_bytes: int = Field(default=2_097_152, ge=1, le=8_388_608)
+    maximum_total_capture_bytes: int = Field(default=16_777_216, ge=1, le=67_108_864)
+    event_detail_concurrency: int = Field(default=1, ge=1, le=4)
+    minimum_event_detail_interval_ms: int = Field(default=1_000, ge=0, le=60_000)
+    navigation_timeout_ms: int = Field(default=30_000, ge=1, le=120_000)
+    explicit_retry_limit: Literal[0] = 0
     quote_maximum_age_seconds: int = Field(default=300, ge=1)
     betano: BookmakerProviderSettings = Field(default_factory=BookmakerProviderSettings)
     betclic: BookmakerProviderSettings = Field(default_factory=BookmakerProviderSettings)
@@ -431,17 +441,29 @@ class BookmakersSettings(_FrozenModel):
             raise ValueError(msg)
         return value
 
-    @field_validator("quote_maximum_age_seconds", mode="before")
+    @field_validator(
+        "quote_maximum_age_seconds",
+        "default_window_hours",
+        "maximum_window_hours",
+        "maximum_events_per_sport",
+        "maximum_response_bytes",
+        "maximum_total_capture_bytes",
+        "event_detail_concurrency",
+        "minimum_event_detail_interval_ms",
+        "navigation_timeout_ms",
+        "explicit_retry_limit",
+        mode="before",
+    )
     @classmethod
     def _normalize_quote_age(cls, value: object) -> object:
         if isinstance(value, bool):
-            msg = "bookmakers.quote_maximum_age_seconds must not be boolean"
+            msg = "bookmaker integer settings must not be boolean"
             raise ValueError(msg)
         if isinstance(value, str):
             try:
                 value = int(value, 10)
             except ValueError as exc:
-                msg = "bookmakers.quote_maximum_age_seconds must be an integer"
+                msg = "bookmaker integer settings must be integers"
                 raise ValueError(msg) from exc
         return value
 
@@ -449,6 +471,15 @@ class BookmakersSettings(_FrozenModel):
     def _validate_bookmakers_relations(self) -> Self:
         if self.preferred_provider == self.comparison_provider:
             msg = "bookmakers.preferred_provider and bookmakers.comparison_provider must differ"
+            raise ValueError(msg)
+        if self.default_window_hours > self.maximum_window_hours:
+            msg = "bookmakers.default_window_hours must not exceed maximum_window_hours"
+            raise ValueError(msg)
+        if self.maximum_total_capture_bytes < self.maximum_response_bytes:
+            msg = (
+                "bookmakers.maximum_total_capture_bytes must cover at least "
+                "one maximum-sized response"
+            )
             raise ValueError(msg)
         return self
 

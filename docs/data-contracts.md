@@ -601,6 +601,39 @@ Implemented now:
   selection policy, same-bookmaker multiples, and `current-bookmaker-odds`
   snapshots.
 
+### Provider-native bookmaker inventory
+
+`bookmaker-provider-native-inventory-v1`, carried by
+`bookmaker-native-v2` snapshots, is the bounded evidence layer before canonical
+mapping. It has separate event, market, and selection datasets. Values are
+typed, length-bounded, deterministically ordered, and linked to
+content-addressed capture identities. Complete URLs, query strings, headers,
+cookies, tokens, scripts, HTML, and arbitrary nested provider JSON are not
+members of the contract.
+
+Admission is split into provider inventory, canonical projection, comparison
+catalogue, and exhaustive completeness. A valid unknown market may be admitted
+to native inventory while producing no canonical or comparable quote. Critical
+identity/schema/evidence contradictions still fail closed. Completeness is
+never inferred from a landing page: it requires an exact provider denominator
+or a reviewed structurally complete event-detail payload; otherwise the state
+is explicit partial or unknown.
+
+Browser-observed response provenance is typed before provider parsing. A retained
+body carries the exact provider, sport, acquisition-cycle ID, page-route ID,
+optional established source-event ID, request method, transport classification,
+approved hostname, approved route ID/template or sanitized path hash, status,
+content type, declared size, captured size, redirect class, capture state,
+observation time, and content checksum. The complete URL remains ephemeral and
+is excluded from persisted diagnostics and capture manifests. Query strings,
+headers, cookies, tokens, request bodies, HTML, scripts, and WebSocket frames are
+not part of the contract.
+
+Body states distinguish captured, not approved, metadata only, declared-size
+rejection, actual-size rejection, total-budget rejection, read failure, and
+unsupported content. Size/budget rejection increments partial/truncated evidence
+instead of silently dropping the response.
+
 Not implemented: login/bet placement; CAPTCHA or anti-bot bypass; guaranteed
 indefinite live browser acquisition; additional sports beyond the initial
 bookmaker pre-match scope; markets beyond the initial exact mappings plus

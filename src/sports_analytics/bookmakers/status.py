@@ -36,6 +36,14 @@ class ProviderStatusRecord:
     next_eligible_attempt_utc: datetime | None
     adapter_version: str
     observed_at_utc: datetime
+    provider_native_markets: int = 0
+    provider_native_priced_selections: int = 0
+    canonical_markets: int = 0
+    canonical_quotes: int = 0
+    unmapped_markets: int = 0
+    non_comparable_quotes: int = 0
+    complete_events: int = 0
+    partial_events: int = 0
 
     def __post_init__(self) -> None:
         validate_identifier(self.provider_id, field_name="provider_id")
@@ -80,6 +88,14 @@ class ProviderStatusRecord:
             "valid_quotes_observed",
             "unresolved_events",
             "rejected_markets",
+            "provider_native_markets",
+            "provider_native_priced_selections",
+            "canonical_markets",
+            "canonical_quotes",
+            "unmapped_markets",
+            "non_comparable_quotes",
+            "complete_events",
+            "partial_events",
         ):
             value = getattr(self, field_name)
             if type(value) is not int or value < 0:
@@ -116,6 +132,14 @@ def build_provider_status(
     drift_detected: bool = False,
     disabled: bool = False,
     acquisition_partial: bool = False,
+    provider_native_markets: int = 0,
+    provider_native_priced_selections: int = 0,
+    canonical_markets: int = 0,
+    canonical_quotes: int = 0,
+    unmapped_markets: int = 0,
+    non_comparable_quotes: int = 0,
+    complete_events: int = 0,
+    partial_events: int = 0,
 ) -> ProviderStatusRecord:
     """Build a provider status record with conservative classification rules."""
     status = _classify_status(
@@ -148,6 +172,14 @@ def build_provider_status(
         next_eligible_attempt_utc=next_eligible_attempt_utc,
         adapter_version=adapter_version,
         observed_at_utc=observed_at_utc,
+        provider_native_markets=provider_native_markets,
+        provider_native_priced_selections=provider_native_priced_selections,
+        canonical_markets=canonical_markets,
+        canonical_quotes=canonical_quotes,
+        unmapped_markets=unmapped_markets,
+        non_comparable_quotes=non_comparable_quotes,
+        complete_events=complete_events,
+        partial_events=partial_events,
     )
 
 

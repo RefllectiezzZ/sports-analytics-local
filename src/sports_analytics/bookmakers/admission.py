@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from sports_analytics.bookmakers.normalization import NormalizedBookmakerBundle
-from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
+from sports_analytics.sources.bookmaker_contracts import (
+    CompletenessState,
+    ProviderAcquisitionBundle,
+    provider_native_markets,
+)
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult
 
 
@@ -45,6 +49,7 @@ _INFORMATIONAL_DRIFT_CODES: frozenset[str] = frozenset(
         "missing-total-line",
         "contradictory-line",
         "duplicate-selection-id",
+        "event-outside-window",
     }
 )
 
@@ -58,6 +63,10 @@ class AdmissionDecision:
     may_publish: bool
     may_replace_last_valid: bool
     warnings: tuple[str, ...]
+    provider_inventory_admitted: bool = False
+    canonical_projection_admitted: bool = False
+    comparison_catalogue_admitted: bool = False
+    exhaustive_capture_complete: bool = False
 
 
 def evaluate_admission(
@@ -105,22 +114,6 @@ def evaluate_admission(
             may_replace_last_valid=False,
             warnings=warnings,
         )
-    if valid_quote_count <= 0:
-        return AdmissionDecision(
-            outcome=AdmissionOutcome.UNAVAILABLE,
-            reason_code="no-valid-quotes",
-            may_publish=False,
-            may_replace_last_valid=False,
-            warnings=warnings,
-        )
-    if unresolved_event_count > 0 and len(bundle.events) == unresolved_event_count:
-        return AdmissionDecision(
-            outcome=AdmissionOutcome.PARTIAL,
-            reason_code="all-events-unresolved",
-            may_publish=False,
-            may_replace_last_valid=False,
-            warnings=warnings,
-        )
     blocking_drift = tuple(
         sorted(code for code in bundle.drift_codes if code not in _INFORMATIONAL_DRIFT_CODES)
     )
@@ -132,13 +125,48 @@ def evaluate_admission(
             may_replace_last_valid=False,
             warnings=warnings,
         )
-    if unresolved_event_count > 0 or normalized.unknown_markets:
+    native_market_count = sum(len(provider_native_markets(event)) for event in bundle.events)
+    native_priced_selection_count = sum(
+        len(market.selections)
+        for event in bundle.events
+        for market in provider_native_markets(event)
+    )
+    legacy_projection_only = native_market_count == 0 and valid_quote_count > 0
+    provider_inventory_admitted = (
+        native_market_count > 0 and native_priced_selection_count > 0
+    ) or legacy_projection_only
+    if not provider_inventory_admitted:
         return AdmissionDecision(
-            outcome=AdmissionOutcome.PARTIAL,
-            reason_code="partial-acquisition",
+            outcome=AdmissionOutcome.UNAVAILABLE,
+            reason_code="no-valid-provider-native-inventory",
             may_publish=False,
             may_replace_last_valid=False,
             warnings=warnings,
+        )
+    canonical_projection_admitted = valid_quote_count > 0
+    comparison_catalogue_admitted = any(
+        item.comparable and item.eligible for item in normalized.comparison_eligibility
+    )
+    complete_states = {
+        CompletenessState.COMPLETE_BY_PROVIDER_REFERENCE,
+        CompletenessState.COMPLETE_BY_REVIEWED_EVENT_PAYLOAD,
+    }
+    exhaustive_capture_complete = bool(bundle.events) and all(
+        event.completeness.completeness_state in complete_states for event in bundle.events
+    )
+    if legacy_projection_only:
+        exhaustive_capture_complete = True
+    if unresolved_event_count > 0 or not exhaustive_capture_complete or normalized.unknown_markets:
+        return AdmissionDecision(
+            outcome=AdmissionOutcome.PARTIAL,
+            reason_code="partial-acquisition",
+            may_publish=not legacy_projection_only,
+            may_replace_last_valid=False,
+            warnings=warnings,
+            provider_inventory_admitted=True,
+            canonical_projection_admitted=canonical_projection_admitted,
+            comparison_catalogue_admitted=comparison_catalogue_admitted,
+            exhaustive_capture_complete=False,
         )
     return AdmissionDecision(
         outcome=AdmissionOutcome.ADMITTED,
@@ -146,4 +174,8 @@ def evaluate_admission(
         may_publish=True,
         may_replace_last_valid=True,
         warnings=warnings,
+        provider_inventory_admitted=True,
+        canonical_projection_admitted=canonical_projection_admitted,
+        comparison_catalogue_admitted=comparison_catalogue_admitted,
+        exhaustive_capture_complete=True,
     )

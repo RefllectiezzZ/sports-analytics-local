@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sports_analytics.bookmakers.loader import load_verified_bookmaker_quotes
 from sports_analytics.bookmakers.service import BookmakerIngestionService
+from sports_analytics.bookmakers.window import AcquisitionWindow
 from sports_analytics.core.settings import BookmakersSettings
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.migrations import ensure_database_ready
 from sports_analytics.markets.contracts import MarketStatus
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION, PROVIDER_ID
+from sports_analytics.sources.bookmaker_contracts import CompletenessState
 from sports_analytics.sources.bookmaker_extraction.betano_topeventsv2 import (
     BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
     BETANO_TOPEVENTSV2_PROFILE_ID,
@@ -23,7 +26,9 @@ from sports_analytics.sources.bookmaker_extraction.pipeline import apply_extract
 from sports_analytics.sources.bookmaker_extraction.registry import get_verified_extraction_profile
 from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
+    BrowserBodyCaptureState,
     BrowserMode,
+    BrowserNetworkMetadata,
     BrowserResponseObservation,
 )
 from sports_analytics.sources.browser.playwright_runtime import RecordingBrowserSession
@@ -191,6 +196,49 @@ def test_pipeline_produces_prematch_events_without_invented_rules() -> None:
             assert market.selections
 
 
+def test_oversized_browser_response_downgrades_event_completeness() -> None:
+    browser = _browser(FIXTURE.read_text(encoding="utf-8"))
+    browser = replace(
+        browser,
+        network_metadata=(
+            BrowserNetworkMetadata(
+                hostname="www.betano.pt",
+                resource_type="xhr",
+                status_code=200,
+                content_type="application/json",
+                byte_size=3_000_000,
+                sanitized_path_hash="a" * 64,
+                structural_fingerprint=None,
+                hostname_approved=True,
+                candidate_keys_detected=False,
+                body_captured=False,
+                observed_at_utc=OBSERVED,
+                provider_id=PROVIDER_ID,
+                sport="football",
+                acquisition_cycle_id=browser.acquisition_cycle_id,
+                page_route_id="football-prematch",
+                request_method="GET",
+                declared_content_length=3_000_000,
+                body_capture_state=(BrowserBodyCaptureState.DECLARED_SIZE_REJECTED),
+            ),
+        ),
+    )
+    bundle = apply_extraction_profile(
+        profile=BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
+        browser_result=browser,
+        captures=(),
+        adapter_version=ADAPTER_VERSION,
+        parser_version="betano-pt-parser-v1",
+        observed_at_utc=OBSERVED,
+        sport="football",
+    )
+    assert "response-capture-truncated" in bundle.drift_codes
+    assert all(
+        event.completeness.completeness_state is CompletenessState.PARTIAL_TRUNCATED_RESPONSE
+        for event in bundle.events
+    )
+
+
 def test_adapter_uses_response_observation_timestamps(tmp_path: Path) -> None:
     from sports_analytics.sources.betano.adapter import acquire_betano_current_odds
 
@@ -303,7 +351,18 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
                 observed_at_utc=base.observed_at_utc,
                 browser_mode=base.browser_mode,
                 pages=base.pages,
-                responses=base.responses,
+                responses=tuple(
+                    replace(
+                        response,
+                        acquisition_cycle_id=str(
+                            kwargs.get(
+                                "acquisition_cycle_id",
+                                base.acquisition_cycle_id,
+                            )
+                        ),
+                    )
+                    for response in base.responses
+                ),
                 diagnostics=base.diagnostics,
                 block_reason=base.block_reason,
                 warnings=base.warnings,
@@ -323,8 +382,14 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
         sport="football",
         observed_at_utc=observed_1,
         acquisition_cycle_id="e2e-betano-1",
+        acquisition_window=AcquisitionWindow(
+            window_start_utc=datetime(2036, 3, 3, 0, 0, tzinfo=UTC),
+            window_end_utc=datetime(2036, 3, 5, 0, 0, tzinfo=UTC),
+            maximum_events=100,
+            evaluated_at_utc=observed_1,
+        ),
     )
-    assert first.status == "succeeded"
+    assert first.status == "partial"
     assert first.snapshot_id is not None
     assert first.events_observed >= 2
     assert first.valid_quotes_observed >= 2
@@ -344,8 +409,14 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
         sport="football",
         observed_at_utc=observed_2,
         acquisition_cycle_id="e2e-betano-2",
+        acquisition_window=AcquisitionWindow(
+            window_start_utc=datetime(2036, 3, 3, 0, 0, tzinfo=UTC),
+            window_end_utc=datetime(2036, 3, 5, 0, 0, tzinfo=UTC),
+            maximum_events=100,
+            evaluated_at_utc=observed_2,
+        ),
     )
-    assert second.status == "succeeded"
+    assert second.status == "partial"
     assert second.snapshot_id is not None
 
     with connect_database(tmp_path / "db.sqlite3", read_only=True) as connection:

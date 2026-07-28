@@ -286,7 +286,8 @@ def test_valid_historical_analysis_and_football_backtest_artifacts_still_reload(
     for row in loaded_analysis.dataset("predictions").rows:
         validate_dataset_row_schema("predictions", row, version="predictions-v2")
 
-    paths_backtest, feature_artifact = _feature_artifact(tmp_path / "backtest")
+    # The content-addressed feature path is long; retain Windows path headroom.
+    paths_backtest, feature_artifact = _feature_artifact(tmp_path / "b")
     published_backtest = run_and_publish_football_closing_backtest(
         paths=paths_backtest,
         request=FootballBacktestRequest(

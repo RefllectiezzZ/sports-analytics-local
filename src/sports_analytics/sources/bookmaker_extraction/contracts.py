@@ -35,6 +35,21 @@ class ExtractionProfile(Protocol):
     @property
     def provider_id(self) -> str: ...
 
+    @property
+    def sport(self) -> str: ...
+
+    @property
+    def schema_version(self) -> str: ...
+
+    @property
+    def supported_capture_surfaces(self) -> tuple[str, ...]: ...
+
+    @property
+    def completeness_capability(self) -> str: ...
+
+    @property
+    def market_extraction_capability(self) -> str: ...
+
     def extract(
         self,
         *,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from sports_analytics.bookmakers.window import AcquisitionWindow, apply_acquisition_window
 from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.sources.betclic.catalog import (
     ADAPTER_VERSION,
@@ -12,6 +13,7 @@ from sports_analytics.sources.betclic.catalog import (
     PARSER_VERSION,
     PROVIDER_ID,
 )
+from sports_analytics.sources.bookmaker_capture import attach_capture_references
 from sports_analytics.sources.bookmaker_catalog import reject_forbidden_job_controls
 from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
 from sports_analytics.sources.bookmaker_extraction.contracts import ExtractionProfile
@@ -31,13 +33,14 @@ def acquire_betclic_current_odds(
     acquisition_cycle_id: str,
     observed_at_utc: datetime,
     raw_directory: Path,
-    browser_mode: BrowserMode = BrowserMode.VISIBLE,
+    browser_mode: BrowserMode = BrowserMode.HEADLESS,
     session: BrowserSession | None = None,
     maximum_capture_bytes: int = 2_097_152,
     extraction_profile: ExtractionProfile | None = None,
     deadline_at_utc: datetime | None = None,
+    acquisition_window: AcquisitionWindow | None = None,
 ) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[BookmakerRawCapture, ...]]:
-    """Acquire Betclic pre-match fixtures/odds via ordinary visible browser automation.
+    """Acquire Betclic pre-match fixtures/odds via ordinary browser automation.
 
     Evidence timestamp policy matches Betano: each capture uses the corresponding
     browser observation timestamp. Bundle observation uses the latest JSON response
@@ -67,7 +70,8 @@ def acquire_betclic_current_odds(
             retrieved_at=response.observed_at_utc,
             extension="json",
             maximum_bytes=maximum_capture_bytes,
-            source_url=response.response_url,
+            # Complete provider URLs never enter raw-capture metadata.
+            source_url=None,
         )
         captures.append(artifact)
         response_times.append(response.observed_at_utc)
@@ -75,7 +79,7 @@ def acquire_betclic_current_odds(
     profile = (
         extraction_profile
         if extraction_profile is not None
-        else get_verified_extraction_profile(PROVIDER_ID)
+        else get_verified_extraction_profile(PROVIDER_ID, sport)
     )
     bundle = apply_extraction_profile(
         profile=profile,
@@ -86,6 +90,11 @@ def acquire_betclic_current_odds(
         observed_at_utc=evidence_observed_at,
         sport=sport,
     )
+    if acquisition_window is not None:
+        bundle = apply_acquisition_window(bundle, acquisition_window)
+        assert isinstance(bundle, ProviderAcquisitionBundle)
+    bundle = attach_capture_references(bundle, tuple(captures))
+    assert isinstance(bundle, ProviderAcquisitionBundle)
     return result, bundle, tuple(captures)
 
 

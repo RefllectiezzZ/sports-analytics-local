@@ -21,6 +21,11 @@ BOOKMAKER_AUTONOMOUS_SCHEDULER_PROVIDER: Final[str] = "bookmaker-autonomous"
 DEFAULT_BOOKMAKER_INGESTION_MAXIMUM_ATTEMPTS: Final[int] = 2
 BOOKMAKER_SNAPSHOT_TYPE: Final[str] = "current-bookmaker-odds"
 BOOKMAKER_SCHEMA_VERSION: Final[str] = "bookmaker-canonical-v1"
+BOOKMAKER_SCHEMA_VERSION_V2: Final[str] = "bookmaker-native-v2"
+SUPPORTED_BOOKMAKER_SNAPSHOT_SCHEMAS: Final[tuple[str, ...]] = (
+    BOOKMAKER_SCHEMA_VERSION,
+    BOOKMAKER_SCHEMA_VERSION_V2,
+)
 BOOKMAKER_SNAPSHOT_SCHEMA_VERSION: Final[str] = BOOKMAKER_SCHEMA_VERSION
 
 QUOTE_EQUIVALENCE_POLICY_ID: Final[str] = "bookmaker-quote-equivalence-v1"

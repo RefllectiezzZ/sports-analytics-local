@@ -28,6 +28,7 @@ from sports_analytics.bookmakers.types import (
     FailureClassification,
     ProviderStatusCode,
 )
+from sports_analytics.bookmakers.window import AcquisitionWindow, rolling_acquisition_window
 from sports_analytics.core.exceptions import (
     NormalizationError,
     ParserError,
@@ -57,9 +58,16 @@ from sports_analytics.sources.bookmaker_catalog import (
     SUPPORTED_BOOKMAKER_SPORTS,
     reject_forbidden_job_controls,
 )
-from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
+from sports_analytics.sources.bookmaker_contracts import (
+    ProviderAcquisitionBundle,
+    ProviderEventObservation,
+    provider_native_markets,
+)
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult, BrowserMode
-from sports_analytics.sources.browser.playwright_runtime import BrowserSession
+from sports_analytics.sources.browser.playwright_runtime import (
+    BrowserSession,
+    PlaywrightBrowserSession,
+)
 from sports_analytics.sources.raw_capture import BookmakerRawCapture
 
 
@@ -81,7 +89,14 @@ class BookmakerIngestionService:
         self._snapshots_directory = Path(snapshots_directory)
         self._bookmakers = bookmakers
         self._clock = clock if clock is not None else (lambda: datetime.now(tz=UTC))
-        self._session = session
+        self._session = session or PlaywrightBrowserSession(
+            navigation_timeout_ms=bookmakers.navigation_timeout_ms,
+            maximum_response_bytes=bookmakers.maximum_response_bytes,
+            maximum_total_capture_bytes=bookmakers.maximum_total_capture_bytes,
+            event_detail_concurrency=bookmakers.event_detail_concurrency,
+            minimum_event_detail_interval_ms=(bookmakers.minimum_event_detail_interval_ms),
+            explicit_retry_limit=bookmakers.explicit_retry_limit,
+        )
 
     def ingest(
         self,
@@ -95,6 +110,7 @@ class BookmakerIngestionService:
         checkpoint: Callable[[], None] | None = None,
         attempt_number: int = 1,
         maximum_attempts: int = 2,
+        acquisition_window: AcquisitionWindow | None = None,
     ) -> BookmakerIngestionResult:
         """Validate, acquire, normalize, publish, and persist operational state."""
 
@@ -132,6 +148,17 @@ class BookmakerIngestionService:
         )
         adapter_version = self._adapter_version(provider)
         browser_mode = self._browser_mode()
+        window = acquisition_window or rolling_acquisition_window(
+            started_at,
+            window_hours=self._bookmakers.default_window_hours,
+            maximum_events=self._bookmakers.maximum_events_per_sport,
+            maximum_window_hours=self._bookmakers.maximum_window_hours,
+        )
+        if acquisition_window is not None:
+            cycle_id = validate_identifier(
+                f"{cycle_id}-w{window.identity_digest[:12]}",
+                field_name="acquisition_cycle_id",
+            )
 
         existing_run = self._get_existing_run(provider, sport_code, cycle_id)
         if existing_run is not None and existing_run["status"] in {
@@ -149,6 +176,7 @@ class BookmakerIngestionService:
                 acquisition_cycle_id=cycle_id,
                 observed_at_utc=observed_at,
                 browser_mode=browser_mode,
+                acquisition_window=window,
             )
         except RetryableSourceError as exc:
             finished_at = self._normalize_utc(self._clock())
@@ -282,7 +310,7 @@ class BookmakerIngestionService:
             unresolved_event_count=len(reconciliations.unresolved_event_reconciliations),
             verified_extraction_applied=native_recognized,
         )
-        if admission.outcome is not AdmissionOutcome.ADMITTED:
+        if not admission.may_publish:
             finished_at = self._normalize_utc(self._clock())
             status = _ingestion_status_for_admission(admission)
             self._persist_rejected(
@@ -351,7 +379,17 @@ class BookmakerIngestionService:
             current_block_or_failure_classification=FailureClassification.NONE,
             next_eligible_attempt_utc=None,
             drift_detected=bool(bundle.drift_codes),
-            acquisition_partial=False,
+            acquisition_partial=not admission.exhaustive_capture_complete,
+            provider_native_markets=_native_market_count(bundle),
+            provider_native_priced_selections=_native_selection_count(bundle),
+            canonical_markets=_canonical_market_count(normalized),
+            canonical_quotes=len(normalized.market_quotes),
+            unmapped_markets=len(normalized.unknown_markets),
+            non_comparable_quotes=sum(
+                1 for item in normalized.comparison_eligibility if not item.comparable
+            ),
+            complete_events=_complete_event_count(bundle),
+            partial_events=len(bundle.events) - _complete_event_count(bundle),
         )
         try:
             publication = publish_bookmaker_snapshot(
@@ -369,6 +407,7 @@ class BookmakerIngestionService:
                     "capture_manifest_relative_path": manifest.relative_path,
                     "capture_manifest_checksum_sha256": manifest.checksum_sha256,
                 },
+                provider_bundle=bundle,
             )
         except SnapshotBusyError as exc:
             finished_at = self._normalize_utc(self._clock())
@@ -438,14 +477,19 @@ class BookmakerIngestionService:
             warnings=warning_codes,
             drift_codes=list(bundle.drift_codes),
             acquisition_interval_seconds=provider_settings.acquisition_interval_seconds,
-            provider_status_code=ProviderStatusCode.OPERATIONAL.value,
+            provider_status_code=(
+                ProviderStatusCode.OPERATIONAL.value
+                if admission.exhaustive_capture_complete
+                else ProviderStatusCode.PARTIAL.value
+            ),
+            replace_last_valid=admission.may_replace_last_valid,
         )
         return BookmakerIngestionResult(
             provider_id=provider,
             sport=sport_code,
             acquisition_cycle_id=cycle_id,
             adapter_version=adapter_version,
-            status="succeeded",
+            status=("succeeded" if admission.exhaustive_capture_complete else "partial"),
             observed_at_utc=format_utc_timestamp(observed_at),
             snapshot_id=published.snapshot_id,
             snapshot_reused=published.snapshot_reused,
@@ -469,6 +513,7 @@ class BookmakerIngestionService:
         acquisition_cycle_id: str,
         observed_at_utc: datetime,
         browser_mode: BrowserMode,
+        acquisition_window: AcquisitionWindow,
     ) -> tuple[
         BrowserAcquisitionResult,
         ProviderAcquisitionBundle,
@@ -482,6 +527,7 @@ class BookmakerIngestionService:
                 raw_directory=self._raw_directory,
                 browser_mode=browser_mode,
                 session=self._session,
+                acquisition_window=acquisition_window,
             )
         if provider_id == PROVIDER_BETCLIC_PT:
             return acquire_betclic_current_odds(
@@ -491,6 +537,7 @@ class BookmakerIngestionService:
                 raw_directory=self._raw_directory,
                 browser_mode=browser_mode,
                 session=self._session,
+                acquisition_window=acquisition_window,
             )
         msg = f"unsupported bookmaker provider: {provider_id}"
         raise PermanentJobError(msg)
@@ -547,6 +594,8 @@ class BookmakerIngestionService:
 
     def _browser_mode(self) -> BrowserMode:
         mode = self._bookmakers.browser_mode
+        if mode == BrowserMode.HEADLESS.value:
+            return BrowserMode.HEADLESS
         if mode == BrowserMode.VISIBLE.value:
             return BrowserMode.VISIBLE
         if mode == BrowserMode.VISIBLE_MINIMIZED.value:
@@ -912,6 +961,7 @@ class BookmakerIngestionService:
         drift_codes: list[str],
         acquisition_interval_seconds: int,
         provider_status_code: str,
+        replace_last_valid: bool,
     ) -> None:
         next_eligible = finished_at + timedelta(seconds=acquisition_interval_seconds)
         with connect_database(self._database_path) as connection:
@@ -960,7 +1010,7 @@ class BookmakerIngestionService:
                     updated_at=finished_at,
                     last_attempted_at=finished_at,
                     last_successful_at=finished_at,
-                    last_valid_snapshot_id=snapshot_id,
+                    last_valid_snapshot_id=(snapshot_id if replace_last_valid else None),
                     snapshot_age_seconds=age,
                     events_observed=events_observed,
                     valid_quotes_observed=valid_quotes_observed,
@@ -970,6 +1020,7 @@ class BookmakerIngestionService:
                     block_failure_classification=None,
                     next_eligible_at=next_eligible,
                     adapter_version=adapter_version,
+                    preserve_last_valid_snapshot=not replace_last_valid,
                 )
                 for code in drift_codes:
                     repo.insert_drift_finding(
@@ -994,6 +1045,48 @@ def _verified_extraction_applied(bundle: ProviderAcquisitionBundle) -> bool:
     if any(code in rejected for code in bundle.drift_codes):
         return False
     return len(bundle.events) > 0
+
+
+def _native_market_count(bundle: ProviderAcquisitionBundle) -> int:
+    return sum(
+        len(provider_native_markets(event))
+        if isinstance(event, ProviderEventObservation)
+        else len(getattr(event, "markets", ()))
+        for event in bundle.events
+    )
+
+
+def _native_selection_count(bundle: ProviderAcquisitionBundle) -> int:
+    return sum(
+        len(getattr(market, "selections", ()))
+        for event in bundle.events
+        for market in (
+            provider_native_markets(event)
+            if isinstance(event, ProviderEventObservation)
+            else getattr(event, "markets", ())
+        )
+    )
+
+
+def _canonical_market_count(normalized: object) -> int:
+    identities: set[str] = set()
+    quotes = getattr(normalized, "market_quotes", ())
+    for quote in quotes:
+        try:
+            identities.add(str(quote.selection.definition.market_key))
+        except AttributeError:
+            identities.add(str(id(quote)))
+    return len(identities)
+
+
+def _complete_event_count(bundle: ProviderAcquisitionBundle) -> int:
+    count = 0
+    for event in bundle.events:
+        completeness = getattr(event, "completeness", None)
+        state = getattr(getattr(completeness, "completeness_state", None), "value", "")
+        if str(state).startswith("complete-"):
+            count += 1
+    return count
 
 
 def _ingestion_status_for_admission(admission: AdmissionDecision) -> str:
@@ -1027,9 +1120,15 @@ def _provider_status_for_admission(admission: AdmissionDecision) -> str:
 
 def validate_bookmaker_ingest_payload(
     payload: dict[str, object],
-) -> tuple[str, str, datetime | None, str | None]:
+) -> tuple[str, str, datetime | None, str | None, AcquisitionWindow]:
     """Validate a bookmaker acquisition job payload."""
-    allowed = {"provider_id", "sport", "observed_at_utc", "acquisition_cycle_id"}
+    allowed = {
+        "provider_id",
+        "sport",
+        "observed_at_utc",
+        "acquisition_cycle_id",
+        "acquisition_window",
+    }
     unknown = sorted(set(payload) - allowed)
     if unknown:
         msg = f"unknown payload keys: {', '.join(unknown)}"
@@ -1066,4 +1165,8 @@ def validate_bookmaker_ingest_payload(
             cycle_id = validate_identifier(cycle_raw, field_name="acquisition_cycle_id")
         except Exception as exc:  # noqa: BLE001
             raise PermanentJobError(str(exc)) from exc
-    return provider_id, sport, observed_at, cycle_id
+    if "acquisition_window" not in payload:
+        msg = "payload requires acquisition_window"
+        raise PermanentJobError(msg)
+    window = AcquisitionWindow.from_payload(payload["acquisition_window"])
+    return provider_id, sport, observed_at, cycle_id, window
