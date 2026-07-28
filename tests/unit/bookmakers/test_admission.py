@@ -91,6 +91,20 @@ def test_empty_unverified_extraction_rejected() -> None:
     assert decision.may_replace_last_valid is False
 
 
+def test_zero_valid_events_rejected_even_with_verified_extraction() -> None:
+    decision = evaluate_admission(
+        browser_result=_browser(),
+        bundle=_bundle(drift=("competition-identity-rejected",)),
+        normalized=_normalized(),
+        valid_quote_count=0,
+        unresolved_event_count=0,
+        verified_extraction_applied=True,
+    )
+    assert decision.outcome is AdmissionOutcome.UNAVAILABLE
+    assert decision.reason_code == "no-supported-events"
+    assert decision.may_publish is False
+
+
 def test_informational_drift_codes_do_not_block_admission() -> None:
     from datetime import timedelta
 
@@ -130,6 +144,7 @@ def test_informational_drift_codes_do_not_block_admission() -> None:
         events=(event,),
         warnings=(),
         drift_codes=(
+            "competition-identity-rejected",
             "live-event-excluded",
             "malformed-market-reference",
             "non-football-excluded",

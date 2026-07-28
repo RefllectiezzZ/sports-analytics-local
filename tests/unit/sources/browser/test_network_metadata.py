@@ -33,6 +33,7 @@ def test_metadata_only_for_unknown_public_host() -> None:
         byte_size=100,
     )
     assert meta is not None
+    assert not hasattr(meta, "response_url")
     assert meta.hostname == "cdn.example.com"
     assert meta.hostname_approved is False
     assert meta.body_captured is False
@@ -62,6 +63,44 @@ def test_approved_json_captures_body_and_candidate_keys() -> None:
     assert meta.candidate_keys_detected is True
     assert meta.structural_fingerprint is not None
     assert meta.byte_size == len(body.encode("utf-8"))
+
+
+def test_betclic_approved_route_retains_only_static_template() -> None:
+    url = (
+        "https://offering.begmedia.com/web/offering.access.api/"
+        "offering.access.api.MatchService/GetPopularV2?fake=discarded#fragment"
+    )
+    meta = build_network_metadata(
+        response_url=url,
+        allowed_hostnames=frozenset({"www.betclic.pt"}),
+        status_code=200,
+        content_type="application/grpc-web",
+        resource_type="fetch",
+        observed_at_utc=NOW,
+        provider_id="betclic-pt",
+    )
+    assert meta is not None
+    assert meta.hostname == "offering.begmedia.com"
+    assert meta.approved_route_id == "betclic-match-service-get-popular-v2"
+    assert meta.approved_path_template is not None
+    assert "?" not in meta.approved_path_template
+    assert "#" not in meta.approved_path_template
+    assert not hasattr(meta, "response_url")
+
+
+def test_unapproved_host_has_hostname_and_path_hash_without_template() -> None:
+    meta = build_network_metadata(
+        response_url="https://cdn.example.com/fake/path?discard=this",
+        allowed_hostnames=ALLOWED,
+        status_code=204,
+        content_type=None,
+        resource_type="fetch",
+        observed_at_utc=NOW,
+    )
+    assert meta is not None
+    assert meta.hostname == "cdn.example.com"
+    assert meta.approved_route_id is None
+    assert meta.approved_path_template is None
 
 
 def test_private_host_rejected_for_metadata() -> None:

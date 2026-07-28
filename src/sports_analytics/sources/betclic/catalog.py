@@ -9,7 +9,16 @@ from sports_analytics.sources.bookmaker_catalog import BookmakerProviderCatalog
 PROVIDER_ID: Final[str] = "betclic-pt"
 ADAPTER_VERSION: Final[str] = "betclic-pt-adapter-v1"
 PARSER_VERSION: Final[str] = "betclic-pt-parser-v1"
-ALLOWED_HOSTNAMES: Final[frozenset[str]] = frozenset({"www.betclic.pt", "betclic.pt"})
+ALLOWED_HOSTNAMES: Final[frozenset[str]] = frozenset({"www.betclic.pt"})
+OFFERING_RESPONSE_HOSTNAME: Final[str] = "offering.begmedia.com"
+OFFERING_RESPONSE_ROUTES: Final[dict[str, str]] = {
+    "/web/offering.access.api/offering.access.api.MatchService/GetPopularV2": (
+        "betclic-match-service-get-popular-v2"
+    ),
+    "/web/offering.access.api/offering.access.api.MatchService/GetLiveCount": (
+        "betclic-match-service-get-live-count"
+    ),
+}
 
 BETCLIC_CATALOG: Final[BookmakerProviderCatalog] = BookmakerProviderCatalog(
     provider_id=PROVIDER_ID,

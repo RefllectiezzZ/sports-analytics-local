@@ -93,7 +93,7 @@ def test_rejects_oversized_capture(tmp_path: Path) -> None:
     with pytest.raises(PermanentSourceError, match="bounded capture size"):
         store.store_text(
             source_name="betclic-pt",
-            capture_kind="dom-fragment",
+            capture_kind="synthetic-text",
             content="x" * 64,
             retrieved_at=RETRIEVED_AT,
             extension="txt",

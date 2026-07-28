@@ -20,8 +20,10 @@ from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
     BrowserBlockReason,
     BrowserMode,
-    BrowserPageObservation,
     BrowserResponseObservation,
+)
+from sports_analytics.sources.browser.playwright_runtime import (
+    build_structural_page_observation,
 )
 from sports_analytics.sources.browser.safety import classify_block_signals
 
@@ -145,7 +147,7 @@ def test_schema_drift_is_reported() -> None:
     assert any(warning.code == "schema-drift" for warning in bundle.warnings)
 
 
-def test_blocked_page_detection_from_fixture_signals() -> None:
+def test_block_classification_is_fixed_before_parser_boundary() -> None:
     blocked = _load("blocked.json")
     reason = classify_block_signals(
         title=blocked["page_signals"]["title"],
@@ -153,31 +155,31 @@ def test_blocked_page_detection_from_fixture_signals() -> None:
     )
     assert reason is BrowserBlockReason.CAPTCHA
 
+    page = build_structural_page_observation(
+        provider_id=PROVIDER_ID,
+        page_route_id="football-prematch",
+        final_url="https://www.betclic.pt/futebol",
+        observed_at_utc=OBSERVED_AT,
+        allowed_hostnames=frozenset({"www.betclic.pt"}),
+        title=blocked["page_signals"]["title"],
+        body_html=None,
+        body_text=blocked["page_signals"]["body_text"],
+    )
+    assert page.block_reason is BrowserBlockReason.CAPTCHA
     acquisition = BrowserAcquisitionResult(
         provider_id=PROVIDER_ID,
         sport="football",
         acquisition_cycle_id="cycle-blocked",
         observed_at_utc=OBSERVED_AT,
         browser_mode=BrowserMode.VISIBLE,
-        pages=(
-            BrowserPageObservation(
-                provider_id=PROVIDER_ID,
-                page_route_id="football-prematch",
-                final_url="https://www.betclic.pt/futebol",
-                observed_at_utc=OBSERVED_AT,
-                title=blocked["page_signals"]["title"],
-                sanitized_dom_fragment=blocked["page_signals"]["body_text"],
-                block_reason=None,
-                warnings=(),
-            ),
-        ),
+        pages=(page,),
         responses=(),
         diagnostics=(),
-        block_reason=None,
+        block_reason=page.block_reason,
         warnings=(),
     )
     bundle = parse_betclic_acquisition(acquisition, adapter_version=ADAPTER_VERSION)
-    assert any(warning.code == "blocked-page" for warning in bundle.warnings)
+    assert any(warning.code == "provider-blocked" for warning in bundle.warnings)
 
 
 def test_provider_block_reason_short_circuits_parsing() -> None:

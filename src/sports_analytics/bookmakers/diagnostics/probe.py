@@ -11,10 +11,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from sports_analytics.bookmakers.diagnostics.dom_discovery import discover_dom_candidates
 from sports_analytics.bookmakers.diagnostics.fingerprint import structural_fingerprint
 from sports_analytics.bookmakers.diagnostics.paths import resolve_diagnostic_directory
-from sports_analytics.bookmakers.diagnostics.redaction import redact_text, sanitize_sample_payload
+from sports_analytics.bookmakers.diagnostics.persistence import publish_diagnostic_json
+from sports_analytics.bookmakers.diagnostics.redaction import sanitize_sample_payload
 from sports_analytics.bookmakers.types import PROVIDER_BETANO_PT, PROVIDER_BETCLIC_PT
 from sports_analytics.core.exceptions import ConfigurationError
 from sports_analytics.sources.betano.catalog import BETANO_CATALOG
@@ -47,8 +47,6 @@ _PROVIDER_CATALOGS = {
     PROVIDER_BETCLIC_PT: BETCLIC_CATALOG,
 }
 
-_DOM_PREVIEW_CHARS = 2000
-
 
 @dataclass(frozen=True, slots=True)
 class ProbeResponseEvidence:
@@ -73,7 +71,6 @@ class ProbePageEvidence:
     provider: str
     route_id: str
     hostname: str
-    title: str | None
     block_classification: str | None
     dom_fingerprint: str | None
     candidate_paths: tuple[str, ...]
@@ -94,6 +91,8 @@ class ProbeResult:
     pages: tuple[ProbePageEvidence, ...]
     diagnostic_relative_path: str
     network_metadata: tuple[dict[str, Any], ...] = ()
+    classifications: tuple[str, ...] = ()
+    grpc_web_diagnostics: tuple[dict[str, Any], ...] = ()
 
 
 def probe_bookmaker(
@@ -150,6 +149,7 @@ def probe_bookmaker(
         deadline_at_utc=deadline,
         observation_window_ms=observation_window_ms,
         observation_complete=observation_complete,
+        diagnostic_directory=output_dir,
     )
     # Report actual elapsed duration; do not clamp with min().
     elapsed = time.monotonic() - started
@@ -157,6 +157,9 @@ def probe_bookmaker(
     pages = tuple(_page_evidence(item) for item in acquisition.pages)
     network_metadata = tuple(
         _network_metadata_payload(item) for item in acquisition.network_metadata
+    )
+    grpc_web_diagnostics = tuple(
+        _grpc_web_diagnostic_payload(item) for item in acquisition.grpc_web_diagnostics
     )
     result = ProbeResult(
         provider=provider_id,
@@ -177,6 +180,13 @@ def probe_bookmaker(
             duration_seconds=elapsed,
         ),
         network_metadata=network_metadata,
+        classifications=_probe_classifications(
+            provider_id=provider_id,
+            blocked=acquisition.block_reason is not None,
+            pages=pages,
+            network_metadata=network_metadata,
+        ),
+        grpc_web_diagnostics=grpc_web_diagnostics,
     )
     return result
 
@@ -195,6 +205,15 @@ def collect_probe_from_acquisition(
     pages = tuple(_page_evidence(item) for item in acquisition.pages)
     network_metadata = tuple(
         _network_metadata_payload(item) for item in acquisition.network_metadata
+    )
+    grpc_web_diagnostics = tuple(
+        _grpc_web_diagnostic_payload(item) for item in acquisition.grpc_web_diagnostics
+    )
+    classifications = _probe_classifications(
+        provider_id=provider_id,
+        blocked=acquisition.block_reason is not None,
+        pages=pages,
+        network_metadata=network_metadata,
     )
     return ProbeResult(
         provider=provider_id,
@@ -215,6 +234,8 @@ def collect_probe_from_acquisition(
             duration_seconds=duration_seconds,
         ),
         network_metadata=network_metadata,
+        classifications=classifications,
+        grpc_web_diagnostics=grpc_web_diagnostics,
     )
 
 
@@ -234,7 +255,7 @@ def _response_evidence(item: BrowserResponseObservation) -> ProbeResponseEvidenc
             parsed = loaded
     except json.JSONDecodeError:
         parsed = None
-    sample = {"non_json": True, "preview": redact_text(item.body_text[:200])}
+    sample = {"non_json": True}
     fingerprint = structural_fingerprint(sample)
     candidate_paths: tuple[str, ...] = ()
     if parsed is not None:
@@ -256,23 +277,17 @@ def _response_evidence(item: BrowserResponseObservation) -> ProbeResponseEvidenc
 
 
 def _page_evidence(item: BrowserPageObservation) -> ProbePageEvidence:
-    hostname = urlparse(item.final_url).hostname or ""
-    dom_fragment = item.sanitized_dom_fragment or ""
-    dom_candidates = discover_dom_candidates(dom_fragment)
-    dom_sample: dict[str, Any] = {
-        "title": redact_text(item.title or ""),
-        "dom_preview": redact_text(dom_fragment[:_DOM_PREVIEW_CHARS]),
-    }
+    dom_candidates = item.structural_candidates
+    dom_sample: dict[str, Any] = {"dom_candidates": []}
     if dom_candidates:
         dom_sample["dom_candidates"] = [candidate.as_dict() for candidate in dom_candidates]
     block = None if item.block_reason is None else item.block_reason.value
     return ProbePageEvidence(
         provider=item.provider_id,
         route_id=item.page_route_id,
-        hostname=hostname,
-        title=redact_text(item.title) if item.title else None,
+        hostname=item.hostname,
         block_classification=block,
-        dom_fingerprint=None if not dom_fragment else structural_fingerprint(dom_sample),
+        dom_fingerprint=None if not dom_candidates else structural_fingerprint(dom_sample),
         candidate_paths=tuple(
             sorted({f"dom.{candidate.tag}" for candidate in dom_candidates if candidate.tag})
         ),
@@ -283,7 +298,6 @@ def _page_evidence(item: BrowserPageObservation) -> ProbePageEvidence:
 
 def _network_metadata_payload(item: BrowserNetworkMetadata) -> dict[str, Any]:
     return {
-        "response_url": item.response_url,
         "hostname": item.hostname,
         "resource_type": item.resource_type,
         "status_code": item.status_code,
@@ -294,7 +308,30 @@ def _network_metadata_payload(item: BrowserNetworkMetadata) -> dict[str, Any]:
         "hostname_approved": item.hostname_approved,
         "candidate_keys_detected": item.candidate_keys_detected,
         "body_captured": item.body_captured,
+        "grpc_web_envelope_recognized": item.grpc_web_envelope_recognized,
+        "grpc_web_failure_code": item.grpc_web_failure_code,
+        "grpc_web_body_read": item.grpc_web_body_read,
+        "grpc_web_evidence_stored": item.grpc_web_evidence_stored,
+        "grpc_web_malformed_or_truncated": item.grpc_web_malformed_or_truncated,
         "observed_at_utc": item.observed_at_utc.isoformat(),
+        "approved_route_id": item.approved_route_id,
+        "approved_path_template": item.approved_path_template,
+    }
+
+
+def _grpc_web_diagnostic_payload(item: Any) -> dict[str, Any]:
+    return {
+        "capture_kind": item.capture_kind,
+        "checksum": item.checksum_sha256,
+        "relative_path": item.relative_path,
+        "byte_count": item.byte_count,
+        "framing": item.framing,
+        "data_frame_count": item.data_frame_count,
+        "trailer_frame_count": item.trailer_frame_count,
+        "compression_flag_present": item.compression_flag_present,
+        "total_framed_payload_bytes": item.total_framed_payload_bytes,
+        "malformed_or_truncated": item.malformed_or_truncated,
+        "grpc_status": item.grpc_status,
     }
 
 
@@ -308,6 +345,38 @@ def _candidate_paths(value: Any, *, prefix: str = "") -> list[str]:
     elif isinstance(value, list) and value:
         paths.extend(_candidate_paths(value[0], prefix=f"{prefix}[]"))
     return paths[:40]
+
+
+def _probe_classifications(
+    *,
+    provider_id: str,
+    blocked: bool,
+    pages: tuple[ProbePageEvidence, ...],
+    network_metadata: tuple[dict[str, Any], ...],
+) -> tuple[str, ...]:
+    if provider_id != PROVIDER_BETCLIC_PT:
+        return ()
+    if blocked:
+        return ("betclic-blocked",)
+    classifications: set[str] = set()
+    grpc_observed = any(
+        item.get("approved_route_id") == "betclic-match-service-get-popular-v2"
+        for item in network_metadata
+    )
+    if grpc_observed:
+        classifications.update(
+            {
+                "betclic-offering-grpc-observed",
+                "betclic-offering-schema-unverified",
+            }
+        )
+        if any(bool(item.get("grpc_web_envelope_recognized")) for item in network_metadata):
+            classifications.add("betclic-offering-envelope-recognized")
+    if any(page.dom_candidates for page in pages):
+        classifications.add("betclic-event-dom-candidates-observed")
+    if not classifications:
+        classifications.add("betclic-no-event-evidence")
+    return tuple(sorted(classifications))
 
 
 def _write_probe_artifact(
@@ -334,9 +403,41 @@ def _write_probe_artifact(
         "responses": [asdict(item) for item in responses],
         "pages": [asdict(item) for item in pages],
         "network_metadata": list(network_metadata),
+        "grpc_web_diagnostics": [
+            _grpc_web_diagnostic_payload(item) for item in acquisition.grpc_web_diagnostics
+        ],
+        "classifications": list(
+            _probe_classifications(
+                provider_id=provider_id,
+                blocked=acquisition.block_reason is not None,
+                pages=pages,
+                network_metadata=network_metadata,
+            )
+        ),
     }
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+    try:
+        publish_diagnostic_json(path, payload)
+    except BaseException:
+        _remove_new_grpc_evidence(output_dir, acquisition=acquisition)
+        raise
     return filename
+
+
+def _remove_new_grpc_evidence(
+    output_dir: Path,
+    *,
+    acquisition: BrowserAcquisitionResult,
+) -> None:
+    root = output_dir.resolve()
+    for item in acquisition.grpc_web_diagnostics:
+        if not item.newly_created:
+            continue
+        candidate = (root / item.relative_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        candidate.unlink(missing_ok=True)
 
 
 def classify_probe_block(

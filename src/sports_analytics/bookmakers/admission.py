@@ -39,6 +39,7 @@ _INFORMATIONAL_DRIFT_CODES: frozenset[str] = frozenset(
         "event-without-supported-markets",
         "participant-count-rejected",
         "participant-identity-rejected",
+        "competition-identity-rejected",
         "selection-mapping-rejected",
         "market-typeid-mismatch",
         "missing-total-line",

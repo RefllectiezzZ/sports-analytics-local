@@ -5,63 +5,74 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from typing import Any
 
-from sports_analytics.bookmakers.diagnostics.redaction import redact_text
+from sports_analytics.sources.browser.contracts import (
+    DOM_HYDRATION_MARKERS,
+    DOM_STRUCTURAL_MARKERS,
+    SAFE_DOM_TAGS,
+    BrowserDomCandidate,
+)
 
 _MAX_CANDIDATES = 40
-_MAX_TEXT_LENGTH = 80
-_MAX_CLASS_TOKENS = 12
-_HEXISH = re.compile(r"(?i)^(?:[a-f0-9]{8,}|[a-f0-9]{6,}[-_][a-f0-9-]{4,})$")
-_LONG_NUMERIC = re.compile(r"^\d{5,}$")
-_HASHED_CLASS = re.compile(r"(?i)(?:^|[-_])[a-f0-9]{6,}$")
-_INTEREST_PATTERN = re.compile(
-    r"(?i)(event|market|odd|price|selection|fixture|match|quote|bet|outcome|handicap)"
+_MAX_INPUT_CHARS = 65_536
+_MAX_TEXT_BUFFER_CHARS = 8_192
+_STRUCTURAL_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("card", re.compile("card", re.IGNORECASE)),
+    ("event", re.compile("event", re.IGNORECASE)),
+    ("fixture", re.compile("fixture", re.IGNORECASE)),
+    ("handicap", re.compile("handicap", re.IGNORECASE)),
+    ("market", re.compile("market", re.IGNORECASE)),
+    ("match", re.compile("match", re.IGNORECASE)),
+    ("odds", re.compile(r"odds?", re.IGNORECASE)),
+    ("outcome", re.compile("outcome", re.IGNORECASE)),
+    ("price", re.compile("price", re.IGNORECASE)),
+    ("quote", re.compile("quote", re.IGNORECASE)),
+    ("selection", re.compile("selection", re.IGNORECASE)),
+)
+_HYDRATION_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ng-state", re.compile(r"ng-(?:transfer-)?state", re.IGNORECASE)),
+    ("transfer-state", re.compile(r"transfer-?state", re.IGNORECASE)),
+    ("hydration", re.compile("hydration", re.IGNORECASE)),
+)
+_DECIMAL_ODDS = re.compile(r"^(?:1(?:[.,]\d{1,3})|[2-9]\d?(?:[.,]\d{1,3}))$")
+_EXCLUDED_PATTERN = re.compile(
+    r"(?i)(account|login|log-in|register|registration|sign[-_ ]?up|deposit|withdraw|"
+    r"payment|bet[-_ ]?slip|personal)"
 )
 
 
-@dataclass(frozen=True, slots=True)
-class DomDiscoveryCandidate:
-    """One sanitized DOM node candidate for event/market/price discovery."""
-
-    tag: str
-    class_tokens: tuple[str, ...]
-    data_testid: str | None
-    data_qa: str | None
-    aria_label: str | None
-    short_text: str | None
-    child_count: int
-    structural_fingerprint: str
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+def canonicalize_structural_markers(*values: str) -> tuple[str, ...]:
+    """Map arbitrary ephemeral signals to a fixed sorted marker vocabulary."""
+    markers = {
+        marker
+        for marker, pattern in _STRUCTURAL_SIGNAL_PATTERNS
+        if any(pattern.search(value) is not None for value in values)
+    }
+    if not markers <= DOM_STRUCTURAL_MARKERS:
+        return ()
+    return tuple(sorted(markers))
 
 
-def sanitize_class_token(token: str) -> str | None:
-    """Strip random hex / long numeric class tokens; return None when discarded."""
-    cleaned = token.strip()
-    if not cleaned or len(cleaned) > 64:
-        return None
-    if _HEXISH.match(cleaned) or _LONG_NUMERIC.match(cleaned):
-        return None
-    if _HASHED_CLASS.search(cleaned) and not _INTEREST_PATTERN.search(cleaned):
-        return None
-    return cleaned
+def _canonical_hydration_marker(*values: str) -> str | None:
+    for marker, pattern in _HYDRATION_SIGNAL_PATTERNS:
+        if any(pattern.search(value) is not None for value in values):
+            return marker if marker in DOM_HYDRATION_MARKERS else None
+    return None
 
 
 def discover_dom_candidates(
     html_fragment: str,
     *,
     maximum_candidates: int = _MAX_CANDIDATES,
-) -> tuple[DomDiscoveryCandidate, ...]:
-    """Extract bounded sanitized DOM candidates suggesting event/market/price UI."""
+) -> tuple[BrowserDomCandidate, ...]:
+    """Extract bounded structural-only candidates from ephemeral page HTML."""
     if not html_fragment or "<" not in html_fragment:
         return ()
     parser = _DomCandidateParser(maximum_candidates=maximum_candidates)
     try:
-        parser.feed(html_fragment)
+        parser.feed(html_fragment[:_MAX_INPUT_CHARS])
         parser.close()
     except Exception:  # noqa: BLE001 - best-effort diagnostic parse
         return ()
@@ -71,80 +82,124 @@ def discover_dom_candidates(
 def _candidate_fingerprint(
     *,
     tag: str,
-    class_tokens: tuple[str, ...],
-    data_testid: str | None,
-    data_qa: str | None,
-    aria_label: str | None,
+    structural_markers: tuple[str, ...],
+    hydration_marker: str | None,
     child_count: int,
+    candidate_classification: str,
+    content_shape_fingerprint: str | None,
 ) -> str:
     shape = {
         "tag": tag,
-        "class_tokens": list(class_tokens),
-        "data_testid": data_testid,
-        "data_qa": data_qa,
-        "aria_label": aria_label,
+        "structural_markers": list(structural_markers),
+        "hydration_marker": hydration_marker,
         "child_count": child_count,
+        "candidate_classification": candidate_classification,
+        "content_shape_fingerprint": content_shape_fingerprint,
     }
     encoded = json.dumps(shape, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _looks_interesting(
-    *,
-    class_tokens: tuple[str, ...],
-    data_testid: str | None,
-    data_qa: str | None,
-    aria_label: str | None,
-    short_text: str | None,
-) -> bool:
-    haystacks = [
-        *class_tokens,
-        data_testid or "",
-        data_qa or "",
-        aria_label or "",
-        short_text or "",
+def _ancestor_fingerprint(stack: list[dict[str, Any]]) -> str:
+    ancestors = [
+        {
+            "tag": node["tag"],
+            "structural_markers": list(node["structural_markers"]),
+            "child_count": int(node["child_count"]),
+        }
+        for node in stack[-3:]
     ]
-    return any(_INTEREST_PATTERN.search(part) for part in haystacks if part)
+    encoded = json.dumps(ancestors, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_shape(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 6:
+        return "depth-limit"
+    if isinstance(value, dict):
+        child_shapes = sorted(
+            json.dumps(_json_shape(item, depth=depth + 1), sort_keys=True)
+            for item in list(value.values())[:16]
+        )
+        return {"kind": "object", "size": min(len(value), 16), "values": child_shapes}
+    if isinstance(value, list):
+        return {
+            "kind": "array",
+            "size": min(len(value), 16),
+            "items": [_json_shape(item, depth=depth + 1) for item in value[:16]],
+        }
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "string"
+
+
+def _shape_fingerprint(value: Any) -> str:
+    encoded = json.dumps(
+        _json_shape(value),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class _DomCandidateParser(HTMLParser):
     def __init__(self, *, maximum_candidates: int) -> None:
         super().__init__(convert_charrefs=True)
         self.maximum_candidates = maximum_candidates
-        self.candidates: list[DomDiscoveryCandidate] = []
+        self.candidates: list[BrowserDomCandidate] = []
         self._stack: list[dict[str, Any]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {key.lower(): (value or "") for key, value in attrs}
-        raw_classes = attr_map.get("class", "").split()
-        class_tokens = tuple(
-            token
-            for token in (sanitize_class_token(item) for item in raw_classes)
-            if token is not None
-        )[:_MAX_CLASS_TOKENS]
-        data_testid = (
-            redact_text(attr_map["data-testid"])[:80] if "data-testid" in attr_map else None
+        structural_attribute_values = (
+            attr_map.get("class", ""),
+            attr_map.get("id", ""),
+            attr_map.get("data-testid", ""),
+            attr_map.get("data-qa", ""),
         )
-        data_qa = redact_text(attr_map["data-qa"])[:80] if "data-qa" in attr_map else None
-        aria_label = redact_text(attr_map["aria-label"])[:80] if "aria-label" in attr_map else None
+        structural_markers = canonicalize_structural_markers(*structural_attribute_values)
+        hydration_marker = _canonical_hydration_marker(
+            attr_map.get("id", ""),
+            attr_map.get("data-testid", ""),
+            attr_map.get("data-qa", ""),
+        )
+        structured_state_candidate = (
+            tag.lower() == "script"
+            and attr_map.get("type", "").casefold() == "application/json"
+            and hydration_marker is not None
+        )
+        if structured_state_candidate:
+            structural_markers = ()
         node: dict[str, Any] = {
             "tag": tag.lower(),
-            "class_tokens": class_tokens,
-            "data_testid": data_testid,
-            "data_qa": data_qa,
-            "aria_label": aria_label,
+            "structural_markers": structural_markers,
+            "hydration_marker": hydration_marker if structured_state_candidate else None,
             "text_parts": [],
             "child_count": 0,
+            "structured_state_candidate": structured_state_candidate,
+            "excluded": (
+                bool(self._stack and self._stack[-1]["excluded"])
+                or (
+                    tag.lower() in {"script", "input", "textarea", "form"}
+                    and not structured_state_candidate
+                )
+                or any(_EXCLUDED_PATTERN.search(value) for value in attr_map.values())
+            ),
         }
         if self._stack:
             self._stack[-1]["child_count"] += 1
         self._stack.append(node)
 
     def handle_data(self, data: str) -> None:
-        if not self._stack:
+        if not self._stack or self._stack[-1]["excluded"]:
             return
         text = " ".join(data.split())
-        if text:
+        buffered = sum(len(item) for item in self._stack[-1]["text_parts"])
+        if text and buffered < _MAX_TEXT_BUFFER_CHARS:
             self._stack[-1]["text_parts"].append(text)
 
     def handle_endtag(self, tag: str) -> None:
@@ -152,38 +207,61 @@ class _DomCandidateParser(HTMLParser):
         if not self._stack:
             return
         node = self._stack.pop()
+        if self._stack and not node["excluded"] and node["text_parts"] and node["tag"] != "script":
+            self._stack[-1]["text_parts"].extend(node["text_parts"][:4])
         if len(self.candidates) >= self.maximum_candidates:
             return
-        short_text = None
-        joined = " ".join(node["text_parts"]).strip()
-        if joined:
-            short_text = redact_text(joined[:_MAX_TEXT_LENGTH])
-        class_tokens = tuple(node["class_tokens"])
-        if not _looks_interesting(
-            class_tokens=class_tokens,
-            data_testid=node["data_testid"],
-            data_qa=node["data_qa"],
-            aria_label=node["aria_label"],
-            short_text=short_text,
-        ):
+        if node["excluded"]:
             return
+        joined = " ".join(node["text_parts"]).strip()
+        structured_public_state = False
+        content_shape_fingerprint: str | None = None
+        if node["structured_state_candidate"]:
+            try:
+                structured = json.loads(joined)
+            except (json.JSONDecodeError, TypeError):
+                return
+            structured_public_state = isinstance(structured, (dict, list))
+            if not structured_public_state:
+                return
+            content_shape_fingerprint = _shape_fingerprint(structured)
+        structural_markers = (
+            ()
+            if structured_public_state
+            else tuple(
+                sorted(
+                    set(node["structural_markers"]) | set(canonicalize_structural_markers(joined))
+                )
+            )
+        )
+        odds_text = joined if _DECIMAL_ODDS.fullmatch(joined) is not None else None
+        if not structured_public_state and not odds_text and not structural_markers:
+            return
+        if node["tag"] not in SAFE_DOM_TAGS:
+            return
+        candidate_classification = (
+            "hydration-structure"
+            if structured_public_state
+            else ("decimal-odds" if odds_text is not None else "structural-interest")
+        )
         fingerprint = _candidate_fingerprint(
             tag=node["tag"],
-            class_tokens=class_tokens,
-            data_testid=node["data_testid"],
-            data_qa=node["data_qa"],
-            aria_label=node["aria_label"],
+            structural_markers=structural_markers,
+            hydration_marker=node["hydration_marker"],
             child_count=int(node["child_count"]),
+            candidate_classification=candidate_classification,
+            content_shape_fingerprint=content_shape_fingerprint,
         )
         self.candidates.append(
-            DomDiscoveryCandidate(
+            BrowserDomCandidate(
                 tag=node["tag"],
-                class_tokens=class_tokens,
-                data_testid=node["data_testid"],
-                data_qa=node["data_qa"],
-                aria_label=node["aria_label"],
-                short_text=short_text,
+                structural_markers=structural_markers,
+                hydration_marker=node["hydration_marker"],
                 child_count=int(node["child_count"]),
+                candidate_classification=candidate_classification,
+                decimal_odds_text=odds_text,
                 structural_fingerprint=fingerprint,
+                ancestor_structural_fingerprint=_ancestor_fingerprint(self._stack),
+                content_shape_fingerprint=content_shape_fingerprint,
             )
         )

@@ -41,6 +41,25 @@ def _raw() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
+def _punctuated_competition_body() -> str:
+    raw = _raw()
+    top_events = raw["data"]["topEventsV2"]
+    top_events["leagues"]["synth-league-1"]["name"] = "(Taça D'Água / Norte!!!)"
+    top_events["leagues"]["synth-league-2"] = {
+        "id": "synth-league-2",
+        "name": "...Copa D'Oeste///",
+    }
+    top_events["events"]["synth-event-beta"]["leagueId"] = "synth-league-2"
+    return json.dumps(raw)
+
+
+def test_punctuated_competition_construction_uses_real_utf8() -> None:
+    raw = json.loads(_punctuated_competition_body())
+    leagues = raw["data"]["topEventsV2"]["leagues"]
+    assert leagues["synth-league-1"]["name"] == "(Taça D'Água / Norte!!!)"
+    assert leagues["synth-league-2"]["name"] == "...Copa D'Oeste///"
+
+
 def _browser(body: str, *, observed_at: datetime = OBSERVED) -> BrowserAcquisitionResult:
     return BrowserAcquisitionResult(
         provider_id=PROVIDER_ID,
@@ -214,7 +233,7 @@ def test_adapter_uses_response_observation_timestamps(tmp_path: Path) -> None:
 
 def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
     ensure_database_ready(tmp_path / "db.sqlite3")
-    body = FIXTURE.read_text(encoding="utf-8")
+    body = _punctuated_competition_body()
     observed_1 = OBSERVED
     observed_2 = OBSERVED + timedelta(minutes=5)
     result_1 = BrowserAcquisitionResult(
@@ -348,3 +367,13 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
     assert len(event_ids) == loaded_1.event_count
     # Quotes remain non-comparable until rules evidence is reviewed.
     assert all(not quote.comparable for _, quote in loaded_1.verified_quotes_by_observation_id)
+    manifests = list((tmp_path / "raw" / PROVIDER_ID / "manifests").rglob("*.json"))
+    assert manifests
+    manifest_text = manifests[0].read_text(encoding="utf-8")
+    assert "source_url" not in manifest_text
+    assert "response_url" not in manifest_text
+    manifest_document = json.loads(manifest_text)
+    assert manifest_document["schema"] == "bookmaker-capture-manifest-v2"
+    assert all(
+        "url" not in str(key).casefold() for entry in manifest_document["captures"] for key in entry
+    )

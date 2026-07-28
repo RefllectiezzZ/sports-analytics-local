@@ -8,6 +8,8 @@ compatibility. Fuzzy matching is deliberately absent.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
@@ -21,8 +23,10 @@ from sports_analytics.bookmakers.types import (
 )
 from sports_analytics.core.exceptions import NormalizationError, PermanentSourceError
 from sports_analytics.sources.bookmaker_contracts import (
+    ParserDriftSeverity,
     ProviderAcquisitionBundle,
     ProviderEventObservation,
+    ProviderParserWarning,
     ProviderParticipantObservation,
 )
 from sports_analytics.sports.contracts import (
@@ -51,6 +55,9 @@ from sports_analytics.sports.reconciliation import (
 
 BOOKMAKER_SEASON_LABEL: Final[str] = "current"
 MAX_PARTICIPANT_NAME_LENGTH: Final[int] = 200
+MAX_COMPETITION_SLUG_LENGTH: Final[int] = 88
+COMPETITION_DIGEST_LENGTH: Final[int] = 16
+_UNSAFE_SLUG_RUN: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +137,7 @@ def build_participant_candidates_from_bundle(
     candidates: list[ParticipantReconciliationCandidate] = []
     seen: set[tuple[str, str]] = set()
     for event in bundle.events:
-        competition_id = competition_id_for_event(event)
+        competition_id = competition_id_for_event(event, provider_id=bundle.provider_id)
         for participant in event.participants:
             identity = (bundle.provider_id, participant.source_participant_id)
             if identity in seen:
@@ -174,7 +181,7 @@ def build_event_candidates_from_bundle(
     candidates: list[ReconciliationCandidate] = []
     for event in bundle.events:
         home, away = home_away_participants(event.participants)
-        competition_id = competition_id_for_event(event)
+        competition_id = competition_id_for_event(event, provider_id=bundle.provider_id)
         season_id = build_season_id(competition_id=competition_id, label=BOOKMAKER_SEASON_LABEL)
         home_recon = by_source_participant.get((bundle.provider_id, home.source_participant_id))
         away_recon = by_source_participant.get((bundle.provider_id, away.source_participant_id))
@@ -249,6 +256,7 @@ def reconcile_bookmaker_bundles(
         msg = "start_tolerance_seconds must be non-negative"
         raise PermanentSourceError(msg)
 
+    bundles = sanitize_competition_events(bundles)
     participant_candidates: list[ParticipantReconciliationCandidate] = []
     for bundle in bundles:
         participant_candidates.extend(build_participant_candidates_from_bundle(bundle))
@@ -289,6 +297,49 @@ def reconcile_bookmaker_bundles(
         start_tolerance_seconds=start_tolerance_seconds,
         policy_version=BOOKMAKER_EVENT_RECONCILIATION_POLICY_ID,
     )
+
+
+def sanitize_competition_events(
+    bundles: tuple[ProviderAcquisitionBundle, ...],
+) -> tuple[ProviderAcquisitionBundle, ...]:
+    """Reject only events whose competition identity cannot be normalized."""
+    sanitized: list[ProviderAcquisitionBundle] = []
+    for bundle in bundles:
+        admitted: list[ProviderEventObservation] = []
+        rejected: list[ProviderParserWarning] = []
+        for event in bundle.events:
+            try:
+                competition_id_for_event(event, provider_id=bundle.provider_id)
+            except NormalizationError:
+                rejected.append(
+                    ProviderParserWarning(
+                        code="competition-identity-rejected",
+                        message="event rejected because competition identity is unusable",
+                        severity=ParserDriftSeverity.WARNING,
+                        source_path=f"events.{event.source_event_id}",
+                    )
+                )
+            else:
+                admitted.append(event)
+        sanitized.append(
+            ProviderAcquisitionBundle(
+                provider_id=bundle.provider_id,
+                adapter_version=bundle.adapter_version,
+                acquisition_cycle_id=bundle.acquisition_cycle_id,
+                observed_at_utc=bundle.observed_at_utc,
+                sport=bundle.sport,
+                events=tuple(admitted),
+                warnings=tuple((*bundle.warnings, *rejected)),
+                drift_codes=tuple(
+                    sorted(
+                        set(bundle.drift_codes)
+                        | ({"competition-identity-rejected"} if rejected else set())
+                    )
+                ),
+                provenance=bundle.provenance,
+            )
+        )
+    return tuple(sanitized)
 
 
 def _reject_incompatible_cross_provider_pairs(
@@ -429,23 +480,84 @@ def home_away_participants(
     raise NormalizationError(msg)
 
 
-def competition_id_for_event(event: ProviderEventObservation) -> str:
+def competition_id_for_event(
+    event: ProviderEventObservation,
+    *,
+    provider_id: str | None = None,
+) -> str:
     """Derive a competition identity suitable for exact cross-provider matching.
 
-    Prefer an exact case-folded competition display name when present so Betano
-    and Betclic can share competition identity without fuzzy matching. When only
-    a provider-scoped competition code exists, keep it provider-distinct so
-    incompatible competitions never merge silently.
+    Display names use an exact normalized Unicode semantic input plus a bounded
+    ASCII slug and digest. Provider source IDs are a provider-scoped fallback.
     """
-    if event.competition_display_name:
-        collapsed = "-".join(event.competition_display_name.casefold().split())
-        if collapsed:
-            return f"competition:{collapsed}"
-    raw = "-".join(event.source_competition_id.casefold().split())
-    if not raw:
+    display_name = event.competition_display_name
+    if display_name is not None:
+        semantic = _normalized_competition_text(display_name)
+        if semantic and _has_semantic_competition_text(semantic):
+            slug = _ascii_competition_slug(semantic) or "unicode"
+            digest = hashlib.sha256(semantic.encode("utf-8")).hexdigest()[
+                :COMPETITION_DIGEST_LENGTH
+            ]
+            return f"competition:{slug}:{digest}"
+
+    source_semantic = _normalized_competition_text(event.source_competition_id)
+    if not source_semantic:
         msg = "source_competition_id must be non-empty"
         raise NormalizationError(msg)
-    return f"provider-competition:{raw}"
+    if provider_id is None:
+        msg = "provider_id is required for competition source-id fallback"
+        raise NormalizationError(msg)
+    provider_semantic = _normalized_competition_text(provider_id)
+    provider_scope = _ascii_competition_slug(provider_semantic)
+    if not provider_scope:
+        msg = "provider_id has no safe normalized representation"
+        raise NormalizationError(msg)
+    fallback_slug_limit = 89 - len(provider_scope)
+    if fallback_slug_limit < 1:
+        msg = "provider_id is too long for a bounded competition fallback"
+        raise NormalizationError(msg)
+    safe_source_id = _ascii_competition_slug(
+        source_semantic,
+        maximum_length=fallback_slug_limit,
+    )
+    if not safe_source_id:
+        msg = "source_competition_id has no safe normalized representation"
+        raise NormalizationError(msg)
+    fallback_semantic = f"{provider_semantic}\0{source_semantic}"
+    digest = hashlib.sha256(fallback_semantic.encode("utf-8")).hexdigest()[
+        :COMPETITION_DIGEST_LENGTH
+    ]
+    return f"provider-competition:{provider_scope}:{safe_source_id}:{digest}"
+
+
+def _normalized_competition_text(value: str) -> str:
+    if not isinstance(value, str):
+        msg = "competition display name must be a Unicode string"
+        raise NormalizationError(msg)
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    if "\x00" in normalized or any(
+        unicodedata.category(ch)[0] == "C" and not ch.isspace() for ch in normalized
+    ):
+        msg = "competition identity contains unsupported control characters"
+        raise NormalizationError(msg)
+    return " ".join(normalized.split())
+
+
+def _ascii_competition_slug(
+    semantic: str,
+    *,
+    maximum_length: int = MAX_COMPETITION_SLUG_LENGTH,
+) -> str:
+    decomposed = unicodedata.normalize("NFKD", semantic)
+    without_marks = "".join(
+        character for character in decomposed if not unicodedata.combining(character)
+    )
+    slug = _UNSAFE_SLUG_RUN.sub("-", without_marks.encode("ascii", "ignore").decode("ascii"))
+    return slug.strip("-")[:maximum_length].rstrip("-")
+
+
+def _has_semantic_competition_text(value: str) -> bool:
+    return any(unicodedata.category(character)[0] in {"L", "N"} for character in value)
 
 
 def occurrence_key_for_event(
@@ -474,4 +586,5 @@ __all__ = [
     "participant_identity_scope_for_sport",
     "participant_type_for_sport",
     "reconcile_bookmaker_bundles",
+    "sanitize_competition_events",
 ]

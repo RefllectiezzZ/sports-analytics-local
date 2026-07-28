@@ -23,8 +23,10 @@ from sports_analytics.core.exceptions import ConfigurationError
 from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
     BrowserMode,
-    BrowserPageObservation,
     BrowserResponseObservation,
+)
+from sports_analytics.sources.browser.playwright_runtime import (
+    build_structural_page_observation,
 )
 from tests.unit.bookmakers.verified_quote_helpers import (
     catalogue_for,
@@ -51,7 +53,11 @@ def test_structural_fingerprint_stable() -> None:
     assert structural_fingerprint(payload) == structural_fingerprint(payload)
 
 
-def test_collect_probe_from_acquisition_writes_gitignored_path(tmp_path: Path) -> None:
+def test_collect_probe_from_acquisition_writes_gitignored_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     acquisition = BrowserAcquisitionResult(
         provider_id="betano-pt",
         sport="football",
@@ -59,15 +65,15 @@ def test_collect_probe_from_acquisition_writes_gitignored_path(tmp_path: Path) -
         observed_at_utc=NOW,
         browser_mode=BrowserMode.VISIBLE,
         pages=(
-            BrowserPageObservation(
+            build_structural_page_observation(
                 provider_id="betano-pt",
                 page_route_id="football-prematch",
                 final_url="https://www.betano.pt/sport/futebol/",
                 observed_at_utc=NOW,
+                allowed_hostnames=frozenset({"www.betano.pt"}),
                 title="Futebol",
-                sanitized_dom_fragment="<div>odds</div>",
-                block_reason=None,
-                warnings=(),
+                body_html='<div class="odds-value">1.95</div>',
+                body_text="Futebol",
             ),
         ),
         responses=(
@@ -86,7 +92,7 @@ def test_collect_probe_from_acquisition_writes_gitignored_path(tmp_path: Path) -
         block_reason=None,
         warnings=(),
     )
-    output = Path.cwd() / "storage" / "local" / "bookmaker-diagnostics-test"
+    output = tmp_path / "diagnostics"
     result = collect_probe_from_acquisition(
         provider_id="betano-pt",
         sport="football",

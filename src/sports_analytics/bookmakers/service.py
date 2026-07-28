@@ -12,7 +12,10 @@ from sports_analytics.bookmakers.admission import (
     evaluate_admission,
 )
 from sports_analytics.bookmakers.normalization import normalize_bookmaker_bundles
-from sports_analytics.bookmakers.reconciliation import reconcile_bookmaker_bundles
+from sports_analytics.bookmakers.reconciliation import (
+    reconcile_bookmaker_bundles,
+    sanitize_competition_events,
+)
 from sports_analytics.bookmakers.snapshots import (
     build_bookmaker_source_version,
     publish_bookmaker_snapshot,
@@ -242,6 +245,8 @@ class BookmakerIngestionService:
                 ),
                 EMPTY_SOURCE_FILE_SHA256,
             )
+            if isinstance(bundle, ProviderAcquisitionBundle):
+                bundle = sanitize_competition_events((bundle,))[0]
             reconciliations = reconcile_bookmaker_bundles((bundle,))
             normalized = normalize_bookmaker_bundles(
                 (bundle,),

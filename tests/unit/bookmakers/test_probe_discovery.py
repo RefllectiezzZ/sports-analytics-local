@@ -6,9 +6,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from sports_analytics.bookmakers.diagnostics.dom_discovery import (
+    canonicalize_structural_markers,
     discover_dom_candidates,
-    sanitize_class_token,
 )
 from sports_analytics.bookmakers.diagnostics.probe import (
     collect_probe_from_acquisition,
@@ -18,21 +20,21 @@ from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
     BrowserMode,
     BrowserNetworkMetadata,
-    BrowserPageObservation,
     BrowserResponseObservation,
 )
 from sports_analytics.sources.browser.playwright_runtime import (
     RecordingBrowserSession,
+    build_structural_page_observation,
     sanitized_path_hash,
 )
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 
 
-def test_sanitize_class_token_strips_hex_and_long_numeric() -> None:
-    assert sanitize_class_token("event-card") == "event-card"
-    assert sanitize_class_token("a1b2c3d4e5f67890") is None
-    assert sanitize_class_token("12345") is None
+def test_attribute_values_reduce_to_fixed_canonical_markers() -> None:
+    assert canonicalize_structural_markers("event-card") == ("card", "event")
+    assert canonicalize_structural_markers("market-John-Doe") == ("market",)
+    assert canonicalize_structural_markers("a1b2c3d4e5f67890", "12345") == ()
 
 
 def test_discover_dom_candidates_finds_market_nodes() -> None:
@@ -44,12 +46,82 @@ def test_discover_dom_candidates_finds_market_nodes() -> None:
     """
     candidates = discover_dom_candidates(html)
     assert candidates
-    assert any(item.data_testid == "market-odds" for item in candidates)
-    assert all("a1b2c3d4" not in item.class_tokens for item in candidates)
-    assert all(len(item.short_text or "") <= 80 for item in candidates)
+    assert any({"market", "odds"} <= set(item.structural_markers) for item in candidates)
+    assert all("a1b2c3d4" not in item.structural_markers for item in candidates)
+    assert all(
+        item.decimal_odds_text is None or len(item.decimal_odds_text) <= 6 for item in candidates
+    )
+    assert all(not hasattr(item, "short_text") for item in candidates)
+    assert all(not hasattr(item, "aria_label") for item in candidates)
 
 
-def test_probe_passes_observation_window_and_advancing_clock() -> None:
+def test_decimal_odds_discovers_bounded_parent_and_excludes_scripts_and_account() -> None:
+    html = """
+    <script data-testid="event-data">const fake = "1.90";</script>
+    <section class="account-panel"><span class="odds">2.20</span></section>
+    <article class="match-card">
+      <div><button aria-label="Synthetic public price">1.95</button></div>
+    </article>
+    """
+    candidates = discover_dom_candidates(html)
+    assert any(item.tag == "button" and item.decimal_odds_text == "1.95" for item in candidates)
+    assert any(
+        item.tag == "article" and {"card", "match"} <= set(item.structural_markers)
+        for item in candidates
+    )
+    assert all(item.tag != "script" for item in candidates)
+    assert all(item.decimal_odds_text != "2.20" for item in candidates)
+    assert all(len(item.ancestor_structural_fingerprint) == 64 for item in candidates)
+
+
+def test_structured_public_hydration_is_structural_only() -> None:
+    candidates = discover_dom_candidates(
+        '<script type="application/json" id="ng-transfer-state">'
+        '{"publicEvents":[{"fake":true}]}</script>'
+        '<script type="application/json">{"generic":true}</script>'
+    )
+    scripts = [item for item in candidates if item.tag == "script"]
+    assert len(scripts) == 1
+    assert scripts[0].candidate_classification == "hydration-structure"
+    assert scripts[0].hydration_marker == "ng-state"
+    assert scripts[0].structural_markers == ()
+    assert scripts[0].content_shape_fingerprint is not None
+    assert scripts[0].decimal_odds_text is None
+
+
+def test_excluded_descendant_text_never_propagates_to_public_parent() -> None:
+    excluded_values = (
+        "Private account details",
+        "fake.person@example.test",
+        "FAKE_ACCOUNT_NAME",
+        "FAKE_PRIVATE_VALUE",
+    )
+    candidates = discover_dom_candidates(
+        """
+        <article class="market-card">
+          Public Match
+          <section class="account-panel">
+            Private account details
+            <span>fake.person@example.test</span>
+            <input value="FAKE_PRIVATE_VALUE" />
+            <div>FAKE_ACCOUNT_NAME</div>
+          </section>
+          <button class="price-button">1.95</button>
+        </article>
+        """
+    )
+    assert candidates
+    serialized = json.dumps([candidate.as_dict() for candidate in candidates])
+    for excluded in excluded_values:
+        assert excluded not in serialized
+
+
+def test_probe_passes_observation_window_and_advancing_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
     class AdvancingClock:
         def __init__(self) -> None:
             self.now = NOW
@@ -75,7 +147,6 @@ def test_probe_passes_observation_window_and_advancing_clock() -> None:
         warnings=(),
         network_metadata=(
             BrowserNetworkMetadata(
-                response_url="https://cdn.example.com/pixel",
                 hostname="cdn.example.com",
                 resource_type="image",
                 status_code=200,
@@ -92,8 +163,7 @@ def test_probe_passes_observation_window_and_advancing_clock() -> None:
     )
     session = RecordingBrowserSession(acquisition)
     clock = AdvancingClock()
-    output = Path.cwd() / "storage" / "local" / "bookmaker-diagnostics-probe-test"
-    output.mkdir(parents=True, exist_ok=True)
+    output = tmp_path / "diagnostics"
     result = probe_bookmaker(
         provider_id="betclic-pt",
         sport="football",
@@ -114,7 +184,11 @@ def test_probe_passes_observation_window_and_advancing_clock() -> None:
     assert payload["network_metadata"][0]["hostname_approved"] is False
 
 
-def test_collect_probe_expands_dom_preview_and_candidates() -> None:
+def test_collect_probe_persists_structural_candidates_without_dom_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     html = (
         '<section class="event-list">'
         + ("x" * 500)
@@ -127,15 +201,15 @@ def test_collect_probe_expands_dom_preview_and_candidates() -> None:
         observed_at_utc=NOW,
         browser_mode=BrowserMode.VISIBLE,
         pages=(
-            BrowserPageObservation(
+            build_structural_page_observation(
                 provider_id="betano-pt",
                 page_route_id="football-prematch",
                 final_url="https://www.betano.pt/sport/futebol/",
                 observed_at_utc=NOW,
+                allowed_hostnames=frozenset({"www.betano.pt"}),
                 title="Futebol",
-                sanitized_dom_fragment=html,
-                block_reason=None,
-                warnings=(),
+                body_html=html,
+                body_text="synthetic public body",
             ),
         ),
         responses=(
@@ -154,8 +228,7 @@ def test_collect_probe_expands_dom_preview_and_candidates() -> None:
         block_reason=None,
         warnings=(),
     )
-    output = Path.cwd() / "storage" / "local" / "bookmaker-diagnostics-probe-dom"
-    output.mkdir(parents=True, exist_ok=True)
+    output = tmp_path / "diagnostics"
     result = collect_probe_from_acquisition(
         provider_id="betano-pt",
         sport="football",
@@ -164,6 +237,7 @@ def test_collect_probe_expands_dom_preview_and_candidates() -> None:
         diagnostic_directory=output,
     )
     assert result.pages[0].dom_candidates
-    preview = result.pages[0].sanitized_sample["dom_preview"]
-    assert len(preview) > 200
-    assert len(preview) <= 2000
+    assert "dom_preview" not in result.pages[0].sanitized_sample
+    assert result.pages[0].sanitized_sample == {
+        "dom_candidates": list(result.pages[0].dom_candidates)
+    }

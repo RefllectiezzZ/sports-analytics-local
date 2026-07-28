@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sports_analytics.bookmakers.diagnostics.paths import resolve_diagnostic_directory
+from sports_analytics.bookmakers.diagnostics.persistence import publish_diagnostic_json
 from sports_analytics.bookmakers.diagnostics.redaction import redact_structure
 from sports_analytics.bookmakers.loader import load_verified_bookmaker_quotes
 from sports_analytics.bookmakers.markets import DEFINITION_FOOTBALL_MATCH_RESULT_1X2
@@ -460,7 +460,7 @@ def _write_smoke_artifact(
         "cycles": [asdict(item) for item in cycles],
         "acceptance_summary": redact_structure(acceptance_summary),
     }
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+    publish_diagnostic_json(path, payload)
     return filename
 
 

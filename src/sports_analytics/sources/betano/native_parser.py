@@ -28,7 +28,6 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderSelectionObservation,
 )
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult
-from sports_analytics.sources.browser.safety import classify_block_signals
 from sports_analytics.sports.contracts import require_utc
 
 _BETANO_EVENT_STATE: dict[str, ProviderEventState] = {
@@ -84,20 +83,7 @@ def parse_betano_acquisition(
                     code="json-parse-failed",
                     message=str(exc),
                     severity=ParserDriftSeverity.ERROR,
-                    source_path=response.response_url,
-                )
-            )
-    for page in acquisition.pages:
-        detected = classify_block_signals(
-            title=page.title,
-            body_text=page.sanitized_dom_fragment,
-        )
-        if detected is not None:
-            warnings.append(
-                ProviderParserWarning(
-                    code="blocked-page",
-                    message=detected.value,
-                    severity=ParserDriftSeverity.ERROR,
+                    source_path=f"route:{response.page_route_id}",
                 )
             )
     return parse_betano_native_payloads(
@@ -110,7 +96,7 @@ def parse_betano_acquisition(
         extra_warnings=tuple(warnings),
         provenance=tuple(
             sorted(
-                {f"response:{item.response_url}" for item in acquisition.responses}
+                {f"response-route:{item.page_route_id}" for item in acquisition.responses}
                 | {f"page:{item.page_route_id}" for item in acquisition.pages}
             )
         ),

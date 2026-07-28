@@ -21,6 +21,7 @@ from sports_analytics.bookmakers.reconciliation import (
     occurrence_key_for_event,
     participant_identity_scope_for_sport,
     participant_type_for_sport,
+    sanitize_competition_events,
 )
 from sports_analytics.bookmakers.types import (
     BOOKMAKER_NORMALIZER_VERSION,
@@ -169,6 +170,7 @@ def normalize_bookmaker_bundles(
     if not bundles:
         msg = "at least one provider acquisition bundle is required"
         raise NormalizationError(msg)
+    bundles = sanitize_competition_events(bundles)
 
     sports = {bundle.sport for bundle in bundles}
     if len(sports) != 1:
@@ -264,7 +266,7 @@ def _build_participants(
         participant_type = participant_type_for_sport(sport)
         identity_scope = participant_identity_scope_for_sport(sport)
         for event in bundle.events:
-            competition_id = competition_id_for_event(event)
+            competition_id = competition_id_for_event(event, provider_id=bundle.provider_id)
             for participant in event.participants:
                 identity = (bundle.provider_id, participant.source_participant_id)
                 if identity in seen:
@@ -346,7 +348,7 @@ def _build_source_events(
                 )
                 raise NormalizationError(msg)
             home, away = home_away_participants(event.participants)
-            competition_id = competition_id_for_event(event)
+            competition_id = competition_id_for_event(event, provider_id=bundle.provider_id)
             season_id = build_season_id(
                 competition_id=competition_id,
                 label=BOOKMAKER_SEASON_LABEL,

@@ -16,6 +16,7 @@ from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -27,6 +28,9 @@ from sports_analytics.core.exceptions import (
 from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
     BrowserBlockReason,
+    BrowserDiagnosticReference,
+    BrowserDomCandidate,
+    BrowserGrpcWebDiagnostic,
     BrowserMode,
     BrowserNetworkMetadata,
     BrowserPageObservation,
@@ -58,6 +62,9 @@ _CANDIDATE_KEY_PATTERN = re.compile(
     r"fixture|fixtures|match|matches|quote|quotes)"
 )
 _OBSERVATION_POLL_MS = 250
+_MAX_EPHEMERAL_BODY_HTML_CHARS = 65_536
+_MAX_EPHEMERAL_BODY_TEXT_CHARS = 16_384
+_MAX_EPHEMERAL_TITLE_CHARS = 512
 
 
 class BrowserSession(Protocol):
@@ -76,6 +83,7 @@ class BrowserSession(Protocol):
         deadline_at_utc: datetime | None = None,
         observation_window_ms: int | None = None,
         observation_complete: Callable[[], bool] | None = None,
+        diagnostic_directory: Path | None = None,
     ) -> BrowserAcquisitionResult:
         """Collect page and first-party JSON observations for fixed routes."""
 
@@ -86,6 +94,46 @@ class ProviderRoute:
 
     page_route_id: str
     url: str
+
+
+def build_structural_page_observation(
+    *,
+    provider_id: str,
+    page_route_id: str,
+    final_url: str,
+    observed_at_utc: datetime,
+    allowed_hostnames: frozenset[str],
+    title: str | None,
+    body_html: str | None,
+    body_text: str | None,
+    block_reason: BrowserBlockReason | None = None,
+) -> BrowserPageObservation:
+    """Convert ephemeral page material into a structural-only observation."""
+    approved = validate_provider_navigation_url(
+        final_url,
+        allowed_hostnames=allowed_hostnames,
+    )
+    detected = block_reason or classify_block_signals(
+        title=None if title is None else title[:_MAX_EPHEMERAL_TITLE_CHARS],
+        body_text=(None if body_text is None else body_text[:_MAX_EPHEMERAL_BODY_TEXT_CHARS]),
+    )
+    candidates: tuple[BrowserDomCandidate, ...]
+    if body_html is None:
+        candidates = ()
+    else:
+        from sports_analytics.bookmakers.diagnostics.dom_discovery import (
+            discover_dom_candidates,
+        )
+
+        candidates = discover_dom_candidates(body_html[:_MAX_EPHEMERAL_BODY_HTML_CHARS])
+    return BrowserPageObservation(
+        provider_id=provider_id,
+        page_route_id=page_route_id,
+        hostname=approved.hostname,
+        observed_at_utc=observed_at_utc,
+        block_reason=detected,
+        structural_candidates=candidates,
+    )
 
 
 def sanitized_path_hash(url: str) -> str:
@@ -129,6 +177,12 @@ def build_network_metadata(
     observed_at_utc: datetime,
     body_text: str | None = None,
     byte_size: int | None = None,
+    provider_id: str | None = None,
+    grpc_web_envelope_recognized: bool = False,
+    grpc_web_failure_code: str | None = None,
+    grpc_web_body_read: bool = False,
+    grpc_web_evidence_stored: bool = False,
+    grpc_web_malformed_or_truncated: bool = False,
 ) -> BrowserNetworkMetadata | None:
     """Build metadata for one HTTPS response, or ``None`` when the URL is rejected.
 
@@ -137,6 +191,8 @@ def build_network_metadata(
     """
     hostname_approved = False
     hostname: str | None = None
+    approved_route_id: str | None = None
+    approved_path_template: str | None = None
     try:
         approved = validate_provider_navigation_url(
             response_url,
@@ -148,6 +204,17 @@ def build_network_metadata(
         hostname = classify_https_public_url(response_url)
         if hostname is None:
             return None
+        if provider_id == "betclic-pt":
+            from sports_analytics.sources.betclic.discovery import approve_betclic_response_url
+
+            try:
+                approved_response = approve_betclic_response_url(response_url)
+            except PermanentSourceError:
+                pass
+            else:
+                hostname_approved = True
+                approved_route_id = approved_response.route_id
+                approved_path_template = approved_response.path_template
 
     path_hash = sanitized_path_hash(response_url)
     fingerprint: str | None = None
@@ -173,7 +240,6 @@ def build_network_metadata(
             candidate_keys = detect_candidate_keys(loaded)
 
     return BrowserNetworkMetadata(
-        response_url=response_url,
         hostname=hostname,
         resource_type=resource_type,
         status_code=status_code,
@@ -185,6 +251,202 @@ def build_network_metadata(
         candidate_keys_detected=candidate_keys,
         body_captured=body_captured,
         observed_at_utc=observed_at_utc,
+        approved_route_id=approved_route_id,
+        approved_path_template=approved_path_template,
+        grpc_web_envelope_recognized=grpc_web_envelope_recognized,
+        grpc_web_failure_code=grpc_web_failure_code,
+        grpc_web_body_read=grpc_web_body_read,
+        grpc_web_evidence_stored=grpc_web_evidence_stored,
+        grpc_web_malformed_or_truncated=grpc_web_malformed_or_truncated,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BetclicGrpcObservationOutcome:
+    """Safe result with explicit body-read and evidence-retention semantics."""
+
+    approved_route_id: str | None
+    envelope_recognized: bool
+    actual_byte_size: int | None
+    failure_code: str | None
+    diagnostic: BrowserGrpcWebDiagnostic | None
+    body_read: bool
+    evidence_stored: bool
+    malformed_or_truncated: bool
+
+
+def observe_betclic_grpc_response(
+    *,
+    response: object,
+    response_url: str,
+    content_type: str | None,
+    content_length: int | None,
+    maximum_bytes: int,
+    diagnostic_directory: Path | None,
+) -> BetclicGrpcObservationOutcome:
+    """Inspect a naturally observed Betclic response without issuing a request.
+
+    Playwright may require one complete ``response.body()`` allocation when the
+    server omits Content-Length. The real byte length is checked immediately
+    after that read and again by inspection/storage before anything is retained.
+    """
+    from sports_analytics.sources.betclic.discovery import approve_betclic_response_url
+    from sports_analytics.sources.betclic.grpc_web import (
+        GrpcWebEnvelopeError,
+        inspect_grpc_web_envelope,
+        is_recognized_grpc_web_content_type,
+        store_content_addressed_grpc_evidence,
+    )
+
+    try:
+        approved = approve_betclic_response_url(response_url)
+    except PermanentSourceError:
+        return BetclicGrpcObservationOutcome(None, False, None, None, None, False, False, False)
+    if content_type is None or not is_recognized_grpc_web_content_type(content_type):
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            False,
+            None,
+            None,
+            None,
+            False,
+            False,
+            False,
+        )
+    if approved.metadata_only:
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            False,
+            None,
+            None,
+            None,
+            False,
+            False,
+            False,
+        )
+    if content_length is not None and content_length > maximum_bytes:
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            False,
+            content_length,
+            "grpc-web-size-header-rejected",
+            None,
+            False,
+            False,
+            False,
+        )
+
+    try:
+        raw_body = response.body()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - Playwright/local failure is metadata-only
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            False,
+            None,
+            "grpc-web-body-read-failed",
+            None,
+            False,
+            False,
+            False,
+        )
+    actual_size = len(raw_body)
+    if actual_size > maximum_bytes:
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            False,
+            actual_size,
+            "body-size-exceeded",
+            None,
+            True,
+            False,
+            False,
+        )
+
+    try:
+        inspection = inspect_grpc_web_envelope(
+            raw_body,
+            content_type=content_type,
+            maximum_bytes=maximum_bytes,
+        )
+    except GrpcWebEnvelopeError as exc:
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            False,
+            actual_size,
+            exc.classification,
+            None,
+            True,
+            False,
+            exc.malformed_or_truncated,
+        )
+    except PermanentSourceError:
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            False,
+            actual_size,
+            "envelope-inspection-failed",
+            None,
+            True,
+            False,
+            False,
+        )
+    if diagnostic_directory is None:
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            True,
+            actual_size,
+            None,
+            None,
+            True,
+            False,
+            False,
+        )
+    stored = None
+    try:
+        stored = store_content_addressed_grpc_evidence(
+            raw_body,
+            directory=diagnostic_directory / "grpc-web",
+        )
+        relative_path = stored.absolute_path.relative_to(diagnostic_directory).as_posix()
+        diagnostic = BrowserGrpcWebDiagnostic(
+            capture_kind="betclic-grpc-web",
+            checksum_sha256=stored.checksum_sha256,
+            relative_path=relative_path,
+            byte_count=stored.byte_count,
+            framing=inspection.framing,
+            data_frame_count=inspection.data_frame_count,
+            trailer_frame_count=inspection.trailer_frame_count,
+            compression_flag_present=inspection.compression_flag_present,
+            total_framed_payload_bytes=inspection.total_framed_payload_bytes,
+            malformed_or_truncated=inspection.malformed_or_truncated,
+            grpc_status=inspection.grpc_status,
+            newly_created=stored.newly_created,
+        )
+    except Exception:  # noqa: BLE001 - local evidence failure must preserve metadata
+        if stored is not None and stored.newly_created:
+            try:
+                stored.absolute_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return BetclicGrpcObservationOutcome(
+            approved.route_id,
+            True,
+            actual_size,
+            "grpc-web-evidence-storage-failed",
+            None,
+            True,
+            False,
+            False,
+        )
+    return BetclicGrpcObservationOutcome(
+        approved.route_id,
+        True,
+        actual_size,
+        None,
+        diagnostic,
+        True,
+        True,
+        False,
     )
 
 
@@ -223,6 +485,7 @@ class PlaywrightBrowserSession:
         deadline_at_utc: datetime | None = None,
         observation_window_ms: int | None = None,
         observation_complete: Callable[[], bool] | None = None,
+        diagnostic_directory: Path | None = None,
     ) -> BrowserAcquisitionResult:
         if browser_mode not in {BrowserMode.VISIBLE, BrowserMode.VISIBLE_MINIMIZED}:
             msg = "headless production scraping is forbidden"
@@ -239,6 +502,8 @@ class PlaywrightBrowserSession:
         pages: list[BrowserPageObservation] = []
         responses: list[BrowserResponseObservation] = []
         network_metadata: list[BrowserNetworkMetadata] = []
+        diagnostics: list[BrowserDiagnosticReference] = []
+        grpc_web_diagnostics: list[BrowserGrpcWebDiagnostic] = []
         warnings: list[str] = []
         block_reason: BrowserBlockReason | None = None
         cookie_banner_dismissed = False
@@ -291,6 +556,8 @@ class PlaywrightBrowserSession:
                                         content_length = int(raw_length)
                                     except (TypeError, ValueError):
                                         content_length = None
+                                    if content_length is not None and content_length < 0:
+                                        content_length = None
                             raw_status = getattr(response, "status", None)
                             try:
                                 parsed_status = int(raw_status) if raw_status is not None else None
@@ -320,6 +587,12 @@ class PlaywrightBrowserSession:
                                     return
 
                             body_text: str | None = None
+                            grpc_web_envelope_recognized = False
+                            grpc_web_failure_code: str | None = None
+                            grpc_web_body_read = False
+                            grpc_web_evidence_stored = False
+                            grpc_web_malformed_or_truncated = False
+                            grpc_actual_byte_size: int | None = None
                             if (
                                 hostname_approved
                                 and content_type is not None
@@ -329,7 +602,10 @@ class PlaywrightBrowserSession:
                                 try:
                                     body = response.text()  # type: ignore[attr-defined]
                                 except Exception as exc:  # noqa: BLE001
-                                    _LOGGER.debug("ignored response body read: %s", exc)
+                                    _LOGGER.debug(
+                                        "ignored response body read: %s",
+                                        type(exc).__name__,
+                                    )
                                     body = None
                                 if body is not None:
                                     encoded_size = len(body.encode("utf-8"))
@@ -352,6 +628,36 @@ class PlaywrightBrowserSession:
                                                 warnings=(),
                                             )
                                         )
+                            if provider_id == "betclic-pt":
+                                grpc_outcome = observe_betclic_grpc_response(
+                                    response=response,
+                                    response_url=response_url,
+                                    content_type=(
+                                        str(content_type) if content_type is not None else None
+                                    ),
+                                    content_length=content_length,
+                                    maximum_bytes=self._maximum_response_bytes,
+                                    diagnostic_directory=diagnostic_directory,
+                                )
+                                grpc_web_envelope_recognized = grpc_outcome.envelope_recognized
+                                grpc_web_failure_code = grpc_outcome.failure_code
+                                grpc_web_body_read = grpc_outcome.body_read
+                                grpc_web_evidence_stored = grpc_outcome.evidence_stored
+                                grpc_web_malformed_or_truncated = (
+                                    grpc_outcome.malformed_or_truncated
+                                )
+                                grpc_actual_byte_size = grpc_outcome.actual_byte_size
+                                grpc_diagnostic = grpc_outcome.diagnostic
+                                if grpc_diagnostic is not None:
+                                    grpc_web_diagnostics.append(grpc_diagnostic)
+                                    diagnostics.append(
+                                        BrowserDiagnosticReference(
+                                            capture_kind=grpc_diagnostic.capture_kind,
+                                            checksum_sha256=grpc_diagnostic.checksum_sha256,
+                                            relative_path=grpc_diagnostic.relative_path,
+                                            byte_count=grpc_diagnostic.byte_count,
+                                        )
+                                    )
 
                             meta = build_network_metadata(
                                 response_url=response_url,
@@ -362,17 +668,30 @@ class PlaywrightBrowserSession:
                                 observed_at_utc=self._clock(),
                                 body_text=body_text,
                                 byte_size=(
-                                    len(body_text.encode("utf-8"))
-                                    if body_text is not None
-                                    else content_length
+                                    grpc_actual_byte_size
+                                    if grpc_actual_byte_size is not None
+                                    else (
+                                        len(body_text.encode("utf-8"))
+                                        if body_text is not None
+                                        else content_length
+                                    )
                                 ),
+                                provider_id=provider_id,
+                                grpc_web_envelope_recognized=grpc_web_envelope_recognized,
+                                grpc_web_failure_code=grpc_web_failure_code,
+                                grpc_web_body_read=grpc_web_body_read,
+                                grpc_web_evidence_stored=grpc_web_evidence_stored,
+                                grpc_web_malformed_or_truncated=(grpc_web_malformed_or_truncated),
                             )
                             if meta is not None:
                                 network_metadata.append(meta)
                         except PermanentSourceError:
                             return
                         except Exception as exc:  # noqa: BLE001 - observation best-effort
-                            _LOGGER.debug("ignored response observation error: %s", exc)
+                            _LOGGER.debug(
+                                "ignored response observation error: %s",
+                                type(exc).__name__,
+                            )
 
                     page.on("response", _on_response)
 
@@ -428,28 +747,27 @@ class PlaywrightBrowserSession:
                         except ReadinessBlockedError as exc:
                             block_reason = exc.block_reason
                             pages.append(
-                                BrowserPageObservation(
+                                build_structural_page_observation(
                                     provider_id=provider_id,
                                     page_route_id=page_route_id,
                                     final_url=page.url,
                                     observed_at_utc=self._clock(),
-                                    title=page.title() or None,
-                                    sanitized_dom_fragment=None,
+                                    allowed_hostnames=allowed_hostnames,
+                                    title=None,
+                                    body_html=None,
+                                    body_text=None,
                                     block_reason=block_reason,
-                                    warnings=(),
                                 )
                             )
                             break
                         except RetryableSourceError:
                             raise
                         except PlaywrightError as exc:
-                            message = f"incomplete page load for {page_route_id}: {exc}"
+                            message = (
+                                f"incomplete page load for {page_route_id}: {type(exc).__name__}"
+                            )
                             raise RetryableSourceError(message) from exc
                         final_url = page.url
-                        validate_provider_navigation_url(
-                            final_url,
-                            allowed_hostnames=allowed_hostnames,
-                        )
                         title = page.title()
                         try:
                             body_html = page.inner_html("body")
@@ -459,27 +777,20 @@ class PlaywrightBrowserSession:
                             body_text = page.inner_text("body")
                         except PlaywrightError:
                             body_text = None
-                        detected = classify_readiness_block(page) or classify_block_signals(
+                        detected = classify_readiness_block(page)
+                        page_observation = build_structural_page_observation(
+                            provider_id=provider_id,
+                            page_route_id=page_route_id,
+                            final_url=final_url,
+                            observed_at_utc=self._clock(),
+                            allowed_hostnames=allowed_hostnames,
                             title=title,
+                            body_html=body_html,
                             body_text=body_text,
+                            block_reason=detected,
                         )
-                        fragment = None
-                        if body_html is not None:
-                            fragment = body_html[:8_192]
-                        elif body_text is not None:
-                            fragment = body_text[:8_192]
-                        pages.append(
-                            BrowserPageObservation(
-                                provider_id=provider_id,
-                                page_route_id=page_route_id,
-                                final_url=final_url,
-                                observed_at_utc=self._clock(),
-                                title=title or None,
-                                sanitized_dom_fragment=fragment,
-                                block_reason=detected,
-                                warnings=(),
-                            )
-                        )
+                        pages.append(page_observation)
+                        detected = page_observation.block_reason
                         if detected is not None:
                             block_reason = detected
                             break
@@ -492,7 +803,9 @@ class PlaywrightBrowserSession:
         except PermanentSourceError:
             raise
         except Exception as exc:
-            raise_for_classified_error(classify_browser_crash(f"browser process failure: {exc}"))
+            raise_for_classified_error(
+                classify_browser_crash(f"browser process failure: {type(exc).__name__}")
+            )
 
         return BrowserAcquisitionResult(
             provider_id=provider_id,
@@ -502,11 +815,12 @@ class PlaywrightBrowserSession:
             browser_mode=browser_mode,
             pages=tuple(pages),
             responses=tuple(responses),
-            diagnostics=(),
+            diagnostics=tuple(diagnostics),
             block_reason=block_reason,
             warnings=tuple(sorted(set(warnings))),
             cookie_banner_dismissed=cookie_banner_dismissed,
             network_metadata=tuple(network_metadata),
+            grpc_web_diagnostics=tuple(grpc_web_diagnostics),
         )
 
     def _observe_after_readiness(
@@ -574,6 +888,7 @@ class RecordingBrowserSession:
         deadline_at_utc: datetime | None = None,
         observation_window_ms: int | None = None,
         observation_complete: Callable[[], bool] | None = None,
+        diagnostic_directory: Path | None = None,
     ) -> BrowserAcquisitionResult:
         for _, url in start_urls:
             validate_provider_navigation_url(url, allowed_hostnames=allowed_hostnames)
@@ -587,6 +902,7 @@ class RecordingBrowserSession:
                 "deadline_at_utc": deadline_at_utc,
                 "observation_window_ms": observation_window_ms,
                 "observation_complete": observation_complete,
+                "diagnostic_directory": diagnostic_directory,
             }
         )
         return self._result

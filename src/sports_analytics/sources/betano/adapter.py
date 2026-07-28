@@ -82,18 +82,6 @@ def acquire_betano_current_odds(
             continue
         if looks_like_topeventsv2(payload):
             recognized_response_times.append(response.observed_at_utc)
-    for page in result.pages:
-        if page.sanitized_dom_fragment:
-            artifact = store.store_text(
-                source_name=PROVIDER_ID,
-                capture_kind="dom-fragment",
-                content=page.sanitized_dom_fragment,
-                retrieved_at=page.observed_at_utc,
-                extension="txt",
-                maximum_bytes=maximum_capture_bytes,
-                source_url=page.final_url,
-            )
-            captures.append(artifact)
     evidence_observed_at = (
         max(recognized_response_times) if recognized_response_times else observed_at_utc
     )

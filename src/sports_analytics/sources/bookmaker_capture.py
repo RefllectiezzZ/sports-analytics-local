@@ -18,18 +18,28 @@ from sports_analytics.snapshots.spec import RawArtifactReference
 from sports_analytics.sources.raw_capture import BookmakerRawCapture
 from sports_analytics.sports.contracts import require_utc
 
-CAPTURE_MANIFEST_SCHEMA: str = "bookmaker-capture-manifest-v1"
+CAPTURE_MANIFEST_SCHEMA_V1: str = "bookmaker-capture-manifest-v1"
+CAPTURE_MANIFEST_SCHEMA: str = "bookmaker-capture-manifest-v2"
+_MANIFEST_ROOT_KEYS = frozenset({"schema", "provider_id", "acquisition_cycle_id", "captures"})
+_MANIFEST_ENTRY_KEYS = frozenset(
+    {
+        "relative_path",
+        "checksum_sha256",
+        "byte_count",
+        "capture_type",
+        "observed_at_utc",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
 class CaptureManifestEntry:
-    """One admitted raw capture with full provenance metadata."""
+    """One admitted raw capture without complete URL provenance."""
 
     relative_path: str
     checksum_sha256: str
     byte_count: int
     capture_type: str
-    source_url: str | None
     observed_at_utc: datetime
 
     def to_json(self) -> dict[str, object]:
@@ -38,7 +48,6 @@ class CaptureManifestEntry:
             "checksum_sha256": self.checksum_sha256,
             "byte_count": self.byte_count,
             "capture_type": self.capture_type,
-            "source_url": self.source_url,
             "observed_at_utc": format_utc_timestamp(
                 require_utc(self.observed_at_utc, field_name="observed_at_utc")
             ),
@@ -69,7 +78,6 @@ def capture_entry_from_raw(capture: BookmakerRawCapture) -> CaptureManifestEntry
         checksum_sha256=capture.checksum_sha256,
         byte_count=capture.byte_count,
         capture_type=capture.capture_kind,
-        source_url=capture.source_url,
         observed_at_utc=capture.retrieved_at,
     )
 
@@ -229,8 +237,14 @@ def parse_capture_manifest_from_bytes(
         msg = "capture manifest must be a JSON object"
         raise SnapshotIntegrityError(msg)
     schema = document.get("schema")
+    if schema == CAPTURE_MANIFEST_SCHEMA_V1:
+        msg = "legacy capture manifest v1 is rejected because it may contain URL provenance"
+        raise SnapshotIntegrityError(msg)
     if schema != CAPTURE_MANIFEST_SCHEMA:
-        msg = f"unexpected capture manifest schema: {schema!r}"
+        msg = "unexpected capture manifest schema"
+        raise SnapshotIntegrityError(msg)
+    if frozenset(document) != _MANIFEST_ROOT_KEYS:
+        msg = "capture manifest root keys do not match the v2 schema"
         raise SnapshotIntegrityError(msg)
     provider_id = document.get("provider_id")
     acquisition_cycle_id = document.get("acquisition_cycle_id")
@@ -259,12 +273,14 @@ def parse_capture_manifest_from_bytes(
         if not isinstance(item, dict):
             msg = f"capture manifest entry {index} must be an object"
             raise SnapshotIntegrityError(msg)
+        if frozenset(item) != _MANIFEST_ENTRY_KEYS:
+            msg = f"capture manifest entry {index} keys do not match the v2 schema"
+            raise SnapshotIntegrityError(msg)
         relative = item.get("relative_path")
         entry_checksum = item.get("checksum_sha256")
         byte_count = item.get("byte_count")
         capture_type = item.get("capture_type")
         observed_raw = item.get("observed_at_utc")
-        source_url = item.get("source_url")
         if not isinstance(relative, str) or not relative.strip():
             msg = f"capture manifest entry {index} missing relative_path"
             raise SnapshotIntegrityError(msg)
@@ -289,16 +305,12 @@ def parse_capture_manifest_from_bytes(
         from sports_analytics.data.codec import parse_utc_timestamp
 
         observed_at = parse_utc_timestamp(observed_raw)
-        if source_url is not None and not isinstance(source_url, str):
-            msg = f"capture manifest entry {index} source_url must be string or null"
-            raise SnapshotIntegrityError(msg)
         entries.append(
             CaptureManifestEntry(
                 relative_path=relative_path_entry,
                 checksum_sha256=entry_checksum,
                 byte_count=byte_count,
                 capture_type=capture_type,
-                source_url=source_url,
                 observed_at_utc=observed_at,
             )
         )
