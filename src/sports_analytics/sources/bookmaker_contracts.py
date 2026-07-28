@@ -188,6 +188,7 @@ class ProviderAcquisitionBundle:
     warnings: tuple[ProviderParserWarning, ...]
     drift_codes: tuple[str, ...]
     provenance: tuple[str, ...]
+    recognized_profile_response_count: int = 0
 
     def __post_init__(self) -> None:
         validate_identifier(self.provider_id, field_name="provider_id")
@@ -204,6 +205,9 @@ class ProviderAcquisitionBundle:
             raise PermanentSourceError(msg)
         if tuple(sorted(self.provenance)) != self.provenance:
             msg = "provenance must be sorted"
+            raise PermanentSourceError(msg)
+        if not 0 <= self.recognized_profile_response_count <= 1_000_000:
+            msg = "recognized_profile_response_count is outside the fixed bound"
             raise PermanentSourceError(msg)
         event_ids = [item.source_event_id for item in self.events]
         if len(event_ids) != len(set(event_ids)):

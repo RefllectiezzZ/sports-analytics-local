@@ -20,6 +20,7 @@ class ExtractionResult:
     adapter_contract_payloads: tuple[dict[str, object], ...]
     drift_codes: tuple[str, ...]
     warnings: tuple[str, ...]
+    recognized_response_count: int = 0
 
 
 class ExtractionProfile(Protocol):

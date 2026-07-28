@@ -107,6 +107,8 @@ class BookmakerIngestionResult:
     rejected_markets: int
     warnings: tuple[str, ...]
     drift_codes: tuple[str, ...]
+    response_observation_count: int = 0
+    recognized_profile_response_count: int = 0
 
     def to_json(self) -> dict[str, JsonValue]:
         """Return a canonical JSON-compatible mapping."""

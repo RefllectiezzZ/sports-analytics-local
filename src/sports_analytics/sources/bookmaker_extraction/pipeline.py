@@ -101,4 +101,5 @@ def _bundle_from_extraction(
         warnings=bundle.warnings,
         drift_codes=merged_drift,
         provenance=bundle.provenance,
+        recognized_profile_response_count=extraction.recognized_response_count,
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import asdict
 from typing import Any
 
 from sports_analytics.bookmakers.diagnostics.probe import probe_bookmaker
@@ -307,6 +308,9 @@ def smoke_bookmaker_cli(
                 "profile_verified": result.profile_verified,
                 "diagnostic_relative_path": result.diagnostic_relative_path,
                 "acceptance_summary": result.acceptance_summary,
+                "failure_telemetry": (
+                    None if result.failure_telemetry is None else asdict(result.failure_telemetry)
+                ),
                 "cycles": [
                     {
                         "cycle_number": cycle.cycle_number,

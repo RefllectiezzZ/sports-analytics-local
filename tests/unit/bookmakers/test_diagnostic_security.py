@@ -100,6 +100,44 @@ def test_ordinary_prose_containing_a_colon_remains_accepted() -> None:
 
 
 @pytest.mark.parametrize(
+    "value",
+    [
+        "market#1",
+        "fixture?status",
+        "MRES#primary",
+        "price?decimal",
+        "#structural-marker",
+        "question?answer#label",
+    ],
+)
+def test_query_and_fragment_characters_in_non_url_text_are_accepted(value: str) -> None:
+    scan_diagnostic_payload({"summary": value})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.test/path#fragment",
+        "https://example.test/path?x=1",
+        "prefix https://example.test/path?x=1#fragment suffix",
+        "//example.test/path#fragment",
+        "www.example.test/path?x=1",
+    ],
+)
+def test_url_queries_and_fragments_are_rejected_without_raw_value(value: str) -> None:
+    with pytest.raises(UnsafeDiagnosticError) as caught:
+        scan_diagnostic_payload({"nested": value})
+    assert value not in str(caught.value)
+
+
+def test_url_like_mapping_key_with_fragment_is_rejected_opaquely() -> None:
+    raw_key = "https://example.test/path#fragment"
+    with pytest.raises(UnsafeDiagnosticError) as caught:
+        scan_diagnostic_payload({raw_key: "safe"})
+    assert raw_key not in str(caught.value)
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {"prefix //example.test/path suffix": "safe"},
@@ -138,6 +176,16 @@ def test_embedded_one_character_scheme_publication_leaves_no_files(
             {"x": "prefix x://fake-user:fake-pass@example.test/path suffix"},
         )
     assert "x://fake-user:fake-pass@example.test/path" not in str(caught.value)
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_url_fragment_rejection_leaves_no_target_or_temporary_file(tmp_path: Path) -> None:
+    target = tmp_path / "diagnostic.json"
+    raw_value = "prefix https://example.test/path#fragment suffix"
+    with pytest.raises(UnsafeDiagnosticError) as caught:
+        publish_diagnostic_json(target, {"nested": raw_value})
+    assert raw_value not in str(caught.value)
     assert not target.exists()
     assert list(tmp_path.iterdir()) == []
 

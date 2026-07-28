@@ -15,7 +15,11 @@ from sports_analytics.bookmakers.diagnostics.redaction import redact_structure
 from sports_analytics.bookmakers.loader import load_verified_bookmaker_quotes
 from sports_analytics.bookmakers.markets import DEFINITION_FOOTBALL_MATCH_RESULT_1X2
 from sports_analytics.bookmakers.service import BookmakerIngestionService
-from sports_analytics.bookmakers.types import PROVIDER_BETANO_PT, PROVIDER_BETCLIC_PT
+from sports_analytics.bookmakers.types import (
+    PROVIDER_BETANO_PT,
+    PROVIDER_BETCLIC_PT,
+    BookmakerIngestionResult,
+)
 from sports_analytics.core.exceptions import ConfigurationError
 from sports_analytics.core.settings import BookmakersSettings
 from sports_analytics.data.codec import format_utc_timestamp
@@ -23,11 +27,27 @@ from sports_analytics.data.database import connect_database
 from sports_analytics.data.migrations import ensure_database_ready
 from sports_analytics.sources.bookmaker_catalog import SUPPORTED_BOOKMAKER_SPORTS
 from sports_analytics.sources.bookmaker_extraction.registry import get_verified_extraction_profile
+from sports_analytics.sources.browser.contracts import BrowserBlockReason
 from sports_analytics.sources.browser.playwright_runtime import PlaywrightBrowserSession
 
 _MIN_EVENTS = 2
 _MIN_MARKETS_PER_EVENT = 1
 _REQUIRED_CYCLES = 2
+_SAFE_INGESTION_STATUSES = frozenset(
+    {"blocked", "drift-detected", "failed", "partial", "succeeded", "unavailable"}
+)
+_SAFE_FAILURE_STAGES = frozenset(
+    {
+        "acquisition-failure",
+        "blocked-acquisition",
+        "no-provider-response",
+        "no-recognized-profile-response",
+        "parsed-events-zero-supported-quotes",
+        "recognized-response-zero-events",
+        "snapshot-admission-failure",
+    }
+)
+_SAFE_BLOCK_REASONS = frozenset(reason.value for reason in BrowserBlockReason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +68,43 @@ class SmokeCycleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SmokeFailureTelemetry:
+    """Fixed, bounded failure-stage evidence with no provider-controlled text."""
+
+    ingestion_status: str
+    response_observation_count: int
+    recognized_profile_response_count: int
+    events_observed: int
+    valid_quotes_observed: int
+    snapshot_created: bool
+    blocked: bool
+    block_reason: str | None
+    failure_stage: str
+
+    def __post_init__(self) -> None:
+        if self.ingestion_status not in _SAFE_INGESTION_STATUSES:
+            raise ConfigurationError("smoke ingestion status is not allowlisted")
+        if self.failure_stage not in _SAFE_FAILURE_STAGES:
+            raise ConfigurationError("smoke failure stage is not allowlisted")
+        if self.block_reason is not None and self.block_reason not in _SAFE_BLOCK_REASONS:
+            raise ConfigurationError("smoke block reason is not allowlisted")
+        counts = (
+            self.response_observation_count,
+            self.recognized_profile_response_count,
+            self.events_observed,
+            self.valid_quotes_observed,
+        )
+        if any(value < 0 or value > 1_000_000 for value in counts):
+            raise ConfigurationError("smoke telemetry count is outside the fixed bound")
+        if self.recognized_profile_response_count > self.response_observation_count:
+            raise ConfigurationError("recognized response count exceeds observed responses")
+        if self.blocked != (self.ingestion_status == "blocked"):
+            raise ConfigurationError("smoke blocked telemetry contradicts ingestion status")
+        if not self.blocked and self.block_reason is not None:
+            raise ConfigurationError("smoke block reason requires blocked ingestion")
+
+
+@dataclass(frozen=True, slots=True)
 class SmokeResult:
     """Outcome of a bounded provider smoke test."""
 
@@ -60,6 +117,7 @@ class SmokeResult:
     cycles: tuple[SmokeCycleResult, ...]
     diagnostic_relative_path: str
     acceptance_summary: dict[str, Any]
+    failure_telemetry: SmokeFailureTelemetry | None = None
 
 
 def smoke_bookmaker(
@@ -147,26 +205,28 @@ def smoke_bookmaker(
                 attempt_number=1,
                 maximum_attempts=2,
             )
-        except Exception as exc:  # noqa: BLE001 - surface as smoke failure
+        except Exception:  # noqa: BLE001 - convert to fixed smoke failure
             return _failed_smoke(
                 provider_id=provider_id,
                 sport=sport,
-                reason=f"acquisition-failed:{exc}",
+                reason="acquisition-failed",
                 profile_id=profile_id,
                 profile_verified=profile_verified,
                 diagnostic_directory=diagnostic_directory,
                 cycles=tuple(cycles),
+                telemetry=None,
             )
         elapsed = time.monotonic() - cycle_started
         if result.status == "blocked":
             return _failed_smoke(
                 provider_id=provider_id,
                 sport=sport,
-                reason=f"blocked:{result.block_reason}",
+                reason="blocked-acquisition",
                 profile_id=profile_id,
                 profile_verified=profile_verified,
                 diagnostic_directory=diagnostic_directory,
                 cycles=tuple(cycles),
+                telemetry=_failure_telemetry_from_ingestion(result),
             )
         if result.snapshot_id is None or result.valid_quotes_observed < 1:
             return _failed_smoke(
@@ -177,6 +237,7 @@ def smoke_bookmaker(
                 profile_verified=profile_verified,
                 diagnostic_directory=diagnostic_directory,
                 cycles=tuple(cycles),
+                telemetry=_failure_telemetry_from_ingestion(result),
             )
         try:
             with connect_database(db_path, read_only=True) as connection:
@@ -186,15 +247,19 @@ def smoke_bookmaker(
                     raw_directory=raw_dir,
                     snapshot_id=result.snapshot_id,
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - convert to fixed smoke failure
             return _failed_smoke(
                 provider_id=provider_id,
                 sport=sport,
-                reason=f"snapshot-verification-failed:{exc}",
+                reason="snapshot-verification-failed",
                 profile_id=profile_id,
                 profile_verified=profile_verified,
                 diagnostic_directory=diagnostic_directory,
                 cycles=tuple(cycles),
+                telemetry=_failure_telemetry_from_ingestion(
+                    result,
+                    stage_override="snapshot-admission-failure",
+                ),
             )
         if (
             not loaded.verified
@@ -210,6 +275,10 @@ def smoke_bookmaker(
                 profile_verified=profile_verified,
                 diagnostic_directory=diagnostic_directory,
                 cycles=tuple(cycles),
+                telemetry=_failure_telemetry_from_ingestion(
+                    result,
+                    stage_override="snapshot-admission-failure",
+                ),
             )
         event_ids_with_quotes = {
             quote.identity.canonical_event_id
@@ -224,6 +293,10 @@ def smoke_bookmaker(
                 profile_verified=profile_verified,
                 diagnostic_directory=diagnostic_directory,
                 cycles=tuple(cycles),
+                telemetry=_failure_telemetry_from_ingestion(
+                    result,
+                    stage_override="snapshot-admission-failure",
+                ),
             )
         cycles.append(
             SmokeCycleResult(
@@ -322,7 +395,7 @@ def evaluate_fake_session_smoke(
     profile_id: str | None,
     valid_quote_count: int | None = None,
     snapshot_verified: bool = True,
-    snapshot_reused_second_cycle: bool = True,
+    snapshot_reused_second_cycle: bool | None = True,
 ) -> SmokeResult:
     """Evaluate smoke criteria from injected test evidence without live browser."""
     quotes = markets_with_odds if valid_quote_count is None else valid_quote_count
@@ -356,10 +429,12 @@ def evaluate_fake_session_smoke(
                 events_extracted=events_extracted,
                 supported_market_count=markets_with_odds,
                 valid_quote_count=quotes,
-                snapshot_id=("snap-test-1" if snapshot_reused_second_cycle else "snap-test-2"),
-                snapshot_checksum=("a" * 64 if snapshot_reused_second_cycle else "b" * 64),
+                snapshot_id=(
+                    "snap-test-2" if snapshot_reused_second_cycle is False else "snap-test-1"
+                ),
+                snapshot_checksum=("b" * 64 if snapshot_reused_second_cycle is False else "a" * 64),
                 snapshot_verified=True,
-                snapshot_reused=snapshot_reused_second_cycle,
+                snapshot_reused=snapshot_reused_second_cycle is True,
                 observed_at_utc="2026-07-26T12:01:00Z",
                 duration_seconds=1.0,
             ),
@@ -391,6 +466,41 @@ def evaluate_fake_session_smoke(
         cycles=cycles,
         diagnostic_relative_path="smoke-fake-session.json",
         acceptance_summary=redact_structure(summary),
+        failure_telemetry=None,
+    )
+
+
+def _failure_telemetry_from_ingestion(
+    result: BookmakerIngestionResult,
+    *,
+    stage_override: str | None = None,
+) -> SmokeFailureTelemetry:
+    status = result.status if result.status in _SAFE_INGESTION_STATUSES else "failed"
+    block_reason = result.block_reason if result.block_reason in _SAFE_BLOCK_REASONS else None
+    if stage_override is not None:
+        stage = stage_override
+    elif status == "blocked":
+        stage = "blocked-acquisition"
+    elif result.response_observation_count == 0:
+        stage = "no-provider-response"
+    elif result.recognized_profile_response_count == 0:
+        stage = "no-recognized-profile-response"
+    elif result.events_observed == 0:
+        stage = "recognized-response-zero-events"
+    elif result.valid_quotes_observed == 0:
+        stage = "parsed-events-zero-supported-quotes"
+    else:
+        stage = "snapshot-admission-failure"
+    return SmokeFailureTelemetry(
+        ingestion_status=status,
+        response_observation_count=result.response_observation_count,
+        recognized_profile_response_count=result.recognized_profile_response_count,
+        events_observed=result.events_observed,
+        valid_quotes_observed=result.valid_quotes_observed,
+        snapshot_created=result.snapshot_id is not None,
+        blocked=status == "blocked",
+        block_reason=block_reason,
+        failure_stage=stage,
     )
 
 
@@ -403,6 +513,7 @@ def _failed_smoke(
     profile_verified: bool,
     diagnostic_directory: str | Path | None,
     cycles: tuple[SmokeCycleResult, ...] = (),
+    telemetry: SmokeFailureTelemetry | None = None,
 ) -> SmokeResult:
     summary = {
         "provider": provider_id,
@@ -410,6 +521,7 @@ def _failed_smoke(
         "failure_reason": reason,
         "profile_id": profile_id,
         "profile_verified": profile_verified,
+        "failure_telemetry": None if telemetry is None else asdict(telemetry),
     }
     artifact = _write_smoke_artifact(
         provider_id=provider_id,
@@ -420,6 +532,7 @@ def _failed_smoke(
         profile_verified=profile_verified,
         cycles=cycles,
         acceptance_summary=summary,
+        failure_telemetry=telemetry,
         diagnostic_directory=diagnostic_directory,
     )
     return SmokeResult(
@@ -432,6 +545,7 @@ def _failed_smoke(
         cycles=cycles,
         diagnostic_relative_path=artifact,
         acceptance_summary=redact_structure(summary),
+        failure_telemetry=telemetry,
     )
 
 
@@ -445,6 +559,7 @@ def _write_smoke_artifact(
     profile_verified: bool,
     cycles: tuple[SmokeCycleResult, ...],
     acceptance_summary: dict[str, Any],
+    failure_telemetry: SmokeFailureTelemetry | None = None,
     diagnostic_directory: str | Path | None,
 ) -> str:
     output_dir = resolve_diagnostic_directory(diagnostic_directory)
@@ -459,6 +574,7 @@ def _write_smoke_artifact(
         "profile_verified": profile_verified,
         "cycles": [asdict(item) for item in cycles],
         "acceptance_summary": redact_structure(acceptance_summary),
+        "failure_telemetry": (None if failure_telemetry is None else asdict(failure_telemetry)),
     }
     publish_diagnostic_json(path, payload)
     return filename

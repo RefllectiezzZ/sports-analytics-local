@@ -143,6 +143,7 @@ def test_structural_drift_missing_top_events() -> None:
         captures=(),
     )
     assert result.adapter_contract_payloads == ()
+    assert result.recognized_response_count == 0
     assert (
         "no-topeventsv2-payload" in result.drift_codes
         or "topeventsv2-rejected" in result.drift_codes
@@ -179,6 +180,7 @@ def test_pipeline_produces_prematch_events_without_invented_rules() -> None:
         sport="football",
     )
     assert len(bundle.events) == 2
+    assert bundle.recognized_profile_response_count == 1
     for event in bundle.events:
         assert len(event.participants) == 2
         for market in event.markets:
@@ -326,6 +328,8 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
     assert first.snapshot_id is not None
     assert first.events_observed >= 2
     assert first.valid_quotes_observed >= 2
+    assert first.response_observation_count == 1
+    assert first.recognized_profile_response_count == 1
 
     service_2 = BookmakerIngestionService(
         database_path=tmp_path / "db.sqlite3",

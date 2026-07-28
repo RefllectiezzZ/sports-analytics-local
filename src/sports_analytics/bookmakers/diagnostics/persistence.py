@@ -117,16 +117,23 @@ def _scan_string(
         parsed = urlsplit(stripped)
     except ValueError:
         _reject(path, "malformed-url-like-string")
+    url_like = (
+        bool(parsed.scheme)
+        or bool(parsed.netloc)
+        or parsed.username is not None
+        or parsed.password is not None
+        or stripped.startswith(("/", "www."))
+    )
+    if url_like and parsed.query:
+        _reject(path, "url-query-string")
+    if url_like and parsed.fragment:
+        _reject(path, "url-fragment")
     if parsed.scheme:
         _reject(path, "url-with-scheme")
     if parsed.netloc:
         _reject(path, "url-with-network-location")
     if parsed.username is not None or parsed.password is not None:
         _reject(path, "url-embedded-credentials")
-    if parsed.query:
-        _reject(path, "url-query-string")
-    if parsed.fragment:
-        _reject(path, "url-fragment")
 
 
 def publish_diagnostic_json(path: Path, payload: Any) -> None:

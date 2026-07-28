@@ -89,6 +89,7 @@ class BetanoFootballTopEventsV2Profile:
         warnings: list[str] = []
         drift_codes: list[str] = []
         evidence_times: list[datetime] = []
+        recognized_response_count = 0
 
         for response in browser_result.responses:
             try:
@@ -99,6 +100,7 @@ class BetanoFootballTopEventsV2Profile:
                 continue
             if not looks_like_topeventsv2(raw):
                 continue
+            recognized_response_count += 1
             try:
                 translated = translate_topeventsv2(
                     raw,
@@ -150,6 +152,7 @@ class BetanoFootballTopEventsV2Profile:
                 adapter_contract_payloads=(),
                 drift_codes=tuple(sorted(set(drift_codes))),
                 warnings=tuple(warnings),
+                recognized_response_count=recognized_response_count,
             )
 
         # Deterministic evidence timestamp policy: latest contributing response.
@@ -160,6 +163,7 @@ class BetanoFootballTopEventsV2Profile:
             adapter_contract_payloads=tuple(payloads),
             drift_codes=tuple(sorted(set(drift_codes))),
             warnings=tuple(warnings),
+            recognized_response_count=recognized_response_count,
         )
 
 

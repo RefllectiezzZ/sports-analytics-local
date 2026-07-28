@@ -194,6 +194,8 @@ class BookmakerIngestionService:
             )
             raise PermanentJobError(str(exc)) from exc
 
+        response_observation_count = len(browser_result.responses)
+        recognized_profile_response_count = bundle.recognized_profile_response_count
         _checkpoint()
         block_reason = browser_result.block_reason
         if block_reason is not None:
@@ -231,6 +233,8 @@ class BookmakerIngestionService:
                 rejected_markets=0,
                 warnings=tuple(warnings),
                 drift_codes=(),
+                response_observation_count=response_observation_count,
+                recognized_profile_response_count=recognized_profile_response_count,
             )
 
         _checkpoint()
@@ -313,6 +317,8 @@ class BookmakerIngestionService:
                 rejected_markets=len(normalized.unknown_markets),
                 warnings=admission.warnings,
                 drift_codes=tuple(bundle.drift_codes),
+                response_observation_count=response_observation_count,
+                recognized_profile_response_count=recognized_profile_response_count,
             )
 
         _checkpoint()
@@ -451,6 +457,8 @@ class BookmakerIngestionService:
             rejected_markets=len(normalized.unknown_markets),
             warnings=tuple(warning_codes),
             drift_codes=tuple(bundle.drift_codes),
+            response_observation_count=response_observation_count,
+            recognized_profile_response_count=recognized_profile_response_count,
         )
 
     def _acquire(

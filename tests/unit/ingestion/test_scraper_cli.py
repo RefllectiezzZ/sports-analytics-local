@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -290,6 +291,41 @@ def test_scraper_validate_config_still_works(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert "configuration valid" in result.stdout
     assert not (tmp_path / "storage").exists()
+
+
+def test_scraper_smoke_unknown_telemetry_is_consistently_null(tmp_path: Path) -> None:
+    config = tmp_path / "settings.toml"
+    config.write_text(
+        '[application]\nenvironment = "test"\n'
+        "[logging]\nfile_enabled = false\n"
+        "[bookmakers]\nenabled = true\n",
+        encoding="utf-8",
+    )
+    diagnostics = tmp_path / "diagnostics"
+    result = _run_scraper(
+        tmp_path,
+        "--config",
+        str(config),
+        "--smoke-bookmaker",
+        "--provider",
+        "betclic-pt",
+        "--sport",
+        "football",
+        "--duration-seconds",
+        "5",
+        "--diagnostic-directory",
+        str(diagnostics),
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["failure_reason"] == "no-verified-extraction-profile"
+    assert payload["failure_telemetry"] is None
+    assert payload["acceptance_summary"]["failure_telemetry"] is None
+    persisted = json.loads(
+        (diagnostics / payload["diagnostic_relative_path"]).read_text(encoding="utf-8")
+    )
+    assert persisted["failure_telemetry"] is None
+    assert persisted["acceptance_summary"]["failure_telemetry"] is None
 
 
 def test_scraper_enqueue_invalid_competition_creates_no_side_effects(tmp_path: Path) -> None:
