@@ -130,7 +130,18 @@ def test_collect_probe_from_acquisition_writes_gitignored_path(
                 response_url="https://www.betano.pt/api/events",
                 observed_at_utc=NOW,
                 content_type="application/json",
-                body_text='{"events":[{"id":"1"}]}',
+                body_text=json.dumps(
+                    {
+                        "events": [
+                            {
+                                "id": "synthetic-id-123",
+                                "name": "Synthetic Team Alpha",
+                                "imageUrl": "https://private.example.test/team.png",
+                            }
+                        ],
+                        "source_uri": "https://private.example.test/feed?token=fake",
+                    }
+                ),
                 status_code=200,
                 warnings=(),
             ),
@@ -152,6 +163,15 @@ def test_collect_probe_from_acquisition_writes_gitignored_path(
     payload = json.loads(artifact.read_text(encoding="utf-8"))
     assert "C:\\" not in json.dumps(payload)
     assert payload["responses"][0]["structural_fingerprint"]
+    assert payload["responses"][0]["sanitized_sample"] == {
+        "root_kind": "object",
+        "top_level_key_count": 2,
+        "sample_truncated": False,
+    }
+    encoded = json.dumps(payload, sort_keys=True)
+    assert "Synthetic Team Alpha" not in encoded
+    assert "synthetic-id-123" not in encoded
+    assert "private.example.test" not in encoded
 
 
 def test_fake_session_positive_smoke() -> None:

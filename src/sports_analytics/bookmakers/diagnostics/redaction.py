@@ -38,9 +38,9 @@ def redact_structure(value: Any, *, depth: int = 0) -> Any:
 
 
 def sanitize_sample_payload(payload: dict[str, Any], *, maximum_keys: int = 20) -> dict[str, Any]:
-    """Return a minimized sanitized structural sample."""
-    redacted = redact_structure(payload)
-    if not isinstance(redacted, dict):
-        return {"sample": redacted}
-    keys = sorted(redacted)[:maximum_keys]
-    return {key: redacted[key] for key in keys}
+    """Return a fixed, value-free summary of one JSON object."""
+    return {
+        "root_kind": "object",
+        "top_level_key_count": min(len(payload), maximum_keys),
+        "sample_truncated": len(payload) > maximum_keys,
+    }
