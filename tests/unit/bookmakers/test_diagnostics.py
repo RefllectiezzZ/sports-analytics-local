@@ -228,6 +228,54 @@ def test_zero_event_smoke_failure() -> None:
     assert result.succeeded is False
 
 
+def test_repeated_smoke_runs_use_distinct_acquisition_cycle_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    service = MagicMock()
+    service.ingest.return_value = _ingestion_result(
+        status="unavailable",
+        responses=0,
+        recognized=0,
+        events=0,
+        quotes=0,
+    )
+    output = tmp_path / "diagnostics"
+    kwargs = {
+        "provider_id": "betano-pt",
+        "sport": "football",
+        "duration_seconds": 5,
+        "diagnostic_directory": output,
+        "database_path": tmp_path / "operational.sqlite3",
+        "raw_directory": tmp_path / "raw",
+        "snapshots_directory": tmp_path / "snapshots",
+        "session": MagicMock(),
+        "extraction_profile": SimpleNamespace(
+            profile_id="betano-pt-football-topeventsv2-v1",
+            verified=True,
+        ),
+        "clock": lambda: NOW,
+        "service": service,
+    }
+
+    smoke_bookmaker(**kwargs)
+    smoke_bookmaker(**kwargs)
+
+    first_id = service.ingest.call_args_list[0].kwargs["acquisition_cycle_id"]
+    second_id = service.ingest.call_args_list[1].kwargs["acquisition_cycle_id"]
+
+    assert first_id != second_id
+    assert len(first_id) == 18
+    assert len(second_id) == 18
+    assert first_id.startswith("s")
+    assert second_id.startswith("s")
+    assert first_id.endswith("1")
+    assert second_id.endswith("1")
+    assert all(character in "0123456789abcdef" for character in first_id[1:17])
+    assert all(character in "0123456789abcdef" for character in second_id[1:17])
+
+
 def _assert_unknown_failure_telemetry_is_consistently_null(
     *,
     result: SmokeResult,

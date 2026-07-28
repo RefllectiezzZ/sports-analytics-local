@@ -96,16 +96,16 @@ def _scan_string(
     value_without_markers = value
     for marker in _SAFE_REDACTION_MARKERS:
         value_without_markers = value_without_markers.replace(marker, "")
+    stripped = value_without_markers.strip()
+    if not stripped:
+        return
+    if parent_key == "hostname" and _is_bare_hostname(stripped):
+        return
     if scan_secret and _SECRET_MATERIAL.search(value_without_markers):
         _reject(path, "secret-like-string")
     if _AUTHORIZATION_VALUE.search(value_without_markers):
         _reject(path, "authorization-looking-string")
-    stripped = value_without_markers.strip()
-    if not stripped:
-        return
     if parent_key == "approved_path_template" and _is_static_path_template(stripped):
-        return
-    if parent_key == "hostname" and _is_bare_hostname(stripped):
         return
     if _EMBEDDED_SCHEME_URL.search(stripped):
         _reject(path, "embedded-url-with-scheme")

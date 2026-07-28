@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from sports_analytics.bookmakers.diagnostics.paths import resolve_diagnostic_directory
 from sports_analytics.bookmakers.diagnostics.persistence import publish_diagnostic_json
@@ -181,6 +182,7 @@ def smoke_bookmaker(
         session=browser_session,
     )
 
+    smoke_run_id = uuid4().hex
     cycles: list[SmokeCycleResult] = []
     for cycle_number in range(1, _REQUIRED_CYCLES + 1):
         if clock_fn() > deadline:
@@ -194,7 +196,7 @@ def smoke_bookmaker(
                 cycles=tuple(cycles),
             )
         cycle_started = time.monotonic()
-        cycle_id = f"smoke-{provider_id}-{sport}-{cycle_number}"
+        cycle_id = f"s{smoke_run_id[:16]}{cycle_number}"
         try:
             result = ingestion.ingest(
                 provider_id=provider_id,

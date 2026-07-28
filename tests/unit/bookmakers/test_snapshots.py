@@ -17,6 +17,7 @@ from sports_analytics.bookmakers.schemas import bookmaker_snapshot_suite
 from sports_analytics.bookmakers.snapshots import (
     build_bookmaker_snapshot_spec,
     build_bookmaker_source_version,
+    parse_bookmaker_source_version,
     prepare_bookmaker_snapshot,
     publish_bookmaker_snapshot,
 )
@@ -26,7 +27,7 @@ from sports_analytics.bookmakers.types import (
 )
 from sports_analytics.core.exceptions import RepositoryError, SnapshotVerificationError
 from sports_analytics.data.migrations import ensure_database_ready
-from sports_analytics.data.types import SnapshotStatus
+from sports_analytics.data.types import SnapshotStatus, validate_identifier
 from sports_analytics.snapshots.reader import verify_snapshot_directory
 from sports_analytics.snapshots.spec import MANIFEST_FILENAME
 from sports_analytics.snapshots.writer import discard_prepared_snapshot
@@ -67,6 +68,26 @@ def _source_version(cycle: str) -> str:
         acquisition_cycle_id=cycle,
         raw_sha256="a" * 64,
     )
+
+
+def test_smoke_cycle_source_version_round_trips_within_identifier_bound() -> None:
+    smoke_run_id = "0123456789abcdef0123456789abcdef"
+    cycle_number = 1
+    acquisition_cycle_id = f"s{smoke_run_id[:16]}{cycle_number}"
+    raw_sha256 = "a" * 64
+
+    source_version = build_bookmaker_source_version(
+        sport_code="football",
+        acquisition_cycle_id=acquisition_cycle_id,
+        raw_sha256=raw_sha256,
+    )
+
+    assert validate_identifier(source_version, field_name="source_version") == source_version
+    assert len(source_version) <= 128
+    parsed = parse_bookmaker_source_version(source_version)
+    assert parsed.sport_code == "football"
+    assert parsed.acquisition_cycle_id == acquisition_cycle_id
+    assert parsed.raw_sha256 == raw_sha256
 
 
 def test_build_bookmaker_snapshot_spec_validation() -> None:

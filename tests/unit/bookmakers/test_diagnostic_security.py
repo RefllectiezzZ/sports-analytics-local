@@ -215,6 +215,27 @@ def test_malicious_key_content_is_never_in_error() -> None:
     assert "access_token" not in message
 
 
+def test_valid_hostname_may_contain_secret_like_structural_word() -> None:
+    scan_diagnostic_payload({"hostname": "session-cdn.example.test"})
+    scan_diagnostic_payload({"hostname": "token-routing.example.test"})
+
+
+def test_non_hostname_secret_like_string_remains_rejected() -> None:
+    with pytest.raises(UnsafeDiagnosticError, match="secret-like-string"):
+        scan_diagnostic_payload({"summary": "session token material"})
+
+
+def test_hostname_field_does_not_allow_url_or_credentials() -> None:
+    unsafe_values = (
+        "https://session-cdn.example.test/path",
+        "fake-user:fake-pass@session-cdn.example.test",
+        "session-cdn.example.test/path",
+    )
+    for value in unsafe_values:
+        with pytest.raises(UnsafeDiagnosticError):
+            scan_diagnostic_payload({"hostname": value})
+
+
 def test_safe_metadata_publication_has_no_complete_url(tmp_path: Path) -> None:
     target = tmp_path / "diagnostic.json"
     payload = {
