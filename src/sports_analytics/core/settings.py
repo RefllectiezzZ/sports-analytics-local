@@ -372,6 +372,87 @@ class ModellingSettings(_FrozenModel):
     minimum_training_samples: int = Field(default=100, gt=0)
 
 
+class BookmakerProviderSettings(_FrozenModel):
+    """Per-provider bookmaker acquisition cadence settings."""
+
+    enabled: bool = True
+    acquisition_interval_seconds: int = Field(default=300, ge=300)
+    initial_delay_seconds: int = Field(default=30, ge=0)
+    blocked_cooldown_seconds: int = Field(default=900, ge=300)
+
+    @field_validator(
+        "acquisition_interval_seconds",
+        "initial_delay_seconds",
+        "blocked_cooldown_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_provider_seconds(cls, value: object) -> object:
+        if isinstance(value, bool):
+            msg = "bookmaker provider timing settings must not be boolean"
+            raise ValueError(msg)
+        if isinstance(value, str):
+            try:
+                value = int(value, 10)
+            except ValueError as exc:
+                msg = "bookmaker provider timing settings must be integers"
+                raise ValueError(msg) from exc
+        return value
+
+
+class BookmakersSettings(_FrozenModel):
+    """Bookmaker acquisition, selection, and browser-mode settings."""
+
+    enabled: bool = False
+    preferred_provider: str = "betano-pt"
+    comparison_provider: str = "betclic-pt"
+    selection_mode: str = "preferred-unless-better"
+    browser_mode: Literal["visible", "visible-minimized"] = "visible"
+    quote_maximum_age_seconds: int = Field(default=300, ge=1)
+    betano: BookmakerProviderSettings = Field(default_factory=BookmakerProviderSettings)
+    betclic: BookmakerProviderSettings = Field(default_factory=BookmakerProviderSettings)
+
+    @field_validator("preferred_provider", "comparison_provider")
+    @classmethod
+    def _non_empty_provider(cls, value: str) -> str:
+        if not value:
+            msg = "bookmakers provider identifiers must be non-empty"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("selection_mode")
+    @classmethod
+    def _supported_selection_mode(cls, value: str) -> str:
+        from sports_analytics.bookmakers.types import SelectionMode
+
+        allowed = {mode.value for mode in SelectionMode}
+        if value not in allowed:
+            msg = f"bookmakers.selection_mode must be one of {sorted(allowed)}, got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("quote_maximum_age_seconds", mode="before")
+    @classmethod
+    def _normalize_quote_age(cls, value: object) -> object:
+        if isinstance(value, bool):
+            msg = "bookmakers.quote_maximum_age_seconds must not be boolean"
+            raise ValueError(msg)
+        if isinstance(value, str):
+            try:
+                value = int(value, 10)
+            except ValueError as exc:
+                msg = "bookmakers.quote_maximum_age_seconds must be an integer"
+                raise ValueError(msg) from exc
+        return value
+
+    @model_validator(mode="after")
+    def _validate_bookmakers_relations(self) -> Self:
+        if self.preferred_provider == self.comparison_provider:
+            msg = "bookmakers.preferred_provider and bookmakers.comparison_provider must differ"
+            raise ValueError(msg)
+        return self
+
+
 class Settings(_FrozenModel):
     """Complete immutable application configuration."""
 
@@ -381,6 +462,7 @@ class Settings(_FrozenModel):
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
     scraping: ScrapingSettings = Field(default_factory=ScrapingSettings)
     modelling: ModellingSettings = Field(default_factory=ModellingSettings)
+    bookmakers: BookmakersSettings = Field(default_factory=BookmakersSettings)
 
 
 def deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:

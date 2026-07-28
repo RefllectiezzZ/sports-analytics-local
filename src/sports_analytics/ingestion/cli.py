@@ -6,6 +6,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
+from sports_analytics.bookmakers import cli_ops as bookmaker_cli
 from sports_analytics.core.cli import CONFIG_ERROR_EXIT, SUCCESS_EXIT, handle_common_modes
 from sports_analytics.core.cli import build_argument_parser as build_common_argument_parser
 from sports_analytics.core.exceptions import (
@@ -76,6 +77,47 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enqueue one ingest.football-data-csv job (worker performs download).",
     )
+    mode.add_argument(
+        "--list-bookmaker-sports",
+        action="store_true",
+        help="List supported bookmaker sports as JSON.",
+    )
+    mode.add_argument(
+        "--list-bookmaker-markets",
+        action="store_true",
+        help="List supported bookmaker market definition ids as JSON.",
+    )
+    mode.add_argument(
+        "--enqueue-bookmaker-acquisition",
+        action="store_true",
+        help="Enqueue one ingest.bookmaker-current-odds job.",
+    )
+    mode.add_argument(
+        "--provider-status",
+        action="store_true",
+        help="List bookmaker provider operational status as JSON.",
+    )
+    mode.add_argument(
+        "--list-bookmaker-snapshots",
+        action="store_true",
+        help="List registered bookmaker snapshots as JSON (relative paths only).",
+    )
+    mode.add_argument(
+        "--verify-bookmaker-snapshot",
+        metavar="SNAPSHOT_ID",
+        default=None,
+        help="Verify a registered bookmaker snapshot summary read-only.",
+    )
+    mode.add_argument(
+        "--probe-bookmaker",
+        action="store_true",
+        help="Run a visible localhost structural probe for one bookmaker provider.",
+    )
+    mode.add_argument(
+        "--smoke-bookmaker",
+        action="store_true",
+        help="Run a bounded localhost smoke test for one bookmaker provider.",
+    )
     parser.add_argument(
         "--competition",
         default=None,
@@ -95,6 +137,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Optional content-addressed raw artifact hash for reprocessing.",
     )
     parser.add_argument(
+        "--provider",
+        default=None,
+        metavar="PROVIDER_ID",
+        help="Bookmaker provider id for acquisition/markets/snapshots modes.",
+    )
+    parser.add_argument(
+        "--sport",
+        default=None,
+        metavar="SPORT",
+        help="Bookmaker sport for acquisition/snapshots modes.",
+    )
+    parser.add_argument(
         "--priority",
         default=None,
         metavar="INTEGER",
@@ -104,7 +158,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--maximum-attempts",
         default=None,
         metavar="INTEGER",
-        help="Optional maximum attempts (default 3).",
+        help="Optional maximum attempts (default depends on job type).",
+    )
+    parser.add_argument(
+        "--duration-seconds",
+        default=None,
+        metavar="INTEGER",
+        help="Bounded duration for --probe-bookmaker or --smoke-bookmaker.",
+    )
+    parser.add_argument(
+        "--diagnostic-directory",
+        default=None,
+        metavar="PATH",
+        help="Local-only diagnostic output directory (git-ignored by default).",
     )
     return parser
 
@@ -134,6 +200,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.enqueue_football_data:
             return _enqueue(args)
 
+        if args.list_bookmaker_sports:
+            return bookmaker_cli.list_bookmaker_sports()
+
+        if args.list_bookmaker_markets:
+            return bookmaker_cli.list_bookmaker_markets(provider=args.provider)
+
+        if args.provider_status:
+            return bookmaker_cli.provider_status(config=args.config, env_file=args.env_file)
+
+        if args.list_bookmaker_snapshots:
+            return bookmaker_cli.list_bookmaker_snapshots(
+                config=args.config,
+                env_file=args.env_file,
+                provider=args.provider,
+                sport=args.sport,
+            )
+
+        if args.verify_bookmaker_snapshot is not None:
+            return bookmaker_cli.verify_bookmaker_snapshot(
+                config=args.config,
+                env_file=args.env_file,
+                snapshot_id=args.verify_bookmaker_snapshot,
+            )
+
+        if args.enqueue_bookmaker_acquisition:
+            return bookmaker_cli.enqueue_bookmaker_acquisition_cli(
+                config=args.config,
+                env_file=args.env_file,
+                provider=args.provider,
+                sport=args.sport,
+                priority=args.priority,
+                maximum_attempts=args.maximum_attempts,
+            )
+
+        if args.probe_bookmaker:
+            return bookmaker_cli.probe_bookmaker_cli(
+                provider=args.provider,
+                sport=args.sport,
+                duration_seconds=args.duration_seconds,
+                diagnostic_directory=args.diagnostic_directory,
+            )
+
+        if args.smoke_bookmaker:
+            return bookmaker_cli.smoke_bookmaker_cli(
+                config=args.config,
+                env_file=args.env_file,
+                provider=args.provider,
+                sport=args.sport,
+                duration_seconds=args.duration_seconds,
+                diagnostic_directory=args.diagnostic_directory,
+            )
+
         parser.error("select a scraper mode such as --list-competitions or --enqueue-football-data")
         return CONFIG_ERROR_EXIT
     except (
@@ -156,6 +274,14 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.list_snapshots,
         args.verify_snapshot is not None,
         args.enqueue_football_data,
+        args.list_bookmaker_sports,
+        args.list_bookmaker_markets,
+        args.enqueue_bookmaker_acquisition,
+        args.provider_status,
+        args.list_bookmaker_snapshots,
+        args.verify_bookmaker_snapshot is not None,
+        args.probe_bookmaker,
+        args.smoke_bookmaker,
     ]
     if sum(1 for enabled in scraper_modes if enabled) > 1:
         parser.error("scraper modes are mutually exclusive")
@@ -170,12 +296,38 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             args.maximum_attempts,
         )
     )
-    if common and (any(scraper_modes) or enqueue_args):
+    bookmaker_args = any(value is not None for value in (args.provider, args.sport))
+    if common and (any(scraper_modes) or enqueue_args or bookmaker_args):
         parser.error("scraper modes cannot be combined with shared CLI modes")
-    if enqueue_args and not args.enqueue_football_data:
-        parser.error("enqueue arguments require --enqueue-football-data")
+    if enqueue_args and not args.enqueue_football_data and not args.enqueue_bookmaker_acquisition:
+        parser.error(
+            "enqueue arguments require --enqueue-football-data or --enqueue-bookmaker-acquisition"
+        )
     if args.enqueue_football_data and (args.competition is None or args.season is None):
         parser.error("--enqueue-football-data requires --competition and --season")
+    if args.enqueue_bookmaker_acquisition and (args.provider is None or args.sport is None):
+        parser.error("--enqueue-bookmaker-acquisition requires --provider and --sport")
+    if args.probe_bookmaker and (args.provider is None or args.sport is None):
+        parser.error("--probe-bookmaker requires --provider and --sport")
+    if args.smoke_bookmaker and (args.provider is None or args.sport is None):
+        parser.error("--smoke-bookmaker requires --provider and --sport")
+    if args.sport is not None and not (
+        args.enqueue_bookmaker_acquisition
+        or args.list_bookmaker_snapshots
+        or args.probe_bookmaker
+        or args.smoke_bookmaker
+    ):
+        parser.error("--sport requires a bookmaker acquisition, probe, smoke, or snapshots mode")
+    if args.provider is not None and not (
+        args.enqueue_bookmaker_acquisition
+        or args.list_bookmaker_markets
+        or args.list_bookmaker_snapshots
+        or args.probe_bookmaker
+        or args.smoke_bookmaker
+    ):
+        parser.error(
+            "--provider requires a bookmaker markets, acquisition, probe, smoke, or snapshots mode"
+        )
 
 
 def _validate_enqueue_arguments(args: argparse.Namespace) -> tuple[str, str, str | None, int, int]:

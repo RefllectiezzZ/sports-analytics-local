@@ -25,6 +25,13 @@ EXPECTED_SOURCE_LINE = (
     "football-data-co-uk-adapter-v1\t"
     "historical-odds,historical-results,historical-statistics\tfootball"
 )
+EXPECTED_SOURCE_LINES = (
+    "betano-pt\tBetano Portugal\tbookmaker\tbetano-pt-adapter-v1\t"
+    "current-fixtures,current-odds\tbasketball,football,tennis",
+    "betclic-pt\tBetclic Portugal\tbookmaker\tbetclic-pt-adapter-v1\t"
+    "current-fixtures,current-odds\tbasketball,football,tennis",
+    EXPECTED_SOURCE_LINE,
+)
 
 
 @pytest.mark.parametrize(("module_name", "script", "snippet"), ENTRY_POINTS)
@@ -118,10 +125,10 @@ def test_normal_placeholder_execution(
         assert "streamlit interface ready" in captured.out.lower()
     elif module_name == "scraper":
         source_lines = captured.out.splitlines()
-        assert source_lines == [EXPECTED_SOURCE_LINE]
+        assert source_lines == list(EXPECTED_SOURCE_LINES)
         assert len(source_lines[0].split("\t")) == 6
-        assert "betclic" not in captured.out.lower()
-        assert "betano" not in captured.out.lower()
+        assert "betclic-pt" in captured.out.lower()
+        assert "betano-pt" in captured.out.lower()
         assert not (isolated_cwd / "storage").exists()
         return
     elif module_name == "worker":

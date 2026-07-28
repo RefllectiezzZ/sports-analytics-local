@@ -147,6 +147,7 @@ dmypy.json
 storage/**/*
 !storage/**/
 !storage/**/.gitkeep
+storage/local/**
 
 # Generated exports outside storage (if any)
 /exports/

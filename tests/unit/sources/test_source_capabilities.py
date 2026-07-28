@@ -45,7 +45,9 @@ def test_source_descriptors_are_listed_in_deterministic_identifier_order() -> No
     assert descriptors is list_source_descriptors()
     assert names == tuple(sorted(names))
     assert names == tuple(descriptor.source_id for descriptor in descriptors)
-    assert names == (SOURCE_FOOTBALL_DATA_CO_UK,)
+    assert SOURCE_FOOTBALL_DATA_CO_UK in names
+    assert "betano-pt" in names
+    assert "betclic-pt" in names
 
 
 def test_football_data_declares_only_historical_capabilities() -> None:
@@ -92,14 +94,17 @@ def test_require_capability_raises_for_undeclared_capability(
 
 
 @pytest.mark.parametrize("source_id", ["betclic", "betano"])
-def test_bookmaker_sources_are_not_registered(source_id: str) -> None:
+def test_legacy_bookmaker_aliases_are_not_registered(source_id: str) -> None:
     with pytest.raises(PermanentSourceError, match="unsupported source_id"):
         get_source_descriptor(source_id)
 
 
-@pytest.mark.parametrize("capability", CURRENT_CAPABILITIES)
-def test_no_source_provides_current_market_capabilities(capability: SourceCapability) -> None:
-    assert list_sources_with_capability(capability) == ()
+def test_bookmaker_providers_provide_current_market_capabilities() -> None:
+    current_odds = list_sources_with_capability(SourceCapability.CURRENT_ODDS)
+    current_fixtures = list_sources_with_capability(SourceCapability.CURRENT_FIXTURES)
+    assert {item.source_id for item in current_odds} == {"betano-pt", "betclic-pt"}
+    assert {item.source_id for item in current_fixtures} == {"betano-pt", "betclic-pt"}
+    assert list_sources_with_capability(SourceCapability.SETTLEMENT_RESULTS) == ()
 
 
 def test_sources_with_historical_odds_capability_is_football_data() -> None:

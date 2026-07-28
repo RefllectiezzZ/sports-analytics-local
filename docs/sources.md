@@ -40,11 +40,19 @@ Only implemented adapters appear in the catalog.
 | source_id | display_name | role | adapter_version | capabilities | sports |
 | --- | --- | --- | --- | --- | --- |
 | `football-data-co-uk` | Football-Data.co.uk | `historical-data` | `football-data-co-uk-adapter-v1` | `historical-odds`, `historical-results`, `historical-statistics` | `football` |
+| `betano-pt` | Betano Portugal | `bookmaker` | `betano-pt-adapter-v1` | `current-fixtures`, `current-odds` | `basketball`, `football`, `tennis` |
+| `betclic-pt` | Betclic Portugal | `bookmaker` | `betclic-pt-adapter-v1` | `current-fixtures`, `current-odds` | `basketball`, `football`, `tennis` |
 
-No Betclic source and no Betano source is registered, because no bookmaker or
-current-odds adapter exists. Adding one would mean a new descriptor with role
-`bookmaker` and the `current-odds` capability, not a change to the
-Football-Data.co.uk ingestion adapter.
+Betano/Betclic adapters acquire only allowlisted public HTTPS routes through a
+visible Playwright Chromium session. They do not accept arbitrary URLs, do not
+log in, do not place bets, and do not bypass CAPTCHA or anti-bot controls.
+Blocked pages stop the acquisition attempt and are classified explicitly.
+Offline synthetic fixtures under `tests/fixtures/betano/` and
+`tests/fixtures/betclic/` drive parser tests without live pages.
+
+Live browser acquisition is best-effort and not guaranteed to keep working as
+provider sites change. Operators remain responsible for reviewing current
+provider terms before enabling acquisition.
 
 `scraper.py --list-sources` prints one tab-separated descriptor line per adapter
 with no database or network access:
@@ -270,14 +278,13 @@ Policy ID: `football-data-co-uk-policy-v1`
 
 ### Current limitations
 
-- one ingestion adapter and one source;
-- two competitions only;
-- historical 1X2 is the only market a production adapter emits (a synthetic
-  totals fixture proves the contract generalizes, but no adapter produces it);
-- no current bookmaker prices, no current fixtures, and no settlement feed;
-- no HTML scraping and no browser automation;
-- no Betclic or Betano bookmaker adapter;
+- Football-Data.co.uk remains the historical CSV adapter (two competitions);
+- Betano/Betclic bookmaker adapters cover pre-match football, basketball, and
+  tennis current fixtures/odds only, with an exact initial market map;
+- no login, bet placement, CAPTCHA bypass, or arbitrary URL navigation;
+- live acquisition may break when provider pages change; offline fixtures prove
+  parser behaviour without claiming indefinite live success;
 - no cross-source fuzzy resolution: only exact canonical identity matching, with
   no silent alias merge;
-- no live-network CI dependency;
-- external website availability is required for real downloads.
+- no live-network CI dependency for offline unit tests;
+- external website availability is required for real bookmaker downloads.

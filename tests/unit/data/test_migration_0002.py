@@ -25,7 +25,7 @@ CHECKSUM_0002 = "94af0d6d9df740ac0c578c815015fe3981acfc48f5faa3cfb1ba3bc1a719b55
 
 def test_migration_0002_discovered_with_expected_checksum() -> None:
     migrations = discover_migrations()
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5]
     assert migrations[0].checksum == CHECKSUM_0001
     assert migrations[1].filename == "0002_worker_runtime.sql"
     assert migrations[1].name == "worker_runtime"
@@ -44,7 +44,7 @@ def test_migration_0002_discovered_with_expected_checksum() -> None:
 def test_fresh_schema_contains_worker_runtime_objects(tmp_path: Path) -> None:
     db = tmp_path / "ops.sqlite3"
     readiness = ensure_database_ready(db)
-    assert readiness.schema_version == 4
+    assert readiness.schema_version == 5
 
     with connect_database(db, read_only=True) as connection:
         tables = {

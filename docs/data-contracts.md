@@ -594,12 +594,16 @@ Implemented now:
 - generic prediction, complete-market value, opportunity, combination, and
   backtesting contracts;
 - Football-Data closing market-average historical singles benchmark;
-- worker job integration (`ingest.football-data-csv` in the frozen default
-  registry);
-- snapshot listing and verification through `scraper.py`.
+- worker job integration (`ingest.football-data-csv` and
+  `ingest.bookmaker-current-odds` in the frozen default registry);
+- snapshot listing and verification through `scraper.py`;
+- Betano/Betclic bookmaker observation contracts, exact market mappings,
+  selection policy, same-bookmaker multiples, and `current-bookmaker-odds`
+  snapshots.
 
-Not implemented: Betclic; Betano; current bookmaker prices; browser scraping or
-automation; additional sports; markets beyond production 1X2 plus the synthetic
-contract proof; current-price production opportunities and accumulators;
-operational settlement; bankroll; Streamlit UI; live automatic bet builder;
-cross-source fuzzy resolution.
+Not implemented: login/bet placement; CAPTCHA or anti-bot bypass; guaranteed
+indefinite live browser acquisition; additional sports beyond the initial
+bookmaker pre-match scope; markets beyond the initial exact mappings plus
+historical Football-Data 1X2; current-price production opportunity UI
+accumulators; operational bookmaker settlement; bankroll; live automatic bet
+builder; cross-source fuzzy resolution.

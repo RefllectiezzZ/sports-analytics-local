@@ -1,0 +1,14 @@
+{
+  "schema": "betclic-unexpected-schema-v9",
+  "events": [
+    {
+      "not": "an-event"
+    }
+  ],
+  "unknown_markets": [
+    {
+      "label": "mystery-market",
+      "id": "x1"
+    }
+  ]
+}

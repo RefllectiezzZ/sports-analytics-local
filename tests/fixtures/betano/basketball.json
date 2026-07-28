@@ -1,0 +1,103 @@
+{
+  "schema": "betano-fixture-bundle-v1",
+  "events": [
+    {
+      "source_event_id": "betano-evt-basketball-1",
+      "source_competition_id": "betano-bball-liga",
+      "competition_display_name": "Synthetic Basketball Liga",
+      "sport": "basketball",
+      "scheduled_start_utc": "2026-08-16T19:30:00Z",
+      "event_state": "pre-match",
+      "source_page_route_id": "basketball-prematch",
+      "participants": [
+        {
+          "source_participant_id": "betano-team-riverton",
+          "display_name": "Riverton Hawks",
+          "role": "home",
+          "normalized_name": "riverton hawks"
+        },
+        {
+          "source_participant_id": "betano-team-oakvale",
+          "display_name": "Oakvale Wolves",
+          "role": "away",
+          "normalized_name": "oakvale wolves"
+        }
+      ],
+      "markets": [
+        {
+          "source_market_id": "betano-mkt-winner",
+          "display_label": "Match Winner",
+          "market_status": "open",
+          "period": "full-match",
+          "overtime_scope": "overtime-included",
+          "canonical_market_definition_id": "basketball-match-winner-with-ot",
+          "selections": [
+            {
+              "source_selection_id": "betano-sel-home",
+              "display_label": "Home",
+              "decimal_odds": "1.70",
+              "selection_status": "active"
+            },
+            {
+              "source_selection_id": "betano-sel-away",
+              "display_label": "Away",
+              "decimal_odds": "2.15",
+              "selection_status": "active"
+            }
+          ]
+        },
+        {
+          "source_market_id": "betano-mkt-points",
+          "display_label": "Total Points",
+          "market_status": "open",
+          "period": "full-match",
+          "line": "165.5",
+          "overtime_scope": "overtime-included",
+          "canonical_market_definition_id": "basketball-total-points-with-ot",
+          "selections": [
+            {
+              "source_selection_id": "betano-sel-over",
+              "display_label": "Over",
+              "decimal_odds": "1.91",
+              "selection_status": "active",
+              "line": "165.5"
+            },
+            {
+              "source_selection_id": "betano-sel-under",
+              "display_label": "Under",
+              "decimal_odds": "1.91",
+              "selection_status": "active",
+              "line": "165.5"
+            }
+          ]
+        },
+        {
+          "source_market_id": "betano-mkt-spread",
+          "display_label": "Spread",
+          "market_status": "open",
+          "period": "full-match",
+          "line": "-3.5",
+          "overtime_scope": "overtime-included",
+          "canonical_market_definition_id": "basketball-spread-with-ot",
+          "selections": [
+            {
+              "source_selection_id": "betano-sel-spread-home",
+              "display_label": "Home -3.5",
+              "decimal_odds": "1.88",
+              "selection_status": "active",
+              "line": "-3.5"
+            },
+            {
+              "source_selection_id": "betano-sel-spread-away",
+              "display_label": "Away +3.5",
+              "decimal_odds": "1.94",
+              "selection_status": "active",
+              "line": "3.5"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "unknown_markets": []
+}

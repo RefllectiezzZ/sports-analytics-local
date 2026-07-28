@@ -27,6 +27,7 @@ from sports_analytics.data.cli import (
 
 SUCCESS_EXIT: Final[int] = 0
 CONFIG_ERROR_EXIT: Final[int] = 2
+FAILURE_EXIT: Final[int] = 1
 
 _PLACEHOLDER_MESSAGES: Final[dict[str, str]] = {
     "app": "Streamlit interface ready; launch it with `streamlit run app.py`.",

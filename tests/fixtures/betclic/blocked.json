@@ -1,0 +1,9 @@
+{
+  "schema": "betclic-fixture-bundle-v1",
+  "events": [],
+  "unknown_markets": [],
+  "page_signals": {
+    "title": "Security Check",
+    "body_text": "Please complete the captcha to continue"
+  }
+}

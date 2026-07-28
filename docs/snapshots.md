@@ -2,7 +2,8 @@
 
 Ingestion publishes immutable multi-file Parquet snapshots with a canonical JSON
 manifest and SQLite operational metadata. The snapshot layer is sport-agnostic;
-football ingestion is its only current caller.
+current callers include football historical ingestion and bookmaker
+`current-bookmaker-odds` publication.
 
 ## Sport-agnostic snapshot contracts
 
@@ -286,15 +287,41 @@ returns exit code `2` for verification failures without a traceback.
 - HTTP retrieval may occur more than once after an ambiguous crash.
 - The project does not claim exactly-once job execution.
 
+## Bookmaker current-odds snapshots
+
+Snapshot type: `current-bookmaker-odds`  
+Schema version: `bookmaker-canonical-v1`  
+Partition key: `sport`
+
+```text
+storage/snapshots/current-bookmaker-odds/bookmaker-canonical-v1/<sport>/<snapshot-uuid>/
+    acquisition_metadata.parquet
+    provider_status.parquet
+    source_participants.parquet
+    participant_reconciliations.parquet
+    source_events.parquet
+    event_reconciliations.parquet
+    canonical_events.parquet
+    market_quotes.parquet
+    parser_drift_findings.parquet
+    comparison_eligibility.parquet
+    manifest.json
+```
+
+Publication follows the same READY / reuse / verification rules as football
+ingestion. Stale last-valid snapshots may be referenced after provider failure
+but must never be labelled current.
+
 ## Implementation status
 
 Implemented now: generic snapshot specifications and dataset suites; the
 enforced snapshot/sport import boundary; deterministic Parquet writing;
 `snapshot-manifest-v2` construction and hostile-input validation; publication,
 READY reuse, BUILDING recovery, and bounded orphan adoption; snapshot listing and
-verification through `scraper.py`; the football ingestion suite as the only
-registered snapshot contract.
+verification through `scraper.py`; football ingestion and bookmaker
+`current-bookmaker-odds` suites.
 
-Not implemented: additional sports or snapshot types; feature, model, prediction,
-or backtesting snapshots; snapshot compaction, retention, or garbage collection;
-stale-BUILDING ownership takeover.
+Not implemented: additional sports or snapshot types beyond the registered
+suites; feature/model snapshot types as first-class snapshot-suite citizens
+outside their dedicated artifact stores; snapshot compaction, retention, or
+garbage collection; stale-BUILDING ownership takeover.

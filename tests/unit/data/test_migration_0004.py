@@ -21,17 +21,19 @@ EXPECTED_PREVIOUS = {
 
 def test_migration_0004_is_next_and_previous_checksums_unchanged() -> None:
     migrations = discover_migrations()
-    assert [item.version for item in migrations] == [1, 2, 3, 4]
+    assert [item.version for item in migrations] == [1, 2, 3, 4, 5]
     assert {item.version: item.checksum for item in migrations[:3]} == EXPECTED_PREVIOUS
     assert migrations[3].filename == "0004_settlement_monitoring_governance.sql"
     assert migrations[3].checksum == hashlib.sha256(migrations[3].sql_text.encode()).hexdigest()
+    assert migrations[4].filename == "0005_bookmaker_acquisition.sql"
+    assert migrations[4].checksum == hashlib.sha256(migrations[4].sql_text.encode()).hexdigest()
 
 
 def test_empty_database_upgrade_and_repeated_application(tmp_path) -> None:
     database = tmp_path / "operational.sqlite3"
     first = ensure_database_ready(database)
     second = ensure_database_ready(database)
-    assert first.schema_version == second.schema_version == 4
+    assert first.schema_version == second.schema_version == 5
     assert second.migrations_applied == ()
     with connect_database(database, read_only=True) as connection:
         tables = {
@@ -48,18 +50,22 @@ def test_empty_database_upgrade_and_repeated_application(tmp_path) -> None:
         "model_registry_entries",
         "promotion_decisions",
         "model_role_transitions",
+        "bookmaker_acquisition_runs",
+        "bookmaker_provider_status",
+        "bookmaker_snapshot_registrations",
+        "bookmaker_scheduler_cycles",
     } <= tables
 
 
-def test_pre_pr_schema_version_3_upgrades_only_migration_0004(tmp_path) -> None:
+def test_pre_pr_schema_version_3_upgrades_through_bookmaker_acquisition(tmp_path) -> None:
     database = tmp_path / "operational.sqlite3"
     migrations = discover_migrations()
     version_3 = apply_migrations(database, migrations=migrations[:3])
     upgraded = apply_migrations(database, migrations=migrations)
     assert version_3.schema_version == 3
     assert upgraded.previous_version == 3
-    assert upgraded.schema_version == 4
-    assert [item.version for item in upgraded.migrations_applied] == [4]
+    assert upgraded.schema_version == 5
+    assert [item.version for item in upgraded.migrations_applied] == [4, 5]
 
 
 def test_foreign_keys_and_one_champion_scope(tmp_path) -> None:

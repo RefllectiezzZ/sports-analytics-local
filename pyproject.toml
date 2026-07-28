@@ -29,6 +29,7 @@ dependencies = [
   "pydantic-settings",
   "python-dotenv",
   "scikit-learn",
+  "playwright",
 ]
 
 [project.optional-dependencies]

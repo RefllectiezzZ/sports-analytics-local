@@ -3,16 +3,17 @@
 This document describes the architecture for `sports-analytics-local`.
 
 The repository currently provides packaging, typed configuration, local runtime
-bootstrap, SQLite operational persistence, migrations, durable local job worker
-infrastructure, a worker-only local supervisor, one Football-Data.co.uk ingestion
-adapter that publishes immutable Parquet snapshots, sport-agnostic canonical data
-contracts, a leakage-safe football full-match 1X2 modelling pipeline (features,
-rolling-origin validation, temperature calibration, and pickle-free artifacts),
-documentation, generic prediction/value/opportunity/combination/backtesting
-contracts, a football closing-line historical singles benchmark, and quality
-tooling, plus a read-only Streamlit interface over verified typed analysis and
-backtest artifacts. Live prices, betting recommendations, and production
-combinations are **not** implemented.
+bootstrap, SQLite operational persistence, migrations through `0005`, durable
+local job worker infrastructure, a local supervisor that can start the bookmaker
+scheduler, Football-Data.co.uk ingestion that publishes immutable Parquet
+snapshots, Betano/Betclic bookmaker acquisition for current pre-match odds,
+sport-agnostic canonical data contracts, a leakage-safe football full-match 1X2
+modelling pipeline, documentation, generic prediction/value/opportunity/
+combination/backtesting contracts, a football closing-line historical singles
+benchmark, and quality tooling, plus a read-only Streamlit interface over
+verified typed analysis and backtest artifacts. Login, bet placement, CAPTCHA
+bypass, and guaranteed indefinite live browser acquisition are **not**
+implemented.
 
 ## Entry points
 
@@ -22,7 +23,7 @@ combinations are **not** implemented.
 | `scraper.py` | Coordinates data ingestion from permitted public sources. |
 | `engine.py` | Coordinates feature generation, prediction, and combination generation. |
 | `worker.py` | Executes durable background jobs outside the Streamlit process. |
-| `run_local.py` | Supervises the local worker child process. |
+| `run_local.py` | Supervises the local worker and optional bookmaker scheduler. |
 
 Each root script supports shared configuration and database modes:
 `--validate-config`, `--database-status`, and `--migrate-database`. The worker
@@ -343,12 +344,32 @@ Implemented:
 
 Explicitly **not** implemented yet:
 
-- Betclic and Betano adapters;
-- current bookmaker prices, current fixtures, and settlement feeds;
-- browser scraping or automation;
-- additional sports;
-- markets beyond production 1X2 plus the synthetic contract proof;
-- production current-price opportunity discovery and accumulators;
+- login, bet placement, CAPTCHA/anti-bot bypass, or guaranteed indefinite live
+  browser acquisition against changing provider sites;
+- additional sports beyond the initial football/basketball/tennis pre-match
+  bookmaker scope;
+- markets beyond the initial exact canonical bookmaker mappings plus historical
+  Football-Data 1X2;
+- production current-price opportunity discovery UI accumulators;
 - bookmaker settlement, staking, and bankroll management;
 - cross-source fuzzy resolution;
 - Streamlit child process spawning in `run_local.py`.
+
+## Bookmaker acquisition
+
+PR #11 adds a localhost-only bookmaker acquisition path:
+
+- Fixed public HTTPS routes for `betano-pt` and `betclic-pt` only.
+- Visible Playwright Chromium sessions (no headless production scraping).
+- Content-addressed minimized raw captures and immutable
+  `current-bookmaker-odds` snapshots (`bookmaker-canonical-v1`).
+- Betano preferred / Betclic comparison selection with auditable reason codes.
+- Same-bookmaker multiple invariant; mixed-provider singles comparison is a
+  separate type and never a multiple.
+- Explicit fallback: Betclic first; stale last-valid snapshot may be preserved
+  but never labelled current; no third-party fallback enabled by default.
+- Durable job `ingest.bookmaker-current-odds`, local scheduler, and migration
+  `0005` operational tables.
+
+Operators must review current provider terms before enabling
+`bookmakers.enabled`.

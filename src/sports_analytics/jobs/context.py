@@ -13,7 +13,8 @@ from sports_analytics.core.exceptions import JobLeaseError, WorkerShutdownError
 
 if TYPE_CHECKING:
     from sports_analytics.core.runtime import RuntimeContext
-    from sports_analytics.core.settings import ScrapingSettings
+    from sports_analytics.core.settings import BookmakersSettings, ScrapingSettings
+    from sports_analytics.sources.browser.playwright_runtime import BrowserSession
     from sports_analytics.sources.http import HttpTransport, MonotonicClock, Sleeper
 
 
@@ -46,6 +47,9 @@ class JobExecutionContext:
     _exports_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
     _models_directory: Path | None = field(default=None, init=False, repr=False, compare=False)
     _scraping: ScrapingSettings | None = field(default=None, init=False, repr=False, compare=False)
+    _bookmakers: BookmakersSettings | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
     _http_transport: HttpTransport | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -54,6 +58,9 @@ class JobExecutionContext:
     )
     _sleeper: Sleeper | None = field(default=None, init=False, repr=False, compare=False)
     _clock: Any = field(default=None, init=False, repr=False, compare=False)
+    _browser_session: BrowserSession | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def checkpoint(self) -> None:
         """Raise if the worker should stop or the job lease has been lost."""
@@ -88,6 +95,7 @@ class JobExecutionContext:
         object.__setattr__(self, "_exports_directory", runtime.paths.exports_directory)
         object.__setattr__(self, "_models_directory", runtime.paths.models_directory)
         object.__setattr__(self, "_scraping", runtime.settings.scraping)
+        object.__setattr__(self, "_bookmakers", runtime.settings.bookmakers)
 
     def bind_test_dependencies(
         self,
@@ -96,9 +104,11 @@ class JobExecutionContext:
         monotonic_clock: MonotonicClock | None = None,
         sleeper: Sleeper | None = None,
         clock: Any = None,
+        browser_session: BrowserSession | None = None,
     ) -> None:
         """Attach injectable transport/clock dependencies for tests."""
         object.__setattr__(self, "_http_transport", transport)
         object.__setattr__(self, "_monotonic_clock", monotonic_clock)
         object.__setattr__(self, "_sleeper", sleeper)
         object.__setattr__(self, "_clock", clock)
+        object.__setattr__(self, "_browser_session", browser_session)
