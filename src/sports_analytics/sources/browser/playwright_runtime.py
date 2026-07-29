@@ -8,6 +8,7 @@ fingerprint rotation, CAPTCHA solving, and credential automation are forbidden.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 from uuid import uuid4
 
 from sports_analytics.core.exceptions import (
@@ -144,6 +145,110 @@ def sanitized_path_hash(url: str) -> str:
     """Return SHA-256 of the URL path only (no query/fragment/host)."""
     path = urlparse(url).path or "/"
     return hashlib.sha256(path.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class SafeWebSocketEndpoint:
+    """Sanitized metadata for an approved public WSS connection."""
+
+    hostname: str
+    sanitized_path_hash: str
+
+
+def classify_safe_websocket_url(
+    url: str,
+    *,
+    allowed_hostnames: frozenset[str],
+) -> SafeWebSocketEndpoint:
+    """Validate one WSS URL without retaining its query, fragment, or full text."""
+    try:
+        split = urlsplit(url)
+        # Accessing port performs urllib's strict numeric/range validation.
+        port = split.port
+    except ValueError as exc:
+        msg = "WebSocket URL is malformed"
+        raise PermanentSourceError(msg) from exc
+    if split.scheme != "wss":
+        msg = "WebSocket metadata requires wss"
+        raise PermanentSourceError(msg)
+    if port not in {None, 443}:
+        msg = "WebSocket URL port is not approved"
+        raise PermanentSourceError(msg)
+    if split.username is not None or split.password is not None:
+        msg = "WebSocket URL credentials are forbidden"
+        raise PermanentSourceError(msg)
+    hostname = split.hostname
+    if hostname is None:
+        msg = "WebSocket URL hostname is required"
+        raise PermanentSourceError(msg)
+    try:
+        hostname.encode("ascii", errors="strict")
+    except UnicodeEncodeError as exc:
+        msg = "WebSocket URL hostname must be ASCII"
+        raise PermanentSourceError(msg) from exc
+    normalized = hostname.casefold().rstrip(".")
+    approved_hosts = {item.casefold().rstrip(".") for item in allowed_hostnames}
+    if normalized not in approved_hosts:
+        msg = "WebSocket URL hostname is not approved"
+        raise PermanentSourceError(msg)
+    if normalized in {"localhost"} or normalized.endswith(".localhost"):
+        msg = "WebSocket URL localhost targets are forbidden"
+        raise PermanentSourceError(msg)
+    try:
+        address = ipaddress.ip_address(normalized.strip("[]"))
+    except ValueError:
+        address = None
+    if address is not None and (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        msg = "WebSocket URL private targets are forbidden"
+        raise PermanentSourceError(msg)
+    path = split.path or "/"
+    return SafeWebSocketEndpoint(
+        hostname=normalized,
+        sanitized_path_hash=hashlib.sha256(path.encode("utf-8")).hexdigest(),
+    )
+
+
+def build_websocket_metadata(
+    *,
+    socket_url: str,
+    allowed_hostnames: frozenset[str],
+    observed_at_utc: datetime,
+    provider_id: str,
+    sport: str,
+    acquisition_cycle_id: str,
+    page_route_id: str,
+) -> BrowserNetworkMetadata:
+    """Build metadata-only evidence for an approved WSS connection."""
+    safe = classify_safe_websocket_url(
+        socket_url,
+        allowed_hostnames=allowed_hostnames,
+    )
+    return BrowserNetworkMetadata(
+        hostname=safe.hostname,
+        resource_type="websocket",
+        status_code=None,
+        content_type=None,
+        byte_size=None,
+        sanitized_path_hash=safe.sanitized_path_hash,
+        structural_fingerprint=None,
+        hostname_approved=True,
+        candidate_keys_detected=False,
+        body_captured=False,
+        observed_at_utc=observed_at_utc,
+        provider_id=provider_id,
+        sport=sport,
+        acquisition_cycle_id=acquisition_cycle_id,
+        page_route_id=page_route_id,
+        request_method="GET",
+        transport_type=BrowserTransportType.WEBSOCKET,
+        body_capture_state=BrowserBodyCaptureState.METADATA_ONLY,
+    )
 
 
 def top_level_keys_fingerprint(payload: dict[str, Any]) -> str:
@@ -996,22 +1101,16 @@ class PlaywrightBrowserSession:
                         """Retain connection metadata only; never read frames."""
                         try:
                             socket_url = str(getattr(socket, "url", ""))
-                            meta = build_network_metadata(
-                                response_url=socket_url,
+                            meta = build_websocket_metadata(
+                                socket_url=socket_url,
                                 allowed_hostnames=allowed_hostnames,
-                                status_code=None,
-                                content_type=None,
-                                resource_type="websocket",
                                 observed_at_utc=self._clock(),
                                 provider_id=provider_id,
                                 sport=sport,
                                 acquisition_cycle_id=acquisition_cycle_id,
                                 page_route_id=current_route_id,
-                                request_method="GET",
-                                body_capture_state=(BrowserBodyCaptureState.METADATA_ONLY),
                             )
-                            if meta is not None:
-                                network_metadata.append(meta)
+                            network_metadata.append(meta)
                         except PermanentSourceError:
                             return
 

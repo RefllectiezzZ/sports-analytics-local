@@ -147,9 +147,11 @@ event cap is 100. Refresh cadence controls how often acquisition runs; the
 event horizon independently controls which scheduled events are admitted.
 
 `bookmaker-native-v2` snapshots preserve typed provider-native events, markets,
-selections, prices, lines, statuses, capture references, and explicit
-completeness counts before canonical projection. Unknown markets are retained
-in native inventory and are never silently comparable. Existing
+selections (including explicitly unpriced or suspended observations), nullable
+prices with a typed price state, lines, statuses, exact capture references, and
+explicit completeness counts before canonical projection. Unknown markets and
+valid unpriced selections are retained in native inventory and are never
+silently comparable. Existing
 `bookmaker-canonical-v1` snapshots remain loadable without changing their
 contract.
 
@@ -159,13 +161,18 @@ explicitly incapable of proving exhaustive event-detail coverage. Betano
 basketball/tennis and all Betclic sport profiles remain disabled until real
 event-detail structures and stable identities are evidenced. A landing or
 popular-event response is always `unknown-completeness`, never exhaustive.
+The provider-neutral Stage-B planner/executor extension is wired into the
+production adapter call chain but disabled for every current provider/sport
+profile. Its end-to-end traversal test uses only a synthetic capability and
+executor; it does not establish operational event-detail extraction.
 This PR establishes the acquisition foundation but does not provide exhaustive
 live provider support.
 
 The default body limit is 2 MiB per response and 16 MiB per cycle. Oversize or
 exhausted-budget responses are explicit partial evidence. Event-detail traversal
-is designed for concurrency one, a fixed one-second minimum interval between
-navigations, a 30-second navigation timeout, and zero in-cycle retries. An
+is bounded by a concurrency-one, fixed one-second minimum interval, 30-second
+navigation-timeout, zero-retry contract if a reviewed provider profile is later
+enabled; no current profile enables that path. An
 explicit access denial, CAPTCHA, regional refusal, or anti-automation block
 stops the cycle immediately.
 

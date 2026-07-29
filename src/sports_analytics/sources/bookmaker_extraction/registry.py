@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from sports_analytics.bookmakers.navigation import (
+    DisabledStageBNavigationCapability,
+    StageBNavigationCapability,
+)
 from sports_analytics.sources.betano.catalog import PROVIDER_ID as BETANO_PROVIDER_ID
+from sports_analytics.sources.betclic.catalog import PROVIDER_ID as BETCLIC_PROVIDER_ID
 from sports_analytics.sources.bookmaker_extraction.betano_topeventsv2 import (
     BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
 )
@@ -38,6 +43,12 @@ _VERIFIED_PROFILES: dict[tuple[str, str], ExtractionProfile] = {
     (BETANO_PROVIDER_ID, "football"): BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
 }
 
+_CURRENT_PROVIDER_SPORTS = frozenset(
+    (provider_id, sport)
+    for provider_id in (BETANO_PROVIDER_ID, BETCLIC_PROVIDER_ID)
+    for sport in ("football", "basketball", "tennis")
+)
+
 
 def get_verified_extraction_profile(
     provider_id: str,
@@ -57,3 +68,16 @@ def get_verified_extraction_profile(
         if registered_provider == provider_id
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def get_stage_b_navigation_capability(
+    provider_id: str,
+    sport: str,
+) -> StageBNavigationCapability:
+    """Return an exact disabled-by-default Stage-B capability.
+
+    No current provider/sport has reviewed event-detail navigation evidence.
+    """
+    if (provider_id, sport) not in _CURRENT_PROVIDER_SPORTS:
+        return DisabledStageBNavigationCapability(provider_id=provider_id, sport=sport)
+    return DisabledStageBNavigationCapability(provider_id=provider_id, sport=sport)

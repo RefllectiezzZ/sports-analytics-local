@@ -56,6 +56,26 @@ def test_navigation_plan_filters_orders_bounds_and_hashes_paths() -> None:
     assert all(len(target.path_hash_sha256) == 64 for target in plan.targets)
 
 
+def test_navigation_plan_fails_closed_instead_of_truncating_eligible_events() -> None:
+    with pytest.raises(PermanentSourceError, match="exceed"):
+        build_event_navigation_plan(
+            provider_id="provider-pt",
+            sport="football",
+            candidates=tuple(
+                EventNavigationCandidate(
+                    f"event-{suffix}",
+                    NOW + timedelta(hours=offset),
+                    f"https://www.provider.test/event/event-{suffix}",
+                )
+                for suffix, offset in (("a", 1), ("b", 2), ("c", 3))
+            ),
+            acquisition_window=_window(),
+            allowed_hostnames=frozenset({"www.provider.test"}),
+            approved_event_path_pattern=PATTERN,
+            approved_path_template="/event/{event-route-id}",
+        )
+
+
 @pytest.mark.parametrize(
     "url",
     [

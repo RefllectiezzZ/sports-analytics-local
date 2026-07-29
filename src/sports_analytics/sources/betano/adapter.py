@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from sports_analytics.bookmakers.navigation import (
+    NavigationPlanExecutor,
+    StageBNavigationCapability,
+)
 from sports_analytics.bookmakers.window import AcquisitionWindow, apply_acquisition_window
 from sports_analytics.core.exceptions import ParserError, PermanentSourceError
 from sports_analytics.sources.betano.catalog import (
@@ -20,7 +24,14 @@ from sports_analytics.sources.bookmaker_extraction.adapter_contract import load_
 from sports_analytics.sources.bookmaker_extraction.betano_topeventsv2 import looks_like_topeventsv2
 from sports_analytics.sources.bookmaker_extraction.contracts import ExtractionProfile
 from sports_analytics.sources.bookmaker_extraction.pipeline import apply_extraction_profile
-from sports_analytics.sources.bookmaker_extraction.registry import get_verified_extraction_profile
+from sports_analytics.sources.bookmaker_extraction.registry import (
+    get_stage_b_navigation_capability,
+    get_verified_extraction_profile,
+)
+from sports_analytics.sources.bookmaker_extraction.stage_b import (
+    execute_optional_stage_b,
+    merge_stage_a_and_b_results,
+)
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult, BrowserMode
 from sports_analytics.sources.browser.playwright_runtime import (
     BrowserSession,
@@ -41,6 +52,8 @@ def acquire_betano_current_odds(
     extraction_profile: ExtractionProfile | None = None,
     deadline_at_utc: datetime | None = None,
     acquisition_window: AcquisitionWindow | None = None,
+    stage_b_capability: StageBNavigationCapability | None = None,
+    stage_b_executor: NavigationPlanExecutor | None = None,
 ) -> tuple[BrowserAcquisitionResult, ProviderAcquisitionBundle, tuple[BookmakerRawCapture, ...]]:
     """Acquire Betano pre-match fixtures/odds via ordinary browser automation.
 
@@ -103,6 +116,46 @@ def acquire_betano_current_odds(
         observed_at_utc=evidence_observed_at,
         sport=sport,
     )
+    capability = stage_b_capability or get_stage_b_navigation_capability(PROVIDER_ID, sport)
+    stage_b_result = execute_optional_stage_b(
+        capability=capability,
+        stage_a_result=result,
+        stage_a_bundle=bundle,
+        acquisition_window=acquisition_window,
+        executor=stage_b_executor,
+    )
+    if stage_b_result is not None:
+        for response in stage_b_result.responses:
+            captures.append(
+                store.store_text(
+                    source_name=PROVIDER_ID,
+                    capture_kind="provider-json",
+                    content=response.body_text,
+                    retrieved_at=response.observed_at_utc,
+                    extension="json",
+                    maximum_bytes=maximum_capture_bytes,
+                    source_url=None,
+                )
+            )
+            try:
+                payload = load_json_payload(response.body_text)
+            except ParserError:
+                continue
+            if looks_like_topeventsv2(payload):
+                recognized_response_times.append(response.observed_at_utc)
+        result = merge_stage_a_and_b_results(result, stage_b_result)
+        evidence_observed_at = (
+            max(recognized_response_times) if recognized_response_times else observed_at_utc
+        )
+        bundle = apply_extraction_profile(
+            profile=profile,
+            browser_result=result,
+            captures=tuple(captures),
+            adapter_version=ADAPTER_VERSION,
+            parser_version=PARSER_VERSION,
+            observed_at_utc=evidence_observed_at,
+            sport=sport,
+        )
     if acquisition_window is not None:
         bundle = apply_acquisition_window(bundle, acquisition_window)
         assert isinstance(bundle, ProviderAcquisitionBundle)

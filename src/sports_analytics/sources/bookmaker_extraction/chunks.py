@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sports_analytics.core.exceptions import ParserError
 from sports_analytics.data.types import validate_identifier, validate_sha256_checksum
@@ -99,11 +99,31 @@ def merge_browser_observed_market_chunks(
     markets_by_id: dict[str, ProviderMarketObservation] = {}
     for chunk in unique_chunks:
         for market in chunk.markets:
-            existing_market = markets_by_id.get(market.source_market_id)
-            if existing_market is not None and existing_market != market:
+            checksum = chunk.contributing_capture_checksum
+            if market.source_capture_id not in {None, checksum}:
+                msg = "market capture checksum contradicts its source chunk"
+                raise ParserError(msg)
+            selections = []
+            for selection in market.selections:
+                if selection.source_capture_id not in {None, checksum}:
+                    msg = "selection capture checksum contradicts its source chunk"
+                    raise ParserError(msg)
+                selections.append(
+                    replace(
+                        selection,
+                        source_capture_id=selection.source_capture_id or checksum,
+                    )
+                )
+            bound_market = replace(
+                market,
+                selections=tuple(selections),
+                source_capture_id=checksum,
+            )
+            existing_market = markets_by_id.get(bound_market.source_market_id)
+            if existing_market is not None and existing_market != bound_market:
                 msg = "duplicate market identity carries conflicting chunk evidence"
                 raise ParserError(msg)
-            markets_by_id[market.source_market_id] = market
+            markets_by_id[bound_market.source_market_id] = bound_market
     ordered_markets = tuple(
         sorted(
             markets_by_id.values(),

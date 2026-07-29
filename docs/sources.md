@@ -56,7 +56,10 @@ the active Playwright page/context. Approved JSON is retained from the
 `page.on("response")` callback after bounded reading and reviewed structural
 classification. Betclic gRPC-Web bodies use the bounded envelope inspector only;
 field decoding remains disabled until real structures are proven. WebSocket
-connection metadata may be recorded, but frames are never captured.
+connection metadata is recorded only for `wss://` connections on the exact
+approved provider hostname; query and fragment material are discarded, and only
+the hostname, path hash, acquisition identity, transport, capture state, and
+observation time remain. Frames are never subscribed to or captured.
 
 Provider production modules do not use the repository's independent historical
 CSV HTTP transport. They do not use `requests`, `httpx`, Playwright
@@ -87,6 +90,12 @@ the rest of the product workflow.
 This PR establishes a browser-observed acquisition foundation, not exhaustive
 live provider support. Static route declarations and catalogued sports do not
 constitute verified extraction support.
+
+The provider-neutral Stage-B extension is production-wired but evidence-gated
+and disabled for Betano and Betclic football, basketball, and tennis. Synthetic
+offline tests prove planner/executor structure only; they are not evidence of a
+live provider path grammar, event-detail traversal, or multi-chunk provider
+extraction.
 
 Catalogued sports are not equivalent to verified extraction profiles. Profile
 lookup is keyed by exact provider and sport. The reviewed Betano football

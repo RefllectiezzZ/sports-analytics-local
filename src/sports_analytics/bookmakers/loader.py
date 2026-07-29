@@ -198,6 +198,7 @@ def load_bookmaker_snapshot(
             provider_id=provider_id,
             sport_code=sport_code,
             capture_checksums={entry.checksum_sha256 for entry in manifest.entries},
+            domain_metadata=result.domain_metadata,
         )
     event_count, quote_count, verified_by_observation, verified_by_semantic = (
         _verify_semantic_datasets(
@@ -277,6 +278,7 @@ def _verify_native_inventory(
     provider_id: str,
     sport_code: str,
     capture_checksums: set[str],
+    domain_metadata: dict[str, Any],
 ) -> tuple[int, int, int]:
     """Verify native event -> market -> selection graph and evidence linkage."""
     events = _read_dataset(snapshot_dir, DATASET_PROVIDER_NATIVE_EVENTS)
@@ -358,13 +360,25 @@ def _verify_native_inventory(
         capture_id = row.get("source_capture_id")
         if not isinstance(capture_id, str) or capture_id not in capture_checksums:
             raise SnapshotVerificationError("native row capture reference mismatch")
+    priced_selection_count = 0
     for row in selections:
-        try:
-            odds = Decimal(str(row.get("decimal_odds")))
-        except InvalidOperation as exc:
-            raise SnapshotVerificationError("native decimal odds malformed") from exc
-        if not odds.is_finite() or odds <= Decimal("1"):
-            raise SnapshotVerificationError("native decimal odds invalid")
+        price_state = str(row.get("price_state", ""))
+        odds_value = row.get("decimal_odds")
+        if price_state == "priced":
+            if odds_value is None:
+                raise SnapshotVerificationError("priced native selection is missing odds")
+            try:
+                odds = Decimal(str(odds_value))
+            except InvalidOperation as exc:
+                raise SnapshotVerificationError("native decimal odds malformed") from exc
+            if not odds.is_finite() or odds <= Decimal("1"):
+                raise SnapshotVerificationError("native decimal odds invalid")
+            priced_selection_count += 1
+        elif price_state == "unpriced":
+            if odds_value is not None:
+                raise SnapshotVerificationError("unpriced native selection carries odds")
+        else:
+            raise SnapshotVerificationError("native selection price state is invalid")
         _verify_optional_decimal(row.get("selection_line"), field_name="selection_line")
     for row in markets:
         _verify_optional_decimal(row.get("market_line"), field_name="market_line")
@@ -391,6 +405,17 @@ def _verify_native_inventory(
         raise SnapshotVerificationError(
             "provider-native selections are not deterministically ordered"
         )
+    expected_counts = {
+        "provider_native_event_count": len(events),
+        "provider_native_market_count": len(markets),
+        "provider_native_selection_count": len(selections),
+        "provider_native_priced_selection_count": priced_selection_count,
+        "provider_native_unpriced_selection_count": len(selections) - priced_selection_count,
+    }
+    for name, actual in expected_counts.items():
+        value = domain_metadata.get(name)
+        if type(value) is not int or value != actual:
+            raise SnapshotVerificationError(f"{name} metadata count mismatch")
     return len(events), len(markets), len(selections)
 
 

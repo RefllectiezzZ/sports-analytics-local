@@ -99,44 +99,63 @@ def attach_capture_references(
         msg = "capture references require a ProviderAcquisitionBundle"
         raise PermanentSourceError(msg)
     checksums = tuple(sorted({capture.checksum_sha256 for capture in captures}))
-    primary = checksums[0] if checksums else None
+    checksum_set = set(checksums)
+    sole_checksum = checksums[0] if len(checksums) == 1 else None
     events = []
     for event in bundle.events:
         markets = []
         selection_count = 0
         markets_with_price = 0
+        event_capture_ids: set[str] = set()
         for market in provider_native_markets(event):
-            selections = tuple(
-                replace(selection, source_capture_id=selection.source_capture_id or primary)
-                for selection in market.selections
-            )
-            selection_count += len(selections)
-            if selections:
+            market_capture_id = market.source_capture_id or sole_checksum
+            if market_capture_id is None or market_capture_id not in checksum_set:
+                msg = "multi-capture market provenance is missing or unknown"
+                raise PermanentSourceError(msg)
+            event_capture_ids.add(market_capture_id)
+            selections = []
+            for selection in market.selections:
+                selection_capture_id = selection.source_capture_id or sole_checksum
+                if selection_capture_id is None or selection_capture_id not in checksum_set:
+                    msg = "multi-capture selection provenance is missing or unknown"
+                    raise PermanentSourceError(msg)
+                event_capture_ids.add(selection_capture_id)
+                selections.append(replace(selection, source_capture_id=selection_capture_id))
+            typed_selections = tuple(selections)
+            selection_count += len(typed_selections)
+            if any(selection.decimal_odds is not None for selection in typed_selections):
                 markets_with_price += 1
             markets.append(
                 replace(
                     market,
-                    selections=selections,
-                    source_capture_id=market.source_capture_id or primary,
+                    selections=typed_selections,
+                    source_capture_id=market_capture_id,
                 )
             )
         evidence = event.completeness
-        if evidence.markets_observed == 0 and markets:
-            evidence = EventCompletenessEvidence(
-                provider_declared_market_references=(evidence.provider_declared_market_references),
-                market_groups_observed=evidence.market_groups_observed,
-                markets_observed=len(markets),
-                markets_parsed=len(markets),
-                selections_observed=selection_count,
-                selections_parsed=selection_count,
-                markets_with_valid_price=markets_with_price,
-                source_responses_contributing=len(checksums),
-                event_detail_surface_visited=evidence.event_detail_surface_visited,
-                event_detail_readiness_reached=evidence.event_detail_readiness_reached,
-                truncated_response_count=evidence.truncated_response_count,
-                bounded_response_rejection_count=evidence.bounded_response_rejection_count,
-                completeness_state=evidence.completeness_state,
-            )
+        evidence = EventCompletenessEvidence(
+            provider_declared_market_references=evidence.provider_declared_market_references,
+            market_groups_observed=evidence.market_groups_observed,
+            markets_observed=max(
+                evidence.markets_observed,
+                len(markets) + evidence.markets_rejected,
+            ),
+            markets_parsed=len(markets),
+            markets_rejected=evidence.markets_rejected,
+            selections_observed=max(
+                evidence.selections_observed,
+                selection_count + evidence.selections_rejected,
+            ),
+            selections_parsed=selection_count,
+            selections_rejected=evidence.selections_rejected,
+            markets_with_valid_price=markets_with_price,
+            source_responses_contributing=len(event_capture_ids),
+            event_detail_surface_visited=evidence.event_detail_surface_visited,
+            event_detail_readiness_reached=evidence.event_detail_readiness_reached,
+            truncated_response_count=evidence.truncated_response_count,
+            bounded_response_rejection_count=evidence.bounded_response_rejection_count,
+            completeness_state=evidence.completeness_state,
+        )
         events.append(
             replace(
                 event,
@@ -146,7 +165,7 @@ def attach_capture_references(
                     if market.canonical_market_definition_id is not None
                 ),
                 native_markets=tuple(markets),
-                source_capture_ids=checksums,
+                source_capture_ids=tuple(sorted(event_capture_ids)),
                 completeness=evidence,
             )
         )

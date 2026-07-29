@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 
+from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.sources.bookmaker_contracts import (
     CompletenessState,
     EventCompletenessEvidence,
@@ -52,6 +53,13 @@ def apply_extraction_profile(
             drift_codes=("no-verified-extraction-profile",),
             provenance=(),
         )
+    if (
+        profile.provider_id != browser_result.provider_id
+        or profile.sport != sport
+        or profile.sport != browser_result.sport
+    ):
+        msg = "extraction profile provider/sport mismatch"
+        raise PermanentSourceError(msg)
     extraction = profile.extract(browser_result=browser_result, captures=captures)
     return _bundle_from_extraction(
         extraction=extraction,

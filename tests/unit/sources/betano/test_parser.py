@@ -15,6 +15,7 @@ from sports_analytics.sources.betano.synthetic import parse_betano_synthetic_pay
 from sports_analytics.sources.bookmaker_contracts import (
     ProviderAcquisitionBundle,
     ProviderEventState,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
@@ -81,7 +82,7 @@ def test_suspended_market_preserved() -> None:
     assert market.market_status is MarketStatus.SUSPENDED
 
 
-def test_missing_odds_skipped_keeps_priced_selections() -> None:
+def test_missing_odds_preserves_typed_unpriced_selection() -> None:
     payload = _load("football.json")
     payload["events"][0]["markets"][0]["selections"][0]["decimal_odds"] = None
     bundle = _parse(payload)
@@ -90,8 +91,15 @@ def test_missing_odds_skipped_keeps_priced_selections() -> None:
         for item in bundle.events[0].markets
         if item.canonical_market_definition_id == "football-match-result-1x2"
     )
-    assert "betano-sel-home" not in {sel.source_selection_id for sel in market.selections}
-    assert len(market.selections) == 2
+    selections = {sel.source_selection_id: sel for sel in market.selections}
+    assert len(selections) == 3
+    assert selections["betano-sel-home"].decimal_odds is None
+    assert selections["betano-sel-home"].price_state is ProviderSelectionPriceState.UNPRICED
+    assert all(
+        selection.price_state is ProviderSelectionPriceState.PRICED
+        for source_id, selection in selections.items()
+        if source_id != "betano-sel-home"
+    )
 
 
 def test_duplicate_selection_identities_reject_event() -> None:

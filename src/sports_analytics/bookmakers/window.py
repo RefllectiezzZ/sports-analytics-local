@@ -220,31 +220,92 @@ def apply_acquisition_window(
     bundle: ProviderAcquisitionBundle,
     acquisition_window: AcquisitionWindow,
 ) -> ProviderAcquisitionBundle:
-    """Return a provider bundle with deterministic pre-match window admission.
+    """Return the bundle from strict, deterministic window admission."""
+    return apply_acquisition_window_with_counts(bundle, acquisition_window).bundle
 
-    The loose input annotation avoids a dependency cycle at module import time;
-    runtime validation remains exact.
-    """
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionWindowCounts:
+    """Exact reasons and counts produced by acquisition-window filtering."""
+
+    non_pre_match_excluded: int
+    before_window_excluded: int
+    at_or_after_window_end_excluded: int
+    eligible_events: int
+    admitted_events: int
+    event_limit_truncated: int
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionWindowApplication:
+    """Filtered bundle plus auditable window counters."""
+
+    bundle: ProviderAcquisitionBundle
+    counts: AcquisitionWindowCounts
+
+
+def apply_acquisition_window_with_counts(
+    bundle: ProviderAcquisitionBundle,
+    acquisition_window: AcquisitionWindow,
+) -> AcquisitionWindowApplication:
+    """Apply the half-open window and distinguish filtering from limit truncation."""
     from dataclasses import replace
 
-    from sports_analytics.sources.bookmaker_contracts import ProviderEventState
+    from sports_analytics.sources.bookmaker_contracts import (
+        CompletenessState,
+        ProviderEventState,
+    )
 
     if not isinstance(bundle, ProviderAcquisitionBundle):
         msg = "acquisition window requires a ProviderAcquisitionBundle"
         raise PermanentSourceError(msg)
-    admitted = tuple(
-        sorted(
-            (
-                event
-                for event in bundle.events
-                if event.event_state is ProviderEventState.PRE_MATCH
-                and acquisition_window.contains(event.scheduled_start_utc)
-            ),
-            key=lambda event: (event.scheduled_start_utc, event.source_event_id),
+    non_pre_match = 0
+    before_window = 0
+    at_or_after_end = 0
+    eligible = []
+    for event in bundle.events:
+        if event.event_state is not ProviderEventState.PRE_MATCH:
+            non_pre_match += 1
+        elif event.scheduled_start_utc < acquisition_window.window_start_utc:
+            before_window += 1
+        elif event.scheduled_start_utc >= acquisition_window.window_end_utc:
+            at_or_after_end += 1
+        else:
+            eligible.append(event)
+    ordered = tuple(
+        sorted(eligible, key=lambda event: (event.scheduled_start_utc, event.source_event_id))
+    )
+    truncated_count = max(0, len(ordered) - acquisition_window.maximum_events)
+    admitted = ordered[: acquisition_window.maximum_events]
+    if truncated_count:
+        admitted = tuple(
+            replace(
+                event,
+                completeness=replace(
+                    event.completeness,
+                    completeness_state=CompletenessState.PARTIAL_EVENT_LIMIT,
+                ),
+            )
+            for event in admitted
         )
-    )[: acquisition_window.maximum_events]
-    excluded = len(bundle.events) - len(admitted)
-    drift_codes = bundle.drift_codes
-    if excluded:
-        drift_codes = tuple(sorted(set((*drift_codes, "event-outside-window"))))
-    return replace(bundle, events=admitted, drift_codes=drift_codes)
+    reasons = set(bundle.drift_codes)
+    if non_pre_match:
+        reasons.add("non-prematch-event-excluded")
+    if before_window:
+        reasons.add("event-before-window")
+    if at_or_after_end:
+        reasons.add("event-at-or-after-window")
+    if truncated_count:
+        reasons.add("event-limit-truncated")
+    filtered = replace(bundle, events=admitted, drift_codes=tuple(sorted(reasons)))
+    return AcquisitionWindowApplication(
+        bundle=filtered,
+        counts=AcquisitionWindowCounts(
+            non_pre_match_excluded=non_pre_match,
+            before_window_excluded=before_window,
+            at_or_after_window_end_excluded=at_or_after_end,
+            eligible_events=len(ordered),
+            admitted_events=len(admitted),
+            event_limit_truncated=truncated_count,
+        ),
+    )

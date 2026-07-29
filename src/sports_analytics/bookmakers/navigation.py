@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from sports_analytics.bookmakers.window import AcquisitionWindow
@@ -15,6 +15,10 @@ from sports_analytics.data.types import validate_identifier
 from sports_analytics.sources.browser.limits import BrowserAcquisitionLimits
 from sports_analytics.sources.browser.safety import validate_provider_navigation_url
 from sports_analytics.sports.contracts import require_utc
+
+if TYPE_CHECKING:
+    from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
+    from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult
 
 MAX_EVENT_PATH_LENGTH = 500
 
@@ -47,7 +51,7 @@ class EventNavigationTarget:
     page_route_id: str
     approved_path_template: str
     path_hash_sha256: str
-    ephemeral_url: str
+    ephemeral_url: str = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
         validate_identifier(self.page_route_id, field_name="page_route_id")
@@ -59,6 +63,11 @@ class EventNavigationTarget:
         if not re.fullmatch(r"[0-9a-f]{64}", self.path_hash_sha256):
             msg = "path_hash_sha256 must be a lowercase SHA-256 digest"
             raise PermanentSourceError(msg)
+        object.__setattr__(
+            self,
+            "scheduled_start_utc",
+            require_utc(self.scheduled_start_utc, field_name="scheduled_start_utc"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +108,97 @@ class NavigationPlanExecutor(Protocol):
         """Traverse an approved plan and return typed browser evidence."""
 
 
+class StageBNavigationCapability(Protocol):
+    """Provider-owned, evidence-gated Stage-B planning extension."""
+
+    @property
+    def provider_id(self) -> str: ...
+
+    @property
+    def sport(self) -> str: ...
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def candidates(
+        self,
+        *,
+        stage_a_result: BrowserAcquisitionResult,
+        stage_a_bundle: ProviderAcquisitionBundle,
+    ) -> tuple[EventNavigationCandidate, ...]: ...
+
+    def build_plan(
+        self,
+        *,
+        candidates: tuple[EventNavigationCandidate, ...],
+        acquisition_window: AcquisitionWindow,
+    ) -> EventNavigationPlan: ...
+
+    def validate_target(self, target: EventNavigationTarget) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DisabledStageBNavigationCapability:
+    """Explicit disabled capability for profiles lacking reviewed Stage-B evidence."""
+
+    provider_id: str
+    sport: str
+    enabled: bool = False
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.provider_id, field_name="provider_id")
+        validate_identifier(self.sport, field_name="sport")
+
+    def candidates(
+        self,
+        *,
+        stage_a_result: BrowserAcquisitionResult,
+        stage_a_bundle: ProviderAcquisitionBundle,
+    ) -> tuple[EventNavigationCandidate, ...]:
+        del stage_a_result, stage_a_bundle
+        msg = "disabled Stage-B capability must not be invoked"
+        raise PermanentSourceError(msg)
+
+    def build_plan(
+        self,
+        *,
+        candidates: tuple[EventNavigationCandidate, ...],
+        acquisition_window: AcquisitionWindow,
+    ) -> EventNavigationPlan:
+        del candidates, acquisition_window
+        msg = "disabled Stage-B capability must not be invoked"
+        raise PermanentSourceError(msg)
+
+    def validate_target(self, target: EventNavigationTarget) -> None:
+        del target
+        msg = "disabled Stage-B capability must not be invoked"
+        raise PermanentSourceError(msg)
+
+
+def validate_event_navigation_target(
+    target: EventNavigationTarget,
+    *,
+    allowed_hostnames: frozenset[str],
+    approved_event_path_pattern: re.Pattern[str],
+) -> None:
+    """Revalidate ephemeral target material immediately before navigation."""
+    approved = validate_provider_navigation_url(
+        target.ephemeral_url,
+        allowed_hostnames=allowed_hostnames,
+    )
+    split = urlsplit(approved.url)
+    if split.username is not None or split.password is not None or split.query or split.fragment:
+        msg = "event navigation target contains forbidden URL components"
+        raise PermanentSourceError(msg)
+    if approved_event_path_pattern.fullmatch(split.path) is None:
+        msg = "event navigation target no longer matches reviewed grammar"
+        raise PermanentSourceError(msg)
+    digest = hashlib.sha256(split.path.encode("utf-8")).hexdigest()
+    if digest != target.path_hash_sha256:
+        msg = "event navigation target path hash mismatch"
+        raise PermanentSourceError(msg)
+
+
 def build_event_navigation_plan(
     *,
     provider_id: str,
@@ -110,14 +210,20 @@ def build_event_navigation_plan(
     approved_path_template: str,
 ) -> EventNavigationPlan:
     """Filter inventory candidates and approve provider-owned event paths."""
+    eligible = tuple(
+        candidate
+        for candidate in sorted(
+            candidates,
+            key=lambda item: (item.scheduled_start_utc, item.source_event_id),
+        )
+        if acquisition_window.contains(candidate.scheduled_start_utc)
+    )
+    if len(eligible) > acquisition_window.maximum_events:
+        msg = "event navigation candidates exceed acquisition maximum_events"
+        raise PermanentSourceError(msg)
     targets: list[EventNavigationTarget] = []
     seen: set[str] = set()
-    for candidate in sorted(
-        candidates,
-        key=lambda item: (item.scheduled_start_utc, item.source_event_id),
-    ):
-        if not acquisition_window.contains(candidate.scheduled_start_utc):
-            continue
+    for candidate in eligible:
         if candidate.source_event_id in seen:
             msg = "duplicate source event navigation target"
             raise PermanentSourceError(msg)
@@ -151,8 +257,6 @@ def build_event_navigation_plan(
                 ephemeral_url=clean_url,
             )
         )
-        if len(targets) == acquisition_window.maximum_events:
-            break
     return EventNavigationPlan(
         provider_id=provider_id,
         sport=sport,

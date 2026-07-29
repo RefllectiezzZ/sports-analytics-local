@@ -33,7 +33,10 @@ from sports_analytics.snapshots.writer import (
     discard_prepared_snapshot,
     prepare_snapshot_directory,
 )
-from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
+from sports_analytics.sources.bookmaker_contracts import (
+    ProviderAcquisitionBundle,
+    provider_native_markets,
+)
 from sports_analytics.sports.contracts import require_utc
 
 BOOKMAKER_SOURCE_POLICY_VERSION: Final[str] = "bookmaker-source-policy-v1"
@@ -96,15 +99,29 @@ def build_bookmaker_snapshot_spec(
         "source_event_count": len(bundle.source_events),
     }
     if provider_bundle is not None:
-        native_markets = sum(len(event.markets) for event in provider_bundle.events)
+        native_markets = sum(
+            len(provider_native_markets(event)) for event in provider_bundle.events
+        )
         native_selections = sum(
-            len(market.selections) for event in provider_bundle.events for market in event.markets
+            len(market.selections)
+            for event in provider_bundle.events
+            for market in provider_native_markets(event)
+        )
+        native_priced_selections = sum(
+            selection.decimal_odds is not None
+            for event in provider_bundle.events
+            for market in provider_native_markets(event)
+            for selection in market.selections
         )
         metadata.update(
             {
                 "provider_native_event_count": len(provider_bundle.events),
                 "provider_native_market_count": native_markets,
                 "provider_native_selection_count": native_selections,
+                "provider_native_priced_selection_count": native_priced_selections,
+                "provider_native_unpriced_selection_count": (
+                    native_selections - native_priced_selections
+                ),
             }
         )
     if domain_metadata:

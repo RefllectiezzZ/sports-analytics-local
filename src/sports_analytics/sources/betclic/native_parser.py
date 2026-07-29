@@ -26,6 +26,7 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderParserWarning,
     ProviderParticipantObservation,
     ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult
 from sports_analytics.sports.contracts import require_utc
@@ -270,13 +271,17 @@ def _parse_native_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             msg = "duplicate source selection identities"
             raise ParserError(msg)
         seen.add(sel_id)
-        if item.get("odds") is None:
-            continue
-        try:
-            odds = Decimal(str(item["odds"]).replace(",", "."))
-        except (InvalidOperation, KeyError) as exc:
-            msg = "invalid decimal odds"
-            raise ParserError(msg) from exc
+        price = item.get("odds")
+        if price is None:
+            odds = None
+            price_state = ProviderSelectionPriceState.UNPRICED
+        else:
+            try:
+                odds = Decimal(str(price).replace(",", "."))
+            except InvalidOperation as exc:
+                msg = "invalid decimal odds"
+                raise ParserError(msg) from exc
+            price_state = ProviderSelectionPriceState.PRICED
         sel_status = _BETCLIC_SELECTION_STATUS.get(
             str(item.get("status", "ACTIVE")).upper(),
             SelectionStatus.ACTIVE,
@@ -290,6 +295,7 @@ def _parse_native_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 display_label=str(item.get("label", sel_id)),
                 decimal_odds=odds,
                 selection_status=sel_status,
+                price_state=price_state,
                 line=line,
             )
         )

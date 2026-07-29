@@ -376,12 +376,16 @@ The bookmaker acquisition foundation provides:
   `0005` operational tables.
 - An immutable exact UTC acquisition window (`bookmaker-acquisition-window-v1`)
   separating refresh cadence from the upcoming-event horizon.
-- An injectable, deterministic Stage-B event-navigation plan. Provider-derived
-  targets require exact HTTPS host approval and a reviewed provider-specific
-  event-path grammar; no arbitrary URL is accepted from a job.
+- A provider-neutral, deterministic Stage-B event-navigation extension wired
+  into the production adapter call chain. Provider-derived targets require
+  exact HTTPS host approval and a reviewed provider-specific event-path grammar;
+  no arbitrary URL is accepted from a job. All current provider/sport
+  capabilities are explicitly disabled, and only an offline synthetic
+  capability/executor exercises the extension end to end.
 - A backward-compatible `bookmaker-native-v2` suite that preserves native
-  events, markets, selections, exact decimals, evidence links, and completeness
-  counts before the reviewed canonical subset.
+  events, markets, priced and explicitly unpriced selections, nullable exact
+  decimals, per-row evidence links, and completeness counts before the reviewed
+  canonical subset.
 
 The transport call chain is:
 
@@ -392,6 +396,8 @@ Playwright Chromium
 -> page.on("response") observes the response in the active cycle
 -> allowlisted host plus reviewed structural response gate
 -> bounded body capture and content checksum
+-> optional provider-owned Stage-B candidates and reviewed navigation plan
+   (disabled for every current provider/sport profile)
 -> provider-native parser
 -> immutable snapshot publication
 -> strict reload
@@ -400,9 +406,11 @@ Playwright Chromium
 There is no independent bookmaker HTTP client. The runtime does not reconstruct
 or replay observed REST, GraphQL, or gRPC requests and does not copy browser
 headers, cookies, tokens, or request bodies. Safe transport metadata distinguishes
-document, fetch, XHR, gRPC-Web, WebSocket connection metadata, EventSource,
-script/configuration, and other approved public responses. Raw WebSocket frames,
-HTML, scripts, complete URLs, queries, and headers are not persisted.
+document, fetch, XHR, gRPC-Web, EventSource, script/configuration, and other
+approved public responses. WebSocket connection metadata is admitted only for
+`wss://` on the exact approved public hostname and retains only the hostname and
+path hash plus acquisition identity and time. Raw WebSocket frames, HTML,
+scripts, complete URLs, queries, fragments, and headers are not persisted.
 
 Each retained response is linked to provider, sport, acquisition cycle, and page
 route. It records request method, safe transport type, approved hostname,

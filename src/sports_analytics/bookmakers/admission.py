@@ -50,6 +50,10 @@ _INFORMATIONAL_DRIFT_CODES: frozenset[str] = frozenset(
         "contradictory-line",
         "duplicate-selection-id",
         "event-outside-window",
+        "non-prematch-event-excluded",
+        "event-before-window",
+        "event-at-or-after-window",
+        "event-limit-truncated",
     }
 )
 
@@ -127,7 +131,7 @@ def evaluate_admission(
         )
     native_market_count = sum(len(provider_native_markets(event)) for event in bundle.events)
     native_priced_selection_count = sum(
-        len(market.selections)
+        sum(selection.decimal_odds is not None for selection in market.selections)
         for event in bundle.events
         for market in provider_native_markets(event)
     )

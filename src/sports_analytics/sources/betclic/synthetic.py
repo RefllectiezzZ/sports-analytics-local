@@ -18,6 +18,7 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderParserWarning,
     ProviderParticipantObservation,
     ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sports.contracts import require_utc
 
@@ -159,13 +160,17 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             raise ParserError(msg)
         if sel_id:
             seen.add(sel_id)
-        if item.get("decimal_odds") is None:
-            continue
-        try:
-            odds = Decimal(str(item["decimal_odds"]).replace(",", "."))
-        except (InvalidOperation, KeyError) as exc:
-            msg = "invalid decimal odds"
-            raise ParserError(msg) from exc
+        price = item.get("decimal_odds")
+        if price is None:
+            odds = None
+            price_state = ProviderSelectionPriceState.UNPRICED
+        else:
+            try:
+                odds = Decimal(str(price).replace(",", "."))
+            except InvalidOperation as exc:
+                msg = "invalid decimal odds"
+                raise ParserError(msg) from exc
+            price_state = ProviderSelectionPriceState.PRICED
         selection_status = SelectionStatus(str(item.get("selection_status") or "active"))
         line = None
         if item.get("line") is not None:
@@ -176,6 +181,7 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 display_label=str(item["display_label"]),
                 decimal_odds=odds,
                 selection_status=selection_status,
+                price_state=price_state,
                 line=line,
             )
         )

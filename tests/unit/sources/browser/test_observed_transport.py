@@ -20,6 +20,7 @@ from sports_analytics.sources.browser.contracts import (
 from sports_analytics.sources.browser.playwright_runtime import (
     PlaywrightBrowserSession,
     approved_json_payload_for_profile,
+    classify_safe_websocket_url,
 )
 from sports_analytics.sources.browser.readiness import ReadinessBlockedError
 
@@ -61,23 +62,33 @@ class _Response:
 
 
 class _Page:
-    def __init__(self, responses: tuple[_Response, ...]) -> None:
+    def __init__(
+        self,
+        responses: tuple[_Response, ...],
+        websocket_urls: tuple[str, ...] = (),
+    ) -> None:
         self._responses = responses
-        self._callback = None
+        self._response_callback = None
+        self._websocket_callback = None
+        self._websocket_urls = websocket_urls
         self.url = "https://www.betano.pt/sport/futebol/"
         self.goto_calls = 0
 
     def on(self, event: str, callback) -> None:
         if event == "response":
-            self._callback = callback
+            self._response_callback = callback
             return
         assert event == "websocket"
+        self._websocket_callback = callback
 
     def goto(self, *_args, **_kwargs) -> None:
         self.goto_calls += 1
-        assert self._callback is not None
+        assert self._response_callback is not None
         for response in self._responses:
-            self._callback(response)
+            self._response_callback(response)
+        assert self._websocket_callback is not None
+        for socket_url in self._websocket_urls:
+            self._websocket_callback(SimpleNamespace(url=socket_url))
 
     def title(self) -> str:
         return "Public sport"
@@ -135,10 +146,11 @@ def _acquire(
     responses: tuple[_Response, ...],
     *,
     blocked: bool = False,
+    websocket_urls: tuple[str, ...] = (),
     start_urls: tuple[tuple[str, str], ...] | None = None,
     **session_kwargs,
 ):
-    page = _Page(responses)
+    page = _Page(responses, websocket_urls)
     context = _PlaywrightContext(page)
     monkeypatch.setattr(
         "playwright.sync_api.sync_playwright",
@@ -274,6 +286,47 @@ def test_configuration_and_url_keywords_are_not_structural_approval() -> None:
         resource_type="fetch",
         payload={"configuration": {"event": "synthetic"}},
     )
+
+
+def test_wss_callback_produces_sanitized_metadata_only(monkeypatch) -> None:
+    socket_url = "wss://www.betano.pt/live/stream?token=secret#private"
+    result, _page, _browser = _acquire(
+        monkeypatch,
+        (),
+        websocket_urls=(socket_url,),
+    )
+    assert result.responses == ()
+    assert len(result.network_metadata) == 1
+    metadata = result.network_metadata[0]
+    assert metadata.hostname == "www.betano.pt"
+    assert metadata.transport_type is BrowserTransportType.WEBSOCKET
+    assert metadata.body_capture_state is BrowserBodyCaptureState.METADATA_ONLY
+    assert metadata.sanitized_path_hash is not None
+    assert "secret" not in repr(metadata)
+    assert socket_url not in repr(metadata)
+
+
+@pytest.mark.parametrize(
+    "url,approved_hosts",
+    [
+        ("ws://www.betano.pt/live", frozenset({"www.betano.pt"})),
+        ("wss://user:pass@www.betano.pt/live", frozenset({"www.betano.pt"})),
+        ("wss://other.example/live", frozenset({"www.betano.pt"})),
+        ("wss://localhost/live", frozenset({"localhost"})),
+        ("wss://127.0.0.1/live", frozenset({"127.0.0.1"})),
+        ("wss://[::1]/live", frozenset({"::1"})),
+        ("wss://www.betan\u043e.pt/live", frozenset({"www.betano.pt"})),
+        ("wss:///missing-host", frozenset({"www.betano.pt"})),
+        ("wss://www.betano.pt:not-a-port/live", frozenset({"www.betano.pt"})),
+        ("wss://www.betano.pt:8443/live", frozenset({"www.betano.pt"})),
+    ],
+)
+def test_wss_classifier_rejects_unsafe_targets(
+    url: str,
+    approved_hosts: frozenset[str],
+) -> None:
+    with pytest.raises(PermanentSourceError):
+        classify_safe_websocket_url(url, allowed_hostnames=approved_hosts)
 
 
 def test_explicit_block_stops_remaining_routes_without_retry(monkeypatch) -> None:

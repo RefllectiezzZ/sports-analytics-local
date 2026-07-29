@@ -429,9 +429,10 @@ time. Window material and policy version participate in job/cycle identities.
 Blocked providers cool down without hidden retries or evasion.
 
 Browser-observed response limits default to 2 MiB per body and 16 MiB total per
-cycle. The event-detail policy is fixed concurrency one, a deterministic
+cycle. The dormant event-detail contract is fixed concurrency one, a deterministic
 one-second minimum interval, a 30-second per-navigation timeout, and zero
-in-cycle retries. These are load controls, not anti-detection behavior. Explicit
+in-cycle retries. No current provider/sport profile enables Stage-B traversal.
+These are load controls, not anti-detection behavior. Explicit
 CAPTCHA, access denial, regional refusal, or anti-automation classification
 stops remaining navigation immediately and preserves last-valid behavior.
 
@@ -440,11 +441,13 @@ request body from a job. It does not call an observed provider transport outside
 Chromium. Only responses genuinely received by the active page/cycle can reach
 the reviewed parser.
 
-The two-stage contract separates fixed-route event inventory from bounded
-event-detail traversal. Stage-B targets are provider-derived in memory, stripped
-of query/fragment material, matched against an exact reviewed path grammar, and
-persisted only as safe route IDs/templates/hashes. Provider sports without that
-evidence remain unverified.
+The production-wired two-stage extension separates fixed-route event inventory
+from optional bounded event-detail traversal. Stage-B targets are
+provider-derived in memory, stripped of query/fragment material, matched against
+an exact reviewed path grammar, and never serialized into jobs or persisted as
+complete URLs. Every current Betano/Betclic sport capability is disabled.
+Synthetic planner/executor tests establish structure only; provider sports
+without reviewed evidence remain unverified.
 
 When `bookmakers.enabled` is true, `run_local.py` also starts
 `python -m sports_analytics.bookmakers.scheduler` beside the worker (skipped for

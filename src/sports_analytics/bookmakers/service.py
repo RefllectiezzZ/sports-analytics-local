@@ -381,7 +381,7 @@ class BookmakerIngestionService:
             drift_detected=bool(bundle.drift_codes),
             acquisition_partial=not admission.exhaustive_capture_complete,
             provider_native_markets=_native_market_count(bundle),
-            provider_native_priced_selections=_native_selection_count(bundle),
+            provider_native_priced_selections=_native_priced_selection_count(bundle),
             canonical_markets=_canonical_market_count(normalized),
             canonical_quotes=len(normalized.market_quotes),
             unmapped_markets=len(normalized.unknown_markets),
@@ -1056,9 +1056,12 @@ def _native_market_count(bundle: ProviderAcquisitionBundle) -> int:
     )
 
 
-def _native_selection_count(bundle: ProviderAcquisitionBundle) -> int:
+def _native_priced_selection_count(bundle: ProviderAcquisitionBundle) -> int:
     return sum(
-        len(getattr(market, "selections", ()))
+        sum(
+            getattr(selection, "decimal_odds", None) is not None
+            for selection in getattr(market, "selections", ())
+        )
         for event in bundle.events
         for market in (
             provider_native_markets(event)

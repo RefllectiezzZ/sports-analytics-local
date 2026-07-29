@@ -467,6 +467,8 @@ def _build_quotes(
                     unknown.append(mapped)
                     continue
                 for selection_obs in market.selections:
+                    if selection_obs.decimal_odds is None:
+                        continue
                     outcome_key = _outcome_key(
                         selection_obs.display_label, selection_obs.source_selection_id
                     )

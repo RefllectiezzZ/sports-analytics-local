@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -20,12 +22,19 @@ from sports_analytics.bookmakers.types import FailureClassification
 from sports_analytics.core.exceptions import SnapshotIntegrityError, SnapshotVerificationError
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.migrations import ensure_database_ready
+from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION as BETANO_ADAPTER
 from sports_analytics.sources.betano.synthetic import parse_betano_synthetic_payloads
 from sports_analytics.sources.bookmaker_capture import (
+    attach_capture_references,
     build_capture_manifest,
     manifest_to_raw_artifact,
     persist_capture_manifest,
+)
+from sports_analytics.sources.bookmaker_contracts import (
+    ProviderMarketObservation,
+    ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sources.raw_capture import BookmakerRawCaptureStore
 
@@ -131,6 +140,152 @@ def _published_snapshot(tmp_path: Path):
     return database, raw, snapshots, publication.published.snapshot_id
 
 
+def _published_native_snapshot(
+    tmp_path: Path,
+    *,
+    native_market_count_override: int | None = None,
+):
+    database = tmp_path / "operational.sqlite3"
+    ensure_database_ready(database)
+    snapshots = tmp_path / "snapshots"
+    raw = tmp_path / "raw"
+    payload = json.loads((FIXTURES / "football.json").read_text(encoding="utf-8"))
+    bundle = parse_betano_synthetic_payloads(
+        [payload],
+        provider_id="betano-pt",
+        adapter_version=BETANO_ADAPTER,
+        acquisition_cycle_id="cycle-native-loader",
+        observed_at_utc=OBSERVED,
+        sport="football",
+    )
+    store = BookmakerRawCaptureStore(raw)
+    captures = tuple(
+        store.store_text(
+            source_name="betano-pt",
+            capture_kind="provider-json",
+            content=json.dumps({"capture": index}),
+            retrieved_at=OBSERVED,
+            extension="json",
+        )
+        for index in (1, 2)
+    )
+    original_event = bundle.events[0]
+    native_markets = tuple(
+        replace(
+            market,
+            source_capture_id=(
+                captures[0].checksum_sha256 if index < 2 else captures[1].checksum_sha256
+            ),
+            selections=tuple(
+                replace(
+                    selection,
+                    source_capture_id=(
+                        captures[0].checksum_sha256 if index < 2 else captures[1].checksum_sha256
+                    ),
+                )
+                for selection in market.selections
+            ),
+        )
+        for index, market in enumerate(original_event.markets)
+    )
+    native_markets += tuple(
+        ProviderMarketObservation(
+            source_market_id=f"native-unknown-{index}",
+            display_label=f"Native unknown {index}",
+            market_status=MarketStatus.OPEN,
+            selections=(
+                ProviderSelectionObservation(
+                    source_selection_id=f"native-selection-{index}",
+                    display_label=f"Native selection {index}",
+                    decimal_odds=None if index == 6 else Decimal("2.00"),
+                    selection_status=SelectionStatus.SUSPENDED
+                    if index == 6
+                    else SelectionStatus.ACTIVE,
+                    price_state=(
+                        ProviderSelectionPriceState.UNPRICED
+                        if index == 6
+                        else ProviderSelectionPriceState.PRICED
+                    ),
+                    source_capture_id=captures[1].checksum_sha256,
+                ),
+            ),
+            provider_market_type=f"UNKNOWN-{index}",
+            source_capture_id=captures[1].checksum_sha256,
+        )
+        for index in range(7)
+    )
+    bundle = replace(
+        bundle,
+        events=(
+            replace(
+                original_event,
+                markets=native_markets[:3],
+                native_markets=native_markets,
+            ),
+        ),
+    )
+    bundle = attach_capture_references(bundle, captures)
+    normalized = normalize_bookmaker_bundles(
+        (bundle,),
+        reconciliations=reconcile_bookmaker_bundles((bundle,)),
+        source_file_sha256=captures[0].checksum_sha256,
+    )
+    manifest = persist_capture_manifest(
+        raw_directory=raw,
+        manifest=build_capture_manifest(
+            provider_id="betano-pt",
+            acquisition_cycle_id="cycle-native-loader",
+            captures=captures,
+        ),
+    )
+    source_version = build_bookmaker_source_version(
+        sport_code="football",
+        acquisition_cycle_id="cycle-native-loader",
+        raw_sha256=manifest.checksum_sha256,
+    )
+    domain_metadata: dict[str, object] = {
+        "capture_manifest_relative_path": manifest.relative_path,
+        "capture_manifest_checksum_sha256": manifest.checksum_sha256,
+    }
+    if native_market_count_override is not None:
+        domain_metadata["provider_native_market_count"] = native_market_count_override
+    publication = publish_bookmaker_snapshot(
+        database_path=database,
+        snapshots_directory=snapshots,
+        sport_code="football",
+        source_version=source_version,
+        source_observed_at_utc=OBSERVED,
+        bundle=normalized,
+        provider_statuses=_provider_status_for_bundle(normalized, snapshot_id=None),
+        raw_artifact=manifest_to_raw_artifact(manifest),
+        domain_metadata=domain_metadata,
+        provider_bundle=bundle,
+    )
+    with connect_database(database) as connection:
+        from sports_analytics.data.database import transaction
+        from sports_analytics.data.repositories.bookmakers import BookmakerRepository
+
+        with transaction(connection, immediate=True):
+            BookmakerRepository(connection).register_snapshot(
+                snapshot_id=publication.published.snapshot_id,
+                provider_id="betano-pt",
+                sport="football",
+                schema_version=publication.published.schema_version,
+                checksum_sha256=publication.published.manifest_checksum_sha256,
+                relative_path=publication.published.snapshot_relative_path,
+                observed_at=OBSERVED,
+                registered_at=OBSERVED,
+                acquisition_cycle_id="cycle-native-loader",
+            )
+    return (
+        database,
+        raw,
+        snapshots,
+        publication.published.snapshot_id,
+        captures,
+    )
+
+
 def test_load_bookmaker_snapshot_verifies_manifest_and_datasets(tmp_path: Path) -> None:
     database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
     with connect_database(database) as connection:
@@ -144,6 +299,56 @@ def test_load_bookmaker_snapshot_verifies_manifest_and_datasets(tmp_path: Path) 
     assert loaded.provider_id == "betano-pt"
     assert loaded.event_count >= 1
     assert loaded.quote_count >= 1
+
+
+def test_native_v2_round_trip_separates_native_and_canonical_counts(
+    tmp_path: Path,
+) -> None:
+    database, raw, snapshots, snapshot_id, _captures = _published_native_snapshot(tmp_path)
+    with connect_database(database) as connection:
+        loaded = load_bookmaker_snapshot(
+            database_connection=connection,
+            snapshots_directory=snapshots,
+            raw_directory=raw,
+            snapshot_id=snapshot_id,
+        )
+    assert loaded.native_event_count == 1
+    assert loaded.native_market_count == 10
+    assert loaded.native_selection_count == 14
+    assert loaded.quote_count == 7
+
+
+def test_native_v2_manifest_count_mismatch_fails_closed(tmp_path: Path) -> None:
+    database, raw, snapshots, snapshot_id, _captures = _published_native_snapshot(
+        tmp_path,
+        native_market_count_override=3,
+    )
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError, match="native_market_count"):
+            load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+@pytest.mark.parametrize("capture_index", [0, 1])
+def test_native_v2_tampering_either_contributing_capture_fails_strict_reload(
+    tmp_path: Path,
+    capture_index: int,
+) -> None:
+    database, raw, snapshots, snapshot_id, captures = _published_native_snapshot(tmp_path)
+    path = raw / captures[capture_index].relative_path
+    path.write_bytes(path.read_bytes() + b"tamper")
+    with connect_database(database) as connection:
+        with pytest.raises((SnapshotVerificationError, SnapshotIntegrityError)):
+            load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
 
 
 def test_loader_rejects_missing_capture_manifest_metadata(tmp_path: Path) -> None:

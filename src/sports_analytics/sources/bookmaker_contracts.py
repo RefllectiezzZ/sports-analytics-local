@@ -32,6 +32,13 @@ class ProviderEventState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProviderSelectionPriceState(StrEnum):
+    """Whether a provider-native selection currently carries a valid price."""
+
+    PRICED = "priced"
+    UNPRICED = "unpriced"
+
+
 class ParserDriftSeverity(StrEnum):
     """How severely a parser observation diverges from the expected schema."""
 
@@ -49,6 +56,7 @@ class CompletenessState(StrEnum):
     PARTIAL_TRUNCATED_RESPONSE = "partial-truncated-response"
     PARTIAL_NAVIGATION_FAILURE = "partial-navigation-failure"
     PARTIAL_PARSER_REJECTION = "partial-parser-rejection"
+    PARTIAL_EVENT_LIMIT = "partial-event-limit"
     UNKNOWN = "unknown-completeness"
 
 
@@ -171,12 +179,13 @@ class ProviderParticipantObservation:
 
 @dataclass(frozen=True, slots=True)
 class ProviderSelectionObservation:
-    """One priced selection from a provider market."""
+    """One provider-native selection, priced or explicitly unpriced."""
 
     source_selection_id: str
     display_label: str
-    decimal_odds: Decimal
+    decimal_odds: Decimal | None
     selection_status: SelectionStatus
+    price_state: ProviderSelectionPriceState = ProviderSelectionPriceState.PRICED
     line: Decimal | None = None
     provider_selection_type: str | None = None
     source_participant_id: str | None = None
@@ -190,10 +199,21 @@ class ProviderSelectionObservation:
         if not self.display_label.strip() or len(self.display_label) > MAX_LABEL_LENGTH:
             msg = "selection display_label must be non-empty and bounded"
             raise NormalizationError(msg)
-        if not self.decimal_odds.is_finite() or self.decimal_odds <= MIN_DECIMAL_ODDS_EXCLUSIVE:
-            msg = "decimal odds must be finite and greater than 1"
+        if not isinstance(self.price_state, ProviderSelectionPriceState):
+            msg = "selection price_state must use the typed contract"
             raise NormalizationError(msg)
-        object.__setattr__(self, "decimal_odds", validate_decimal_odds(self.decimal_odds))
+        if self.price_state is ProviderSelectionPriceState.PRICED:
+            if (
+                not isinstance(self.decimal_odds, Decimal)
+                or not self.decimal_odds.is_finite()
+                or self.decimal_odds <= MIN_DECIMAL_ODDS_EXCLUSIVE
+            ):
+                msg = "priced selection requires finite decimal odds greater than 1"
+                raise NormalizationError(msg)
+            object.__setattr__(self, "decimal_odds", validate_decimal_odds(self.decimal_odds))
+        elif self.decimal_odds is not None:
+            msg = "unpriced selection requires decimal_odds to be None"
+            raise NormalizationError(msg)
         if self.line is not None and (
             not isinstance(self.line, Decimal) or not self.line.is_finite()
         ):

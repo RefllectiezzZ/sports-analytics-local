@@ -118,6 +118,11 @@ class BetanoFootballTopEventsV2Profile:
                 warnings.append(str(exc))
                 drift_codes.append("topeventsv2-rejected")
                 continue
+            capture_checksum = response.contributing_capture_checksum
+            if capture_checksum is None:
+                msg = "captured response is missing its content checksum"
+                raise ParserError(msg)
+            _bind_payload_capture(translated["payload"], capture_checksum)
             payloads.append(translated["payload"])
             evidence_times.append(response.observed_at_utc)
             drift_codes.extend(translated["drift_codes"])
@@ -143,6 +148,7 @@ class BetanoFootballTopEventsV2Profile:
                     warnings.append(str(exc))
                     drift_codes.append("topeventsv2-rejected")
                     continue
+                _bind_payload_capture(translated["payload"], capture.checksum_sha256)
                 payloads.append(translated["payload"])
                 evidence_times.append(observed)
                 drift_codes.extend(translated["drift_codes"])
@@ -182,6 +188,30 @@ def looks_like_topeventsv2(raw: dict[str, Any]) -> bool:
         return False
     required = ("eventIdList", "events", "markets", "selections")
     return all(key in top for key in required)
+
+
+def _bind_payload_capture(payload: dict[str, object], checksum: str) -> None:
+    """Attach exact response provenance to every translated native row."""
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        for key in ("markets", "nativeMarkets"):
+            markets = event.get(key)
+            if not isinstance(markets, list):
+                continue
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
+                market["sourceCaptureId"] = checksum
+                selections = market.get("selections")
+                if not isinstance(selections, list):
+                    continue
+                for selection in selections:
+                    if isinstance(selection, dict):
+                        selection["sourceCaptureId"] = checksum
 
 
 def translate_topeventsv2(

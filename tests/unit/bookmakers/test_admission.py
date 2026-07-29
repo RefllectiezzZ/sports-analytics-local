@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sports_analytics.bookmakers.admission import AdmissionOutcome, evaluate_admission
 from sports_analytics.bookmakers.normalization import NormalizedBookmakerBundle
 from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION
-from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
+from sports_analytics.bookmakers.window import AcquisitionWindow, apply_acquisition_window
+from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
+from sports_analytics.sources.bookmaker_contracts import (
+    CompletenessState,
+    ProviderAcquisitionBundle,
+    ProviderEventObservation,
+    ProviderEventState,
+    ProviderMarketObservation,
+    ProviderParticipantObservation,
+    ProviderSelectionObservation,
+)
 from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
     BrowserBlockReason,
@@ -269,3 +280,71 @@ def test_partial_never_replaces_valid_snapshot() -> None:
     assert decision.outcome is AdmissionOutcome.PARTIAL
     assert decision.may_publish is False
     assert decision.may_replace_last_valid is False
+
+
+def test_event_limit_partial_inventory_may_publish_but_never_replace() -> None:
+    market = ProviderMarketObservation(
+        source_market_id="market-1",
+        display_label="Native market",
+        market_status=MarketStatus.OPEN,
+        selections=(
+            ProviderSelectionObservation(
+                source_selection_id="selection-1",
+                display_label="Selection",
+                decimal_odds=Decimal("2.00"),
+                selection_status=SelectionStatus.ACTIVE,
+            ),
+        ),
+    )
+
+    def _event(identity: str) -> ProviderEventObservation:
+        return ProviderEventObservation(
+            source_event_id=identity,
+            source_competition_id="c1",
+            sport="football",
+            scheduled_start_utc=OBSERVED + timedelta(hours=2),
+            event_state=ProviderEventState.PRE_MATCH,
+            participants=(
+                ProviderParticipantObservation("p1", "Home", "home"),
+                ProviderParticipantObservation("p2", "Away", "away"),
+            ),
+            markets=(market,),
+            native_markets=(market,),
+            source_page_route_id="football-prematch",
+        )
+
+    bundle = ProviderAcquisitionBundle(
+        provider_id="betano-pt",
+        adapter_version="betano-pt-adapter-v1",
+        acquisition_cycle_id="cycle-1",
+        observed_at_utc=OBSERVED,
+        sport="football",
+        events=(_event("event-b"), _event("event-a")),
+        warnings=(),
+        drift_codes=(),
+        provenance=(),
+    )
+    limited = apply_acquisition_window(
+        bundle,
+        AcquisitionWindow(
+            window_start_utc=OBSERVED,
+            window_end_utc=OBSERVED + timedelta(hours=4),
+            maximum_events=1,
+        ),
+    )
+    decision = evaluate_admission(
+        browser_result=_browser(),
+        bundle=limited,
+        normalized=_normalized(),
+        valid_quote_count=1,
+        unresolved_event_count=0,
+        verified_extraction_applied=True,
+    )
+    assert limited.drift_codes == ("event-limit-truncated",)
+    assert (
+        limited.events[0].completeness.completeness_state is CompletenessState.PARTIAL_EVENT_LIMIT
+    )
+    assert decision.outcome is AdmissionOutcome.PARTIAL
+    assert decision.may_publish is True
+    assert decision.may_replace_last_valid is False
+    assert decision.exhaustive_capture_complete is False

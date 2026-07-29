@@ -26,6 +26,7 @@ class ExampleBetanoSyntheticExtractionProfile:
     profile_id = EXAMPLE_BETANO_PROFILE_ID
     verified = False
     provider_id = PROVIDER_ID
+    sport = "football"
     raw_directory: Path | None = None
 
     def extract(

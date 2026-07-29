@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
+import pytest
+
+from sports_analytics.core.exceptions import ParserError
 from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.bookmaker_contracts import (
     ProviderMarketObservation,
@@ -61,6 +65,11 @@ def test_multiple_chunks_merge_deterministically_and_duplicates_are_idempotent()
     assert merged.duplicate_chunk_count == 1
     assert merged.missing_chunk_sequences == ()
     assert merged.complete_by_chunk_reference
+    by_id = {market.source_market_id: market for market in merged.markets}
+    assert by_id["market-a"].source_capture_id == second.contributing_capture_checksum
+    assert by_id["market-a"].selections[0].source_capture_id == second.contributing_capture_checksum
+    assert by_id["market-b"].source_capture_id == first.contributing_capture_checksum
+    assert by_id["market-b"].selections[0].source_capture_id == first.contributing_capture_checksum
 
 
 def test_missing_chunk_prevents_complete_classification() -> None:
@@ -69,3 +78,29 @@ def test_missing_chunk_prevents_complete_classification() -> None:
     )
     assert merged.missing_chunk_sequences == (1,)
     assert not merged.complete_by_chunk_reference
+
+
+@pytest.mark.parametrize("contradict_selection", [False, True])
+def test_chunk_rejects_contradictory_preexisting_provenance(
+    contradict_selection: bool,
+) -> None:
+    market = _market("market-a", 1)
+    if contradict_selection:
+        market = replace(
+            market,
+            selections=(replace(market.selections[0], source_capture_id="f" * 64),),
+        )
+    else:
+        market = replace(market, source_capture_id="f" * 64)
+    with pytest.raises(ParserError, match="contradicts"):
+        merge_browser_observed_market_chunks((_chunk("chunk-0", 0, (market,), expected=1),))
+
+
+def test_same_market_from_different_capture_chunks_is_conflicting() -> None:
+    with pytest.raises(ParserError, match="conflicting chunk evidence"):
+        merge_browser_observed_market_chunks(
+            (
+                _chunk("chunk-0", 0, (_market("market-a", 1),)),
+                _chunk("chunk-1", 1, (_market("market-a", 1),)),
+            )
+        )

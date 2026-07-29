@@ -18,6 +18,7 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderParserWarning,
     ProviderParticipantObservation,
     ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sources.bookmaker_extraction.contracts import ADAPTER_CONTRACT_SCHEMA
 from sports_analytics.sports.contracts import require_utc
@@ -250,13 +251,17 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             msg = "duplicate source selection identities"
             raise ParserError(msg)
         seen.add(sel_id)
-        if item.get("price") is None:
-            continue
-        try:
-            odds = Decimal(str(item["price"]).replace(",", "."))
-        except (InvalidOperation, KeyError) as exc:
-            msg = "invalid decimal odds"
-            raise ParserError(msg) from exc
+        price = item.get("price")
+        if price is None:
+            odds = None
+            price_state = ProviderSelectionPriceState.UNPRICED
+        else:
+            try:
+                odds = Decimal(str(price).replace(",", "."))
+            except InvalidOperation as exc:
+                msg = "invalid decimal odds"
+                raise ParserError(msg) from exc
+            price_state = ProviderSelectionPriceState.PRICED
         status_value = str(item.get("status") or "").upper()
         if not status_value:
             msg = "missing selection status"
@@ -274,11 +279,17 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 display_label=str(item.get("name", sel_id)),
                 decimal_odds=odds,
                 selection_status=sel_status,
+                price_state=price_state,
                 line=line,
                 provider_selection_type=(
                     str(item["providerTypeId"]) if item.get("providerTypeId") is not None else None
                 ),
                 provider_order=len(selections),
+                source_capture_id=(
+                    str(item["sourceCaptureId"])
+                    if item.get("sourceCaptureId") is not None
+                    else None
+                ),
             )
         )
     market_line = None
@@ -298,6 +309,9 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             str(raw["providerType"]) if raw.get("providerType") is not None else type_code
         ),
         provider_order=0,
+        source_capture_id=(
+            str(raw["sourceCaptureId"]) if raw.get("sourceCaptureId") is not None else None
+        ),
     )
 
 

@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from sports_analytics.bookmakers.native_inventory import (
     DATASET_PROVIDER_NATIVE_MARKETS,
     DATASET_PROVIDER_NATIVE_SELECTIONS,
     provider_native_rows,
+    provider_native_selections_schema,
 )
 from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION_V2
+from sports_analytics.core.exceptions import NormalizationError
 from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.bookmaker_contracts import (
     CompletenessState,
@@ -21,6 +25,7 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderMarketObservation,
     ProviderParticipantObservation,
     ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 
 OBSERVED = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
@@ -101,3 +106,70 @@ def test_fifty_unknown_markets_and_150_selections_survive_native_flattening() ->
         f"native-market-{index:03d}" for index in range(50)
     }
     assert rows[DATASET_PROVIDER_NATIVE_SELECTIONS][0]["decimal_odds"] == "2.0000"
+
+
+def test_unpriced_selection_schema_and_contract_are_strict() -> None:
+    selection = ProviderSelectionObservation(
+        source_selection_id="selection-unpriced",
+        display_label="Suspended selection",
+        decimal_odds=None,
+        selection_status=SelectionStatus.SUSPENDED,
+        price_state=ProviderSelectionPriceState.UNPRICED,
+        source_capture_id=CAPTURE,
+    )
+    market = ProviderMarketObservation(
+        source_market_id="market-unpriced",
+        display_label="Suspended market",
+        market_status=MarketStatus.SUSPENDED,
+        selections=(selection,),
+        source_capture_id=CAPTURE,
+    )
+    event = ProviderEventObservation(
+        source_event_id="event-unpriced",
+        source_competition_id="competition-1",
+        sport="football",
+        scheduled_start_utc=OBSERVED,
+        event_state=ProviderEventState.PRE_MATCH,
+        participants=(
+            ProviderParticipantObservation("participant-1", "Synthetic One", "home"),
+            ProviderParticipantObservation("participant-2", "Synthetic Two", "away"),
+        ),
+        markets=(),
+        native_markets=(market,),
+        source_page_route_id="event-detail-1",
+        source_capture_ids=(CAPTURE,),
+    )
+    bundle = ProviderAcquisitionBundle(
+        provider_id="betano-pt",
+        adapter_version="adapter-v2",
+        acquisition_cycle_id="cycle-unpriced",
+        observed_at_utc=OBSERVED,
+        sport="football",
+        events=(event,),
+        warnings=(),
+        drift_codes=(),
+        provenance=(),
+    )
+    rows = provider_native_rows(bundle, schema_version=BOOKMAKER_SCHEMA_VERSION_V2)
+    assert rows[DATASET_PROVIDER_NATIVE_SELECTIONS][0]["decimal_odds"] is None
+    assert rows[DATASET_PROVIDER_NATIVE_SELECTIONS][0]["price_state"] == "unpriced"
+    schema = provider_native_selections_schema(schema_version=BOOKMAKER_SCHEMA_VERSION_V2)
+    assert schema.field("decimal_odds").nullable
+    assert not schema.field("price_state").nullable
+
+    with pytest.raises(NormalizationError, match="priced selection requires"):
+        ProviderSelectionObservation(
+            source_selection_id="contradiction-priced",
+            display_label="Contradiction",
+            decimal_odds=None,
+            selection_status=SelectionStatus.ACTIVE,
+            price_state=ProviderSelectionPriceState.PRICED,
+        )
+    with pytest.raises(NormalizationError, match="unpriced selection requires"):
+        ProviderSelectionObservation(
+            source_selection_id="contradiction-unpriced",
+            display_label="Contradiction",
+            decimal_odds=Decimal("2.00"),
+            selection_status=SelectionStatus.SUSPENDED,
+            price_state=ProviderSelectionPriceState.UNPRICED,
+        )

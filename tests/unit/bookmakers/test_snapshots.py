@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -28,11 +30,16 @@ from sports_analytics.bookmakers.types import (
 from sports_analytics.core.exceptions import RepositoryError, SnapshotVerificationError
 from sports_analytics.data.migrations import ensure_database_ready
 from sports_analytics.data.types import SnapshotStatus, validate_identifier
+from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.snapshots.reader import verify_snapshot_directory
 from sports_analytics.snapshots.spec import MANIFEST_FILENAME
 from sports_analytics.snapshots.writer import discard_prepared_snapshot
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION as BETANO_ADAPTER
 from sports_analytics.sources.betano.synthetic import parse_betano_synthetic_payloads
+from sports_analytics.sources.bookmaker_contracts import (
+    ProviderMarketObservation,
+    ProviderSelectionObservation,
+)
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "betano"
 OBSERVED_AT = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
@@ -109,6 +116,56 @@ def test_build_bookmaker_snapshot_spec_validation() -> None:
             source_observed_at_utc=OBSERVED_AT,
             bundle=bundle,
         )
+
+
+def test_native_metadata_counts_all_ten_markets_while_canonical_remains_three() -> None:
+    payload = json.loads((FIXTURES / "football.json").read_text(encoding="utf-8"))
+    provider_bundle = parse_betano_synthetic_payloads(
+        [payload],
+        provider_id="betano-pt",
+        adapter_version=BETANO_ADAPTER,
+        acquisition_cycle_id="cycle-native-counts",
+        observed_at_utc=OBSERVED_AT,
+        sport="football",
+    )
+    event = provider_bundle.events[0]
+    native_markets = event.markets + tuple(
+        ProviderMarketObservation(
+            source_market_id=f"native-unknown-{index}",
+            display_label=f"Native unknown {index}",
+            market_status=MarketStatus.OPEN,
+            selections=(
+                ProviderSelectionObservation(
+                    source_selection_id=f"native-selection-{index}",
+                    display_label=f"Native selection {index}",
+                    decimal_odds=Decimal("2.00"),
+                    selection_status=SelectionStatus.ACTIVE,
+                ),
+            ),
+            provider_market_type=f"UNKNOWN-{index}",
+        )
+        for index in range(7)
+    )
+    provider_bundle = replace(
+        provider_bundle,
+        events=(replace(event, native_markets=native_markets),),
+    )
+    normalized = normalize_bookmaker_bundles(
+        (provider_bundle,),
+        reconciliations=reconcile_bookmaker_bundles((provider_bundle,)),
+    )
+    spec = build_bookmaker_snapshot_spec(
+        sport_code="football",
+        source_version=_source_version("cycle-native-counts"),
+        source_observed_at_utc=OBSERVED_AT,
+        bundle=normalized,
+        provider_bundle=provider_bundle,
+    )
+    assert spec.domain_metadata["provider_native_event_count"] == 1
+    assert spec.domain_metadata["provider_native_market_count"] == 10
+    assert spec.domain_metadata["provider_native_selection_count"] == 14
+    assert len(normalized.market_quotes) == 7
+    assert len({quote.selection.source_market_id for quote in normalized.market_quotes}) == 3
 
 
 def test_publish_bookmaker_snapshot_deterministic_and_tamper_detection(tmp_path: Path) -> None:
