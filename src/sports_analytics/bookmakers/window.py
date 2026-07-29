@@ -283,6 +283,7 @@ def apply_acquisition_window_with_counts(
                 event,
                 completeness=replace(
                     event.completeness,
+                    event_limit_truncated_count=truncated_count,
                     completeness_state=CompletenessState.PARTIAL_EVENT_LIMIT,
                 ),
             )

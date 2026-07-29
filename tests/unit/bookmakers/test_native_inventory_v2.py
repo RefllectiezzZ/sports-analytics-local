@@ -14,7 +14,7 @@ from sports_analytics.bookmakers.native_inventory import (
     provider_native_selections_schema,
 )
 from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION_V2
-from sports_analytics.core.exceptions import NormalizationError
+from sports_analytics.core.exceptions import NormalizationError, PermanentSourceError
 from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.bookmaker_contracts import (
     CompletenessState,
@@ -30,6 +30,74 @@ from sports_analytics.sources.bookmaker_contracts import (
 
 OBSERVED = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
 CAPTURE = "a" * 64
+
+
+def _complete_evidence(**overrides: object) -> EventCompletenessEvidence:
+    values: dict[str, object] = {
+        "provider_declared_market_references": 10,
+        "markets_observed": 10,
+        "markets_parsed": 10,
+        "selections_observed": 30,
+        "selections_parsed": 30,
+        "event_detail_surface_visited": True,
+        "event_detail_readiness_reached": True,
+        "completeness_state": CompletenessState.COMPLETE_BY_PROVIDER_REFERENCE,
+    }
+    values.update(overrides)
+    return EventCompletenessEvidence(**values)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"markets_parsed": 9}, "clean event-detail evidence"),
+        ({"selections_parsed": 29}, "clean event-detail evidence"),
+        (
+            {"markets_parsed": 9, "markets_rejected": 1},
+            "clean event-detail evidence",
+        ),
+        ({"missing_chunk_count": 1}, "clean event-detail evidence"),
+        ({"event_limit_truncated_count": 1}, "clean event-detail evidence"),
+    ],
+)
+def test_complete_evidence_requires_exact_clean_arithmetic(
+    overrides: dict[str, object],
+    match: str,
+) -> None:
+    with pytest.raises(PermanentSourceError, match=match):
+        _complete_evidence(**overrides)
+
+
+def test_complete_evidence_accepts_exact_counts() -> None:
+    evidence = _complete_evidence()
+    assert evidence.markets_parsed == evidence.markets_observed
+    assert evidence.selections_parsed == evidence.selections_observed
+
+
+def test_partial_evidence_preserves_explicit_count_differences() -> None:
+    evidence = EventCompletenessEvidence(
+        markets_observed=10,
+        markets_parsed=9,
+        selections_observed=30,
+        selections_parsed=29,
+        completeness_state=CompletenessState.PARTIAL_DEADLINE,
+    )
+    assert evidence.markets_observed - evidence.markets_parsed == 1
+    assert evidence.selections_observed - evidence.selections_parsed == 1
+
+
+def test_reviewed_payload_completeness_requires_profile_permission() -> None:
+    with pytest.raises(PermanentSourceError, match="explicit profile permission"):
+        _complete_evidence(
+            provider_declared_market_references=None,
+            completeness_state=CompletenessState.COMPLETE_BY_REVIEWED_EVENT_PAYLOAD,
+        )
+    evidence = _complete_evidence(
+        provider_declared_market_references=None,
+        reviewed_payload_completeness_permitted=True,
+        completeness_state=CompletenessState.COMPLETE_BY_REVIEWED_EVENT_PAYLOAD,
+    )
+    assert evidence.reviewed_payload_completeness_permitted
 
 
 def test_fifty_unknown_markets_and_150_selections_survive_native_flattening() -> None:

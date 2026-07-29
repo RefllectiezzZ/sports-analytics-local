@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,6 +34,8 @@ from sports_analytics.sources.bookmaker_capture import (
     persist_capture_manifest,
 )
 from sports_analytics.sources.bookmaker_contracts import (
+    CompletenessState,
+    EventCompletenessEvidence,
     ProviderMarketObservation,
     ProviderSelectionObservation,
     ProviderSelectionPriceState,
@@ -144,6 +148,7 @@ def _published_native_snapshot(
     tmp_path: Path,
     *,
     native_market_count_override: int | None = None,
+    complete: bool = False,
 ):
     database = tmp_path / "operational.sqlite3"
     ensure_database_ready(database)
@@ -221,6 +226,22 @@ def _published_native_snapshot(
                 original_event,
                 markets=native_markets[:3],
                 native_markets=native_markets,
+                completeness=(
+                    EventCompletenessEvidence(
+                        provider_declared_market_references=len(native_markets),
+                        markets_observed=len(native_markets),
+                        markets_parsed=len(native_markets),
+                        selections_observed=sum(
+                            len(market.selections) for market in native_markets
+                        ),
+                        selections_parsed=sum(len(market.selections) for market in native_markets),
+                        event_detail_surface_visited=True,
+                        event_detail_readiness_reached=True,
+                        completeness_state=(CompletenessState.COMPLETE_BY_PROVIDER_REFERENCE),
+                    )
+                    if complete
+                    else original_event.completeness
+                ),
             ),
         ),
     )
@@ -286,6 +307,57 @@ def _published_native_snapshot(
     )
 
 
+def _rewrite_snapshot_dataset(
+    *,
+    database: Path,
+    snapshots: Path,
+    snapshot_id: str,
+    dataset_name: str,
+    mutate: Callable[[list[dict[str, Any]]], None],
+    domain_metadata_updates: dict[str, object] | None = None,
+) -> None:
+    """Rewrite one dataset and consistently refresh local integrity metadata."""
+    import hashlib
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from sports_analytics.snapshots.parquet import file_sha256_and_size
+    from sports_analytics.snapshots.spec import MANIFEST_FILENAME
+
+    dataset_path = next(snapshots.rglob(f"{dataset_name}.parquet"))
+    manifest_path = dataset_path.parent / MANIFEST_FILENAME
+    table = pq.read_table(dataset_path)
+    rows = table.to_pylist()
+    mutate(rows)
+    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), dataset_path)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    digest, byte_count = file_sha256_and_size(dataset_path)
+    for entry in manifest["files"]:
+        if entry["relative_filename"] == dataset_path.name:
+            entry["sha256"] = digest
+            entry["byte_count"] = byte_count
+            entry["row_count"] = len(rows)
+            break
+    manifest["row_counts"][dataset_name] = len(rows)
+    if domain_metadata_updates:
+        manifest["domain_metadata"].update(domain_metadata_updates)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+    with connect_database(database) as connection:
+        connection.execute(
+            "UPDATE snapshots SET checksum_sha256 = ? WHERE id = ?",
+            (manifest_digest, snapshot_id),
+        )
+        connection.execute(
+            "UPDATE bookmaker_snapshot_registrations SET checksum_sha256 = ? WHERE snapshot_id = ?",
+            (manifest_digest, snapshot_id),
+        )
+        connection.commit()
+
+
 def test_load_bookmaker_snapshot_verifies_manifest_and_datasets(tmp_path: Path) -> None:
     database, raw, snapshots, snapshot_id = _published_snapshot(tmp_path)
     with connect_database(database) as connection:
@@ -325,6 +397,161 @@ def test_native_v2_manifest_count_mismatch_fails_closed(tmp_path: Path) -> None:
     )
     with connect_database(database) as connection:
         with pytest.raises(SnapshotVerificationError, match="native_market_count"):
+            load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+@pytest.mark.parametrize(
+    "tamper_case",
+    [
+        "native-unpriced",
+        "native-suspended",
+        "native-odds",
+        "native-selection-id",
+        "quote-selection-id",
+        "duplicate-native-link",
+        "capture-mismatch",
+        "reviewed-outcome-mismatch",
+    ],
+)
+def test_native_v2_quote_linkage_tampering_fails_after_checksum_refresh(
+    tmp_path: Path,
+    tamper_case: str,
+) -> None:
+    database, raw, snapshots, snapshot_id, captures = _published_native_snapshot(tmp_path)
+    dataset = (
+        "market_quotes"
+        if tamper_case in {"quote-selection-id", "capture-mismatch"}
+        else "provider_native_selections"
+    )
+    metadata_updates: dict[str, object] | None = None
+
+    def mutate(rows: list[dict[str, Any]]) -> None:
+        linked_index = (
+            next(index for index, row in enumerate(rows) if row.get("canonical_outcome_key"))
+            if dataset == "provider_native_selections"
+            else 0
+        )
+        linked = rows[linked_index]
+        if tamper_case == "native-unpriced":
+            linked["price_state"] = "unpriced"
+            linked["decimal_odds"] = None
+        elif tamper_case == "native-suspended":
+            linked["selection_status"] = "suspended"
+        elif tamper_case == "native-odds":
+            linked["decimal_odds"] = "9.9999"
+        elif tamper_case == "native-selection-id":
+            linked["source_selection_id"] = f"{linked['source_selection_id']}-changed"
+        elif tamper_case == "quote-selection-id":
+            rows[0]["source_selection_id"] = "non-existent-native-selection"
+        elif tamper_case == "duplicate-native-link":
+            rows.append(dict(linked))
+        elif tamper_case == "capture-mismatch":
+            capture_zero_quote = next(
+                row for row in rows if row["source_file_sha256"] == captures[0].checksum_sha256
+            )
+            capture_zero_quote["source_file_sha256"] = captures[1].checksum_sha256
+        elif tamper_case == "reviewed-outcome-mismatch":
+            linked["canonical_outcome_key"] = (
+                "away" if linked["canonical_outcome_key"] != "away" else "home"
+            )
+
+    if tamper_case == "native-unpriced":
+        metadata_updates = {
+            "provider_native_priced_selection_count": 12,
+            "provider_native_unpriced_selection_count": 2,
+        }
+    elif tamper_case == "duplicate-native-link":
+        metadata_updates = {
+            "provider_native_selection_count": 15,
+            "provider_native_priced_selection_count": 14,
+        }
+    _rewrite_snapshot_dataset(
+        database=database,
+        snapshots=snapshots,
+        snapshot_id=snapshot_id,
+        dataset_name=dataset,
+        mutate=mutate,
+        domain_metadata_updates=metadata_updates,
+    )
+
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError):
+            load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_native_v2_changed_native_market_identity_breaks_quote_linkage(
+    tmp_path: Path,
+) -> None:
+    database, raw, snapshots, snapshot_id, _captures = _published_native_snapshot(tmp_path)
+    market_path = next(snapshots.rglob("provider_native_markets.parquet"))
+    import pyarrow.parquet as pq
+
+    first_market_id = str(pq.read_table(market_path).to_pylist()[0]["source_market_id"])
+    changed_market_id = f"{first_market_id}-changed"
+
+    def change_market(rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            if row["source_market_id"] == first_market_id:
+                row["source_market_id"] = changed_market_id
+
+    _rewrite_snapshot_dataset(
+        database=database,
+        snapshots=snapshots,
+        snapshot_id=snapshot_id,
+        dataset_name="provider_native_markets",
+        mutate=change_market,
+    )
+    _rewrite_snapshot_dataset(
+        database=database,
+        snapshots=snapshots,
+        snapshot_id=snapshot_id,
+        dataset_name="provider_native_selections",
+        mutate=change_market,
+    )
+
+    with connect_database(database) as connection:
+        with pytest.raises(SnapshotVerificationError):
+            load_bookmaker_snapshot(
+                database_connection=connection,
+                snapshots_directory=snapshots,
+                raw_directory=raw,
+                snapshot_id=snapshot_id,
+            )
+
+
+def test_native_v2_loader_rejects_tampered_complete_count_arithmetic(
+    tmp_path: Path,
+) -> None:
+    database, raw, snapshots, snapshot_id, _captures = _published_native_snapshot(
+        tmp_path,
+        complete=True,
+    )
+
+    def break_complete_arithmetic(rows: list[dict[str, Any]]) -> None:
+        rows[0]["markets_observed"] = int(rows[0]["markets_observed"]) + 1
+
+    _rewrite_snapshot_dataset(
+        database=database,
+        snapshots=snapshots,
+        snapshot_id=snapshot_id,
+        dataset_name="provider_native_events",
+        mutate=break_complete_arithmetic,
+    )
+    with connect_database(database) as connection:
+        with pytest.raises(
+            SnapshotVerificationError,
+            match="exact clean detail evidence",
+        ):
             load_bookmaker_snapshot(
                 database_connection=connection,
                 snapshots_directory=snapshots,

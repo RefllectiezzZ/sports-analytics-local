@@ -150,8 +150,10 @@ event horizon independently controls which scheduled events are admitted.
 selections (including explicitly unpriced or suspended observations), nullable
 prices with a typed price state, lines, statuses, exact capture references, and
 explicit completeness counts before canonical projection. Unknown markets and
-valid unpriced selections are retained in native inventory and are never
-silently comparable. Existing
+valid unpriced or suspended selections are retained in native inventory and are
+never silently comparable. Canonical outcomes require an exact reviewed parser
+mapping; provider-owned selection IDs remain source identities and are never
+outcome fallbacks. Existing
 `bookmaker-canonical-v1` snapshots remain loadable without changing their
 contract.
 

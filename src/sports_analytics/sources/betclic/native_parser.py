@@ -15,6 +15,7 @@ from sports_analytics.sources.betclic.native_mappings import (
     BETCLIC_PARTICIPANT_ROLE_MAPPINGS,
     BETCLIC_PERIOD_MAPPINGS,
     map_betclic_market_type,
+    map_betclic_selection_outcome,
     map_betclic_sport_code,
 )
 from sports_analytics.sources.bookmaker_contracts import (
@@ -296,6 +297,10 @@ def _parse_native_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 decimal_odds=odds,
                 selection_status=sel_status,
                 price_state=price_state,
+                canonical_outcome_key=map_betclic_selection_outcome(
+                    type_code,
+                    str(item.get("label", sel_id)),
+                ),
                 line=line,
             )
         )

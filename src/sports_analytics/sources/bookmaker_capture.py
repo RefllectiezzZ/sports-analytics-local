@@ -154,6 +154,11 @@ def attach_capture_references(
             event_detail_readiness_reached=evidence.event_detail_readiness_reached,
             truncated_response_count=evidence.truncated_response_count,
             bounded_response_rejection_count=evidence.bounded_response_rejection_count,
+            missing_chunk_count=evidence.missing_chunk_count,
+            event_limit_truncated_count=evidence.event_limit_truncated_count,
+            reviewed_payload_completeness_permitted=(
+                evidence.reviewed_payload_completeness_permitted
+            ),
             completeness_state=evidence.completeness_state,
         )
         events.append(

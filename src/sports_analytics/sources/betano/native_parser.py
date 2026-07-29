@@ -15,6 +15,7 @@ from sports_analytics.sources.betano.native_mappings import (
     BETANO_PARTICIPANT_ROLE_MAPPINGS,
     BETANO_PERIOD_MAPPINGS,
     map_betano_market_type,
+    map_betano_selection_outcome,
     map_betano_sport_code,
 )
 from sports_analytics.sources.bookmaker_contracts import (
@@ -296,6 +297,10 @@ def _parse_native_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 decimal_odds=odds,
                 selection_status=sel_status,
                 price_state=price_state,
+                canonical_outcome_key=map_betano_selection_outcome(
+                    type_code,
+                    str(item.get("name", sel_id)),
+                ),
                 line=line,
             )
         )

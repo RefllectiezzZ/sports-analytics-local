@@ -424,7 +424,10 @@ structurally complete event-detail payload can produce a complete state.
 Landing/popular-event evidence remains `unknown-completeness`; deadlines,
 truncation, navigation failure, and parser rejection produce explicit partial
 states. Unknown markets may publish in native inventory but never become
-canonical or comparable without a reviewed mapping.
+canonical or comparable without a reviewed mapping. Provider selection IDs
+remain source identities rather than canonical-outcome fallbacks. Multi-chunk
+completeness requires one unique chunk for each expected sequence; duplicate
+sequence claims fail closed.
 
 Verification is provider/sport specific. At this implementation point only the
 Betano football landing-inventory profile is registered, and its completeness

@@ -582,9 +582,19 @@ def _translate_selection(
         return None
 
     suspended = _sparse_is_suspended(selection.get("isSuspended"))
+    canonical_outcome = {
+        ("MRES", 1): "home",
+        ("MRES", 2): "draw",
+        ("MRES", 3): "away",
+        ("HCTG", 39): "over",
+        ("HCTG", 40): "under",
+        ("BTSC", 43): "yes",
+        ("BTSC", 44): "no",
+    }[(provider_type, type_id)]
     out: dict[str, object] = {
         "selectionId": selection_id,
         "name": canonical_name,
+        "canonicalOutcomeKey": canonical_outcome,
         "price": format(price, "f"),
         "status": "SUSPENDED" if suspended else "ACTIVE",
         "providerTypeId": type_id,

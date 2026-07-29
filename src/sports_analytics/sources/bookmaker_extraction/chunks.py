@@ -82,14 +82,24 @@ def merge_browser_observed_market_chunks(
             key=lambda item: (item.sequence, item.chunk_id),
         )
     )
-    expected_values = {
-        item.expected_chunk_count for item in unique_chunks if item.expected_chunk_count is not None
-    }
+    by_sequence: dict[int, BrowserObservedMarketChunk] = {}
+    for chunk in unique_chunks:
+        if chunk.sequence in by_sequence:
+            msg = "different chunk identities claim the same sequence"
+            raise ParserError(msg)
+        by_sequence[chunk.sequence] = chunk
+
+    expected_values = {item.expected_chunk_count for item in unique_chunks}
     if len(expected_values) > 1:
         msg = "market chunks disagree on expected chunk count"
         raise ParserError(msg)
     expected_count = next(iter(expected_values), None)
     observed_sequences = {item.sequence for item in unique_chunks}
+    if expected_count is not None and any(
+        sequence not in range(expected_count) for sequence in observed_sequences
+    ):
+        msg = "market chunk sequence is outside the expected range"
+        raise ParserError(msg)
     missing = (
         tuple(index for index in range(expected_count) if index not in observed_sequences)
         if expected_count is not None
@@ -133,9 +143,7 @@ def merge_browser_observed_market_chunks(
             ),
         )
     )
-    complete = (
-        expected_count is not None and not missing and len(observed_sequences) == expected_count
-    )
+    complete = expected_count is not None and observed_sequences == set(range(expected_count))
     return MergedBrowserObservedMarkets(
         source_event_id=next(iter(event_ids)),
         markets=ordered_markets,

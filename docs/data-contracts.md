@@ -610,9 +610,12 @@ typed, length-bounded, deterministically ordered, and linked to
 content-addressed capture identities. A native selection has a separate provider
 status and typed `priced`/`unpriced` price state: priced rows require finite
 decimal odds greater than one, while unpriced rows require a null price and
-remain outside canonical quotes. Complete URLs, query strings, headers,
-cookies, tokens, scripts, HTML, and arbitrary nested provider JSON are not
-members of the contract.
+remain outside canonical quotes. Suspended selections also remain native-only.
+A canonical outcome exists only when a reviewed provider parser assigns the
+typed outcome key; a provider selection ID is provenance identity, never a
+canonical-outcome fallback. Complete URLs, query strings, headers, cookies,
+tokens, scripts, HTML, and arbitrary nested provider JSON are not members of the
+contract.
 
 Admission is split into provider inventory, canonical projection, comparison
 catalogue, and exhaustive completeness. A valid unknown market may be admitted
@@ -620,7 +623,8 @@ to native inventory while producing no canonical or comparable quote. Critical
 identity/schema/evidence contradictions still fail closed. Completeness is
 never inferred from a landing page: it requires an exact provider denominator
 or a reviewed structurally complete event-detail payload; otherwise the state
-is explicit partial or unknown.
+is explicit partial or unknown. Chunk-reference completeness additionally
+requires exactly one unique chunk identity for every expected sequence.
 
 Browser-observed response provenance is typed before provider parsing. A retained
 body carries the exact provider, sport, acquisition-cycle ID, page-route ID,

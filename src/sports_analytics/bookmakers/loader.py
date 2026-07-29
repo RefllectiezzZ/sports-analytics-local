@@ -46,12 +46,17 @@ from sports_analytics.core.exceptions import SnapshotVerificationError
 from sports_analytics.data.repositories.bookmakers import BookmakerRepository
 from sports_analytics.data.repositories.snapshots import SnapshotRepository
 from sports_analytics.data.types import SnapshotStatus
+from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.markets.schemas import DATASET_MARKET_QUOTES
 from sports_analytics.snapshots.paths import resolve_raw_path, resolve_snapshot_dir
 from sports_analytics.snapshots.reader import SnapshotVerificationResult, verify_snapshot_directory
 from sports_analytics.sources.bookmaker_capture import (
     parse_capture_manifest_from_bytes,
     verify_capture_manifest,
+)
+from sports_analytics.sources.bookmaker_contracts import (
+    CanonicalOutcomeKey,
+    CompletenessState,
 )
 from sports_analytics.sports.contracts import ReconciliationState
 from sports_analytics.sports.schemas import (
@@ -84,6 +89,17 @@ class LoadedBookmakerSnapshot:
         tuple[tuple[object, ...], VerifiedBookmakerQuote], ...
     ] = ()
     catalogue: VerifiedQuoteCatalogue | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedNativeInventory:
+    """Strict native-v2 graph and exact source-link indexes."""
+
+    event_count: int
+    market_count: int
+    selection_count: int
+    markets_by_key: dict[tuple[str, str, str, str], dict[str, Any]]
+    selections_by_key: dict[tuple[str, str, str, str, str], dict[str, Any]]
 
 
 def load_bookmaker_snapshot(
@@ -191,9 +207,9 @@ def load_bookmaker_snapshot(
 
     manifest_parent = PurePosixPath(record.relative_path).parent.as_posix()
     snapshot_dir = resolve_snapshot_dir(snapshots_directory, manifest_parent)
-    native_counts = (0, 0, 0)
+    native_inventory: _VerifiedNativeInventory | None = None
     if record.schema_version == BOOKMAKER_SCHEMA_VERSION_V2:
-        native_counts = _verify_native_inventory(
+        native_inventory = _verify_native_inventory(
             snapshot_dir=snapshot_dir,
             provider_id=provider_id,
             sport_code=sport_code,
@@ -211,7 +227,8 @@ def load_bookmaker_snapshot(
             snapshot_id=snapshot_id,
             checksum_sha256=result.manifest_checksum_sha256,
             schema_version=record.schema_version,
-            native_event_count=native_counts[0],
+            native_event_count=(0 if native_inventory is None else native_inventory.event_count),
+            native_inventory=native_inventory,
         )
     )
 
@@ -226,9 +243,11 @@ def load_bookmaker_snapshot(
         registration_only=False,
         event_count=event_count,
         quote_count=quote_count,
-        native_event_count=native_counts[0],
-        native_market_count=native_counts[1],
-        native_selection_count=native_counts[2],
+        native_event_count=(0 if native_inventory is None else native_inventory.event_count),
+        native_market_count=(0 if native_inventory is None else native_inventory.market_count),
+        native_selection_count=(
+            0 if native_inventory is None else native_inventory.selection_count
+        ),
         verified_quotes_by_observation_id=verified_by_observation,
         verified_quotes_by_semantic_identity=verified_by_semantic,
         catalogue=VerifiedQuoteCatalogue(
@@ -279,7 +298,7 @@ def _verify_native_inventory(
     sport_code: str,
     capture_checksums: set[str],
     domain_metadata: dict[str, Any],
-) -> tuple[int, int, int]:
+) -> _VerifiedNativeInventory:
     """Verify native event -> market -> selection graph and evidence linkage."""
     events = _read_dataset(snapshot_dir, DATASET_PROVIDER_NATIVE_EVENTS)
     markets = _read_dataset(snapshot_dir, DATASET_PROVIDER_NATIVE_MARKETS)
@@ -326,6 +345,25 @@ def _verify_native_inventory(
             raise SnapshotVerificationError("provider-native provider mismatch")
         if str(row.get("sport")) != sport_code:
             raise SnapshotVerificationError("provider-native sport mismatch")
+    markets_by_key = {
+        (
+            provider_id,
+            sport_code,
+            str(row["source_event_id"]),
+            str(row["source_market_id"]),
+        ): row
+        for row in markets
+    }
+    selections_by_key = {
+        (
+            provider_id,
+            sport_code,
+            str(row["source_event_id"]),
+            str(row["source_market_id"]),
+            str(row["source_selection_id"]),
+        ): row
+        for row in selections
+    }
     for row in events:
         try:
             references = json.loads(str(row.get("source_capture_ids", "")))
@@ -342,26 +380,23 @@ def _verify_native_inventory(
         event_id = str(row["source_event_id"])
         event_markets = sum(1 for key in market_keys if key[0] == event_id)
         event_selections = sum(1 for key in selection_keys if key[0] == event_id)
-        if int(row.get("markets_parsed", -1)) != event_markets:
-            raise SnapshotVerificationError("native event parsed market count mismatch")
-        if int(row.get("selections_parsed", -1)) != event_selections:
-            raise SnapshotVerificationError("native event parsed selection count mismatch")
-        state = str(row.get("completeness_state"))
-        if state.startswith("complete-") and not (
-            bool(row.get("event_detail_surface_visited"))
-            and bool(row.get("event_detail_readiness_reached"))
-            and int(row.get("truncated_response_count", -1)) == 0
-            and int(row.get("bounded_response_rejection_count", -1)) == 0
-            and int(row.get("markets_rejected", -1)) == 0
-            and int(row.get("selections_rejected", -1)) == 0
-        ):
-            raise SnapshotVerificationError("native complete state lacks clean detail evidence")
+        _verify_native_completeness_row(
+            row,
+            event_market_count=event_markets,
+            event_selection_count=event_selections,
+        )
     for row in (*markets, *selections):
         capture_id = row.get("source_capture_id")
         if not isinstance(capture_id, str) or capture_id not in capture_checksums:
             raise SnapshotVerificationError("native row capture reference mismatch")
     priced_selection_count = 0
     for row in selections:
+        outcome_value = row.get("canonical_outcome_key")
+        if outcome_value is not None:
+            try:
+                CanonicalOutcomeKey(str(outcome_value))
+            except ValueError as exc:
+                raise SnapshotVerificationError("native canonical outcome key is invalid") from exc
         price_state = str(row.get("price_state", ""))
         odds_value = row.get("decimal_odds")
         if price_state == "priced":
@@ -416,7 +451,108 @@ def _verify_native_inventory(
         value = domain_metadata.get(name)
         if type(value) is not int or value != actual:
             raise SnapshotVerificationError(f"{name} metadata count mismatch")
-    return len(events), len(markets), len(selections)
+    return _VerifiedNativeInventory(
+        event_count=len(events),
+        market_count=len(markets),
+        selection_count=len(selections),
+        markets_by_key=markets_by_key,
+        selections_by_key=selections_by_key,
+    )
+
+
+def _verify_native_completeness_row(
+    row: dict[str, Any],
+    *,
+    event_market_count: int,
+    event_selection_count: int,
+) -> None:
+    """Mirror the typed completeness contract against untrusted Arrow rows."""
+    counter_fields = (
+        "market_groups_observed",
+        "markets_observed",
+        "markets_parsed",
+        "markets_rejected",
+        "selections_observed",
+        "selections_parsed",
+        "selections_rejected",
+        "markets_with_valid_price",
+        "source_responses_contributing",
+        "truncated_response_count",
+        "bounded_response_rejection_count",
+        "missing_chunk_count",
+        "event_limit_truncated_count",
+    )
+    counters: dict[str, int] = {}
+    for field in counter_fields:
+        value = row.get(field)
+        if type(value) is not int or value < 0 or value > 1_000_000:
+            raise SnapshotVerificationError(
+                f"native completeness {field} must be a bounded non-negative int"
+            )
+        counters[field] = value
+    declared = row.get("provider_declared_market_references")
+    if declared is not None and (type(declared) is not int or declared < 0 or declared > 1_000_000):
+        raise SnapshotVerificationError(
+            "native provider-declared denominator must be a bounded non-negative int"
+        )
+    for field in (
+        "event_detail_surface_visited",
+        "event_detail_readiness_reached",
+        "reviewed_payload_completeness_permitted",
+    ):
+        if type(row.get(field)) is not bool:
+            raise SnapshotVerificationError("native completeness flags must be booleans")
+    try:
+        state = CompletenessState(str(row.get("completeness_state")))
+    except ValueError as exc:
+        raise SnapshotVerificationError("native completeness state is invalid") from exc
+    if counters["markets_parsed"] != event_market_count:
+        raise SnapshotVerificationError("native event parsed market count mismatch")
+    if counters["selections_parsed"] != event_selection_count:
+        raise SnapshotVerificationError("native event parsed selection count mismatch")
+    if counters["markets_parsed"] + counters["markets_rejected"] > counters["markets_observed"]:
+        raise SnapshotVerificationError("native market completeness arithmetic invalid")
+    if (
+        counters["selections_parsed"] + counters["selections_rejected"]
+        > counters["selections_observed"]
+    ):
+        raise SnapshotVerificationError("native selection completeness arithmetic invalid")
+    if counters["markets_with_valid_price"] > counters["markets_parsed"]:
+        raise SnapshotVerificationError("native priced market count exceeds parsed count")
+    if bool(row["event_detail_readiness_reached"]) and not bool(
+        row["event_detail_surface_visited"]
+    ):
+        raise SnapshotVerificationError("native event-detail readiness requires a visited surface")
+    complete_states = {
+        CompletenessState.COMPLETE_BY_PROVIDER_REFERENCE,
+        CompletenessState.COMPLETE_BY_REVIEWED_EVENT_PAYLOAD,
+    }
+    if state in complete_states and not (
+        bool(row["event_detail_surface_visited"])
+        and bool(row["event_detail_readiness_reached"])
+        and counters["truncated_response_count"] == 0
+        and counters["bounded_response_rejection_count"] == 0
+        and counters["missing_chunk_count"] == 0
+        and counters["event_limit_truncated_count"] == 0
+        and counters["markets_rejected"] == 0
+        and counters["selections_rejected"] == 0
+        and counters["markets_parsed"] == counters["markets_observed"]
+        and counters["selections_parsed"] == counters["selections_observed"]
+    ):
+        raise SnapshotVerificationError("native complete state lacks exact clean detail evidence")
+    if state is CompletenessState.COMPLETE_BY_PROVIDER_REFERENCE and (
+        type(declared) is not int
+        or declared != counters["markets_observed"]
+        or declared != counters["markets_parsed"]
+    ):
+        raise SnapshotVerificationError("native provider-reference denominator mismatch")
+    if (
+        state is CompletenessState.COMPLETE_BY_REVIEWED_EVENT_PAYLOAD
+        and not row["reviewed_payload_completeness_permitted"]
+    ):
+        raise SnapshotVerificationError(
+            "native reviewed-payload completeness lacks profile permission"
+        )
 
 
 def _verify_optional_decimal(value: object, *, field_name: str) -> None:
@@ -442,6 +578,7 @@ def _verify_semantic_datasets(
     checksum_sha256: str,
     schema_version: str,
     native_event_count: int,
+    native_inventory: _VerifiedNativeInventory | None,
 ) -> tuple[
     int,
     int,
@@ -583,6 +720,16 @@ def _verify_semantic_datasets(
         if str(source_event.get("canonical_event_id")) != identity.canonical_event_id:
             raise SnapshotVerificationError(
                 "quote canonical event does not match reconciled source event"
+            )
+        if schema_version == BOOKMAKER_SCHEMA_VERSION_V2:
+            if native_inventory is None:
+                raise SnapshotVerificationError("native-v2 quote linkage index is missing")
+            _verify_quote_native_link(
+                quote_row=row,
+                provider_id=provider_id,
+                sport_code=sport_code,
+                native_inventory=native_inventory,
+                capture_checksums=capture_checksums,
             )
         eligibility_row = eligibility_by_observation[identity.quote_observation_id]
         overtime_scope = (
@@ -765,6 +912,82 @@ def _verify_source_event_graph(
             )
         resolved_event_ids.add(str(canonical_event_id))
     return resolved_event_ids
+
+
+def _verify_quote_native_link(
+    *,
+    quote_row: dict[str, Any],
+    provider_id: str,
+    sport_code: str,
+    native_inventory: _VerifiedNativeInventory,
+    capture_checksums: set[str],
+) -> None:
+    """Cross-link one native-v2 canonical quote to exact active priced evidence."""
+    source_event_id = quote_row.get("source_event_id")
+    source_market_id = quote_row.get("source_market_id")
+    source_selection_id = quote_row.get("source_selection_id")
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (source_event_id, source_market_id, source_selection_id)
+    ):
+        raise SnapshotVerificationError(
+            "native-v2 quote requires exact source event, market, and selection identities"
+        )
+    assert isinstance(source_event_id, str)
+    assert isinstance(source_market_id, str)
+    assert isinstance(source_selection_id, str)
+    market_key = (provider_id, sport_code, source_event_id, source_market_id)
+    selection_key = (*market_key, source_selection_id)
+    native_market = native_inventory.markets_by_key.get(market_key)
+    native_selection = native_inventory.selections_by_key.get(selection_key)
+    if native_market is None or native_selection is None:
+        raise SnapshotVerificationError(
+            "canonical quote has no exact provider-native selection linkage"
+        )
+    try:
+        native_market_status = MarketStatus(str(native_market.get("market_status")))
+        native_selection_status = SelectionStatus(str(native_selection.get("selection_status")))
+        quote_market_status = MarketStatus(str(quote_row.get("market_status")))
+        quote_selection_status = SelectionStatus(str(quote_row.get("selection_status")))
+    except ValueError as exc:
+        raise SnapshotVerificationError("native-v2 quote linkage status is invalid") from exc
+    if (
+        native_market_status is not MarketStatus.OPEN
+        or quote_market_status is not MarketStatus.OPEN
+    ):
+        raise SnapshotVerificationError("canonical quote requires an open native market")
+    if (
+        native_selection_status is not SelectionStatus.ACTIVE
+        or quote_selection_status is not SelectionStatus.ACTIVE
+    ):
+        raise SnapshotVerificationError("canonical quote requires an active native selection")
+    if str(native_selection.get("price_state")) != "priced":
+        raise SnapshotVerificationError("canonical quote requires a priced native selection")
+    try:
+        native_odds = Decimal(str(native_selection["decimal_odds"]))
+        quote_odds = Decimal(str(quote_row["decimal_odds"]))
+    except (InvalidOperation, KeyError) as exc:
+        raise SnapshotVerificationError("native-v2 quote linkage odds are malformed") from exc
+    if native_odds != quote_odds:
+        raise SnapshotVerificationError("canonical quote odds differ from native selection")
+    capture_id = native_selection.get("source_capture_id")
+    if not isinstance(capture_id, str) or capture_id not in capture_checksums:
+        raise SnapshotVerificationError("canonical quote native selection capture is not admitted")
+    if quote_row.get("source_file_sha256") != capture_id:
+        raise SnapshotVerificationError(
+            "canonical quote capture differs from native selection provenance"
+        )
+    outcome_value = native_selection.get("canonical_outcome_key")
+    try:
+        native_outcome = CanonicalOutcomeKey(str(outcome_value))
+    except ValueError as exc:
+        raise SnapshotVerificationError(
+            "canonical quote native selection lacks reviewed outcome semantics"
+        ) from exc
+    if str(quote_row.get("outcome_key")) != native_outcome.value:
+        raise SnapshotVerificationError(
+            "canonical quote outcome differs from reviewed native semantics"
+        )
 
 
 def _validate_eligibility_matches_quote(

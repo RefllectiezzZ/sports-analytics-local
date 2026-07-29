@@ -41,15 +41,15 @@ def _chunk(
     sequence: int,
     markets: tuple[ProviderMarketObservation, ...],
     *,
-    expected: int = 2,
+    expected: int | None = 2,
+    checksum: str | None = None,
 ) -> BrowserObservedMarketChunk:
-    checksum = f"{sequence + 1:064x}"
     return BrowserObservedMarketChunk(
         source_event_id="synthetic-event",
         chunk_id=identity,
         sequence=sequence,
         expected_chunk_count=expected,
-        contributing_capture_checksum=checksum,
+        contributing_capture_checksum=checksum or f"{sequence + 1:064x}",
         markets=markets,
     )
 
@@ -78,6 +78,34 @@ def test_missing_chunk_prevents_complete_classification() -> None:
     )
     assert merged.missing_chunk_sequences == (1,)
     assert not merged.complete_by_chunk_reference
+
+
+def test_unknown_expected_chunk_count_cannot_prove_completeness() -> None:
+    merged = merge_browser_observed_market_chunks(
+        (_chunk("chunk-0", 0, (_market("market-a", 1),), expected=None),)
+    )
+    assert merged.missing_chunk_sequences == ()
+    assert not merged.complete_by_chunk_reference
+
+
+def test_different_chunk_ids_cannot_claim_the_same_sequence() -> None:
+    first = _chunk("chunk-a", 0, (_market("market-a", 1),), expected=1)
+    second = _chunk("chunk-b", 0, (_market("market-b", 2),), expected=1)
+    with pytest.raises(ParserError, match="same sequence"):
+        merge_browser_observed_market_chunks((first, second))
+
+
+def test_duplicate_sequence_with_different_checksum_fails() -> None:
+    market = (_market("market-a", 1),)
+    first = _chunk("chunk-a", 0, market, expected=1, checksum="a" * 64)
+    second = _chunk("chunk-b", 0, market, expected=1, checksum="b" * 64)
+    with pytest.raises(ParserError, match="same sequence"):
+        merge_browser_observed_market_chunks((first, second))
+
+
+def test_chunk_sequence_must_be_inside_its_expected_range() -> None:
+    with pytest.raises(ParserError, match="inconsistent with sequence"):
+        _chunk("chunk-2", 2, (_market("market-a", 1),), expected=2)
 
 
 @pytest.mark.parametrize("contradict_selection", [False, True])

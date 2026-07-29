@@ -39,6 +39,18 @@ class ProviderSelectionPriceState(StrEnum):
     UNPRICED = "unpriced"
 
 
+class CanonicalOutcomeKey(StrEnum):
+    """Closed canonical outcome semantics assignable only by reviewed parsers."""
+
+    HOME = "home"
+    DRAW = "draw"
+    AWAY = "away"
+    OVER = "over"
+    UNDER = "under"
+    YES = "yes"
+    NO = "no"
+
+
 class ParserDriftSeverity(StrEnum):
     """How severely a parser observation diverges from the expected schema."""
 
@@ -78,6 +90,9 @@ class EventCompletenessEvidence:
     event_detail_readiness_reached: bool = False
     truncated_response_count: int = 0
     bounded_response_rejection_count: int = 0
+    missing_chunk_count: int = 0
+    event_limit_truncated_count: int = 0
+    reviewed_payload_completeness_permitted: bool = False
     completeness_state: CompletenessState = CompletenessState.UNKNOWN
 
     def __post_init__(self) -> None:
@@ -93,6 +108,8 @@ class EventCompletenessEvidence:
             "source_responses_contributing",
             "truncated_response_count",
             "bounded_response_rejection_count",
+            "missing_chunk_count",
+            "event_limit_truncated_count",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 0 or value > 1_000_000:
@@ -107,6 +124,7 @@ class EventCompletenessEvidence:
         if (
             type(self.event_detail_surface_visited) is not bool
             or type(self.event_detail_readiness_reached) is not bool
+            or type(self.reviewed_payload_completeness_permitted) is not bool
         ):
             msg = "event-detail evidence flags must be booleans"
             raise PermanentSourceError(msg)
@@ -131,15 +149,29 @@ class EventCompletenessEvidence:
                 and self.event_detail_readiness_reached
                 and self.truncated_response_count == 0
                 and self.bounded_response_rejection_count == 0
+                and self.missing_chunk_count == 0
+                and self.event_limit_truncated_count == 0
                 and self.markets_rejected == 0
                 and self.selections_rejected == 0
+                and self.markets_parsed == self.markets_observed
+                and self.selections_parsed == self.selections_observed
             ):
                 msg = "complete state requires clean event-detail evidence"
                 raise PermanentSourceError(msg)
         if self.completeness_state is CompletenessState.COMPLETE_BY_PROVIDER_REFERENCE:
-            if declared is None or declared != self.markets_parsed:
+            if (
+                declared is None
+                or declared != self.markets_observed
+                or declared != self.markets_parsed
+            ):
                 msg = "provider-reference completeness requires an exact market denominator"
                 raise PermanentSourceError(msg)
+        if (
+            self.completeness_state is CompletenessState.COMPLETE_BY_REVIEWED_EVENT_PAYLOAD
+            and not self.reviewed_payload_completeness_permitted
+        ):
+            msg = "reviewed-payload completeness requires explicit profile permission"
+            raise PermanentSourceError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +218,7 @@ class ProviderSelectionObservation:
     decimal_odds: Decimal | None
     selection_status: SelectionStatus
     price_state: ProviderSelectionPriceState = ProviderSelectionPriceState.PRICED
+    canonical_outcome_key: CanonicalOutcomeKey | None = None
     line: Decimal | None = None
     provider_selection_type: str | None = None
     source_participant_id: str | None = None
@@ -201,6 +234,12 @@ class ProviderSelectionObservation:
             raise NormalizationError(msg)
         if not isinstance(self.price_state, ProviderSelectionPriceState):
             msg = "selection price_state must use the typed contract"
+            raise NormalizationError(msg)
+        if self.canonical_outcome_key is not None and not isinstance(
+            self.canonical_outcome_key,
+            CanonicalOutcomeKey,
+        ):
+            msg = "canonical_outcome_key must use the reviewed typed contract"
             raise NormalizationError(msg)
         if self.price_state is ProviderSelectionPriceState.PRICED:
             if (

@@ -51,6 +51,9 @@ def provider_native_events_schema(*, schema_version: str) -> pa.Schema:
             pa.field("event_detail_readiness_reached", pa.bool_(), nullable=False),
             pa.field("truncated_response_count", pa.int32(), nullable=False),
             pa.field("bounded_response_rejection_count", pa.int32(), nullable=False),
+            pa.field("missing_chunk_count", pa.int32(), nullable=False),
+            pa.field("event_limit_truncated_count", pa.int32(), nullable=False),
+            pa.field("reviewed_payload_completeness_permitted", pa.bool_(), nullable=False),
             pa.field("completeness_state", dictionary_string(), nullable=False),
             pa.field("schema_version", dictionary_string(), nullable=False),
         ],
@@ -101,6 +104,7 @@ def provider_native_selections_schema(*, schema_version: str) -> pa.Schema:
             pa.field("source_event_id", pa.string(), nullable=False),
             pa.field("source_market_id", pa.string(), nullable=False),
             pa.field("source_selection_id", pa.string(), nullable=False),
+            pa.field("canonical_outcome_key", dictionary_string(), nullable=True),
             pa.field("provider_selection_type", pa.string(), nullable=True),
             pa.field("selection_label", pa.string(), nullable=False),
             pa.field("decimal_odds", pa.string(), nullable=True),
@@ -178,6 +182,11 @@ def provider_native_rows(
                 "event_detail_readiness_reached": evidence.event_detail_readiness_reached,
                 "truncated_response_count": evidence.truncated_response_count,
                 "bounded_response_rejection_count": evidence.bounded_response_rejection_count,
+                "missing_chunk_count": evidence.missing_chunk_count,
+                "event_limit_truncated_count": evidence.event_limit_truncated_count,
+                "reviewed_payload_completeness_permitted": (
+                    evidence.reviewed_payload_completeness_permitted
+                ),
                 "completeness_state": evidence.completeness_state.value,
                 "schema_version": schema_version,
             }
@@ -218,6 +227,11 @@ def provider_native_rows(
                         "source_event_id": event.source_event_id,
                         "source_market_id": market.source_market_id,
                         "source_selection_id": selection.source_selection_id,
+                        "canonical_outcome_key": (
+                            None
+                            if selection.canonical_outcome_key is None
+                            else selection.canonical_outcome_key.value
+                        ),
                         "provider_selection_type": selection.provider_selection_type,
                         "selection_label": selection.display_label,
                         "decimal_odds": _decimal_text(selection.decimal_odds),

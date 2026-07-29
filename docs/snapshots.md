@@ -328,7 +328,11 @@ The v2 primary dataset is provider-native selections, so valid native evidence
 may publish with zero canonical quotes. The strict loader verifies native
 event/market/selection identities, graph relationships, exact decimal strings,
 deterministic order, evidence checksums, completeness counts, and the canonical
-projection independently. Unknown markets remain native and non-comparable.
+projection independently. Every v2 canonical quote must cross-link to exactly
+one open-market, active, priced native selection with identical odds, reviewed
+outcome semantics, source identities, and admitted capture provenance. Unknown
+markets and unknown, suspended, or unpriced selections remain native and
+non-comparable.
 
 ## Implementation status
 

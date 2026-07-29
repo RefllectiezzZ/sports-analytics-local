@@ -135,6 +135,13 @@ def _bundle_from_extraction(
                         bounded_response_rejection_count=(
                             event.completeness.bounded_response_rejection_count + truncated_count
                         ),
+                        missing_chunk_count=event.completeness.missing_chunk_count,
+                        event_limit_truncated_count=(
+                            event.completeness.event_limit_truncated_count
+                        ),
+                        reviewed_payload_completeness_permitted=(
+                            event.completeness.reviewed_payload_completeness_permitted
+                        ),
                         completeness_state=(CompletenessState.PARTIAL_TRUNCATED_RESPONSE),
                     ),
                 )

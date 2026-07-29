@@ -178,6 +178,11 @@ def _translate_market(raw: dict[str, Any]) -> dict[str, object]:
                 or sel.get("selectionId")
                 or sel.get("source_selection_id"),
                 "name": sel.get("name") or sel.get("display_label"),
+                "canonicalOutcomeKey": _example_outcome_key(
+                    canonical,
+                    sel.get("canonical_outcome_key"),
+                    sel.get("name") or sel.get("display_label"),
+                ),
                 "price": sel.get("price") or sel.get("decimal_odds"),
                 "status": (sel.get("status") or sel.get("selection_status") or "ACTIVE").upper(),
                 "line": sel.get("line"),
@@ -186,6 +191,33 @@ def _translate_market(raw: dict[str, Any]) -> dict[str, object]:
             if isinstance(sel, dict)
         ],
     }
+
+
+def _example_outcome_key(
+    canonical_market_definition_id: object,
+    explicit: object,
+    display_label: object,
+) -> str | None:
+    if explicit is not None:
+        return str(explicit)
+    exact = {
+        ("football-match-result-1x2", "Home"): "home",
+        ("football-match-result-1x2", "Draw"): "draw",
+        ("football-match-result-1x2", "Away"): "away",
+        ("football-total-goals", "Over"): "over",
+        ("football-total-goals", "Under"): "under",
+        ("football-btts", "Yes"): "yes",
+        ("football-btts", "No"): "no",
+        ("basketball-match-winner-with-ot", "Home"): "home",
+        ("basketball-match-winner-with-ot", "Away"): "away",
+        ("basketball-total-points-with-ot", "Over"): "over",
+        ("basketball-total-points-with-ot", "Under"): "under",
+        ("basketball-spread-with-ot", "Home -3.5"): "home",
+        ("basketball-spread-with-ot", "Away +3.5"): "away",
+        ("tennis-match-winner", "Elena Marquez"): "home",
+        ("tennis-match-winner", "Sofia Lindqvist"): "away",
+    }
+    return exact.get((str(canonical_market_definition_id), str(display_label)))
 
 
 def _sport_code(value: object) -> str:

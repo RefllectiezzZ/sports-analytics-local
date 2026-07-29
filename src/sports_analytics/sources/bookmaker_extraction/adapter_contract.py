@@ -10,6 +10,7 @@ from typing import Any
 from sports_analytics.core.exceptions import NormalizationError, ParserError
 from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.bookmaker_contracts import (
+    CanonicalOutcomeKey,
     ParserDriftSeverity,
     ProviderAcquisitionBundle,
     ProviderEventObservation,
@@ -280,6 +281,7 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 decimal_odds=odds,
                 selection_status=sel_status,
                 price_state=price_state,
+                canonical_outcome_key=_parse_reviewed_outcome_key(item),
                 line=line,
                 provider_selection_type=(
                     str(item["providerTypeId"]) if item.get("providerTypeId") is not None else None
@@ -313,6 +315,17 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             str(raw["sourceCaptureId"]) if raw.get("sourceCaptureId") is not None else None
         ),
     )
+
+
+def _parse_reviewed_outcome_key(raw: dict[str, Any]) -> CanonicalOutcomeKey | None:
+    value = raw.get("canonicalOutcomeKey")
+    if value is None:
+        return None
+    try:
+        return CanonicalOutcomeKey(str(value))
+    except ValueError as exc:
+        msg = "unsupported canonicalOutcomeKey"
+        raise ParserError(msg) from exc
 
 
 def _map_sport_code(code: str) -> str:
