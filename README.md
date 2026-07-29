@@ -53,9 +53,10 @@ Implemented now:
   manual previews, persisted combinations, and backtest/audit views;
 - canonical result snapshots, deterministic analytical settlement,
   persisted-evidence monitoring, and explicit champion–challenger governance;
-- Betano Portugal / Betclic Portugal bookmaker acquisition foundation (visible
-  Playwright Chromium, fixed public routes, raw captures, canonical current-odds
-  snapshots, selection/multiples policy, local scheduler, migration `0005`);
+- Betano Portugal / Betclic Portugal bookmaker acquisition foundation (ordinary
+  headless Chromium by default, fixed public routes, raw captures, v1 canonical
+  and v2 provider-native snapshots, selection policy, local scheduler,
+  migration `0005`);
 - documentation, linting, typing, and tests.
 
 **Not implemented**: login or bet placement; CAPTCHA / anti-bot bypass; guaranteed
@@ -106,8 +107,10 @@ cp config/settings.example.toml config/settings.toml
 
 ### Playwright Chromium (bookmaker acquisition)
 
-Bookmaker acquisition uses ordinary visible Playwright Chromium automation on
-localhost only. After installing the package, install the browser once:
+Bookmaker acquisition uses ordinary Playwright Chromium automation on localhost
+only. Headless is the default; visible and best-effort minimized visible modes
+remain available. All modes use the same allowlists, bounds, block detection,
+and sanitization. After installing the package, install the browser once:
 
 ```bash
 python -m playwright install chromium
@@ -120,13 +123,60 @@ classified and cooled down; the last valid immutable snapshot may be preserved a
 stale/unavailable, never labelled current. Live acquisition is best-effort and
 is **not** guaranteed to work indefinitely as sites change.
 
-## Bookmaker acquisition (PR #11)
+The production transport is browser-observed: Chromium navigates a fixed public
+provider route, the provider page naturally initiates its own network activity,
+and a `page.on("response")` observer may retain only bounded, structurally
+approved response bodies from that same page and acquisition cycle. Provider
+adapters never replay discovered endpoints through `requests`, `httpx`,
+Playwright request contexts, copied cURL, cookies, headers, tokens, or forged
+request bodies. Chromium supplies its ordinary browser identity.
+
+## Bookmaker acquisition (PR #12 foundation)
 
 Architecture is localhost-only: SQLite jobs + Parquet snapshots on the local
-filesystem. Preferred provider is Betano (`betano-pt`); comparison / first
-fallback is Betclic (`betclic-pt`). Selection default is
-`preferred-unless-better`. Initial sports: football, basketball, tennis
-pre-match only.
+filesystem. Betclic (`betclic-pt`) is the next priority provider integration;
+it is not yet operational because no event transport or extraction profile has
+been verified. Betano (`betano-pt`) remains experimental and lower priority.
+Existing non-bookmaker sources retain their historical and analytical roles;
+they are not current-odds sources. Initial bookmaker scope is football,
+basketball, and tennis pre-match only.
+
+Every job carries an exact half-open UTC event horizon. The default is the next
+48 hours, the configurable hard maximum is 168 hours, and the default per-sport
+event cap is 100. Refresh cadence controls how often acquisition runs; the
+event horizon independently controls which scheduled events are admitted.
+
+`bookmaker-native-v2` snapshots preserve typed provider-native events, markets,
+selections (including explicitly unpriced or suspended observations), nullable
+prices with a typed price state, lines, statuses, exact capture references, and
+explicit completeness counts before canonical projection. Unknown markets and
+valid unpriced or suspended selections are retained in native inventory and are
+never silently comparable. Canonical outcomes require an exact reviewed parser
+mapping; provider-owned selection IDs remain source identities and are never
+outcome fallbacks. Existing
+`bookmaker-canonical-v1` snapshots remain loadable without changing their
+contract.
+
+Provider/sport verification is exact. The existing Betano football
+`topEventsV2` profile is verified only for its reviewed landing inventory and is
+explicitly incapable of proving exhaustive event-detail coverage. Betano
+basketball/tennis and all Betclic sport profiles remain disabled until real
+event-detail structures and stable identities are evidenced. A landing or
+popular-event response is always `unknown-completeness`, never exhaustive.
+The provider-neutral Stage-B planner/executor extension is wired into the
+production adapter call chain but disabled for every current provider/sport
+profile. Its end-to-end traversal test uses only a synthetic capability and
+executor; it does not establish operational event-detail extraction.
+This PR establishes the acquisition foundation but does not provide exhaustive
+live provider support.
+
+The default body limit is 2 MiB per response and 16 MiB per cycle. Oversize or
+exhausted-budget responses are explicit partial evidence. Event-detail traversal
+is bounded by a concurrency-one, fixed one-second minimum interval, 30-second
+navigation-timeout, zero-retry contract if a reviewed provider profile is later
+enabled; no current profile enables that path. An
+explicit access denial, CAPTCHA, regional refusal, or anti-automation block
+stops the cycle immediately.
 
 Same-bookmaker multiple invariant: a multiple is valid only when every leg uses
 quotes from exactly one bookmaker. Betano-only and Betclic-only totals are
@@ -145,6 +195,11 @@ python run_local.py --config config/settings.toml
 `--worker-once`, also starts the bookmaker scheduler. Operator status remains
 available through database/status CLIs and provider-status records; review
 provider terms before enabling live acquisition.
+
+Localhost operation, internal analysis, and technical profile verification are
+not claims of legal authorization. Operators must separately review current
+provider terms and applicable law before enabling acquisition; captured data is
+not intended for republication.
 
 Offline synthetic fixtures under `tests/fixtures/betano/` and
 `tests/fixtures/betclic/` drive parser and domain tests without live pages.
@@ -575,8 +630,9 @@ champion–challenger operations.
 - Analytical datasets remain immutable artifacts. SQLite additionally stores
   minimal operational result, settlement, monitoring, model-role, and bookmaker
   acquisition indexes.
-- Visible Playwright automation is used only for allowlisted bookmaker public
-  routes when enabled; there is no arbitrary URL/HTML scraping surface.
+- Ordinary headless/visible Playwright automation is used only for allowlisted
+  bookmaker public routes when enabled; there is no arbitrary URL/HTML scraping
+  surface and no stealth or access-control evasion.
 - `run_local.py` supervises the worker and optional bookmaker scheduler; it does
   not start Streamlit, which is launched explicitly.
 - Durable handlers include football ingestion, bookmaker current-odds ingestion,

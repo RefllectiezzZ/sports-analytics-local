@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from sports_analytics.bookmakers.loader import load_verified_bookmaker_quotes
+from sports_analytics.bookmakers.navigation import (
+    DisabledStageBNavigationCapability,
+    EventNavigationCandidate,
+    build_event_navigation_plan,
+    validate_event_navigation_target,
+)
 from sports_analytics.bookmakers.service import BookmakerIngestionService
+from sports_analytics.bookmakers.window import AcquisitionWindow
+from sports_analytics.core.exceptions import PermanentSourceError
 from sports_analytics.core.settings import BookmakersSettings
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.migrations import ensure_database_ready
 from sports_analytics.markets.contracts import MarketStatus
 from sports_analytics.sources.betano.catalog import ADAPTER_VERSION, PROVIDER_ID
+from sports_analytics.sources.bookmaker_contracts import CompletenessState
 from sports_analytics.sources.bookmaker_extraction.betano_topeventsv2 import (
     BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
     BETANO_TOPEVENTSV2_PROFILE_ID,
@@ -23,7 +36,9 @@ from sports_analytics.sources.bookmaker_extraction.pipeline import apply_extract
 from sports_analytics.sources.bookmaker_extraction.registry import get_verified_extraction_profile
 from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
+    BrowserBodyCaptureState,
     BrowserMode,
+    BrowserNetworkMetadata,
     BrowserResponseObservation,
 )
 from sports_analytics.sources.browser.playwright_runtime import RecordingBrowserSession
@@ -191,6 +206,49 @@ def test_pipeline_produces_prematch_events_without_invented_rules() -> None:
             assert market.selections
 
 
+def test_oversized_browser_response_downgrades_event_completeness() -> None:
+    browser = _browser(FIXTURE.read_text(encoding="utf-8"))
+    browser = replace(
+        browser,
+        network_metadata=(
+            BrowserNetworkMetadata(
+                hostname="www.betano.pt",
+                resource_type="xhr",
+                status_code=200,
+                content_type="application/json",
+                byte_size=3_000_000,
+                sanitized_path_hash="a" * 64,
+                structural_fingerprint=None,
+                hostname_approved=True,
+                candidate_keys_detected=False,
+                body_captured=False,
+                observed_at_utc=OBSERVED,
+                provider_id=PROVIDER_ID,
+                sport="football",
+                acquisition_cycle_id=browser.acquisition_cycle_id,
+                page_route_id="football-prematch",
+                request_method="GET",
+                declared_content_length=3_000_000,
+                body_capture_state=(BrowserBodyCaptureState.DECLARED_SIZE_REJECTED),
+            ),
+        ),
+    )
+    bundle = apply_extraction_profile(
+        profile=BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
+        browser_result=browser,
+        captures=(),
+        adapter_version=ADAPTER_VERSION,
+        parser_version="betano-pt-parser-v1",
+        observed_at_utc=OBSERVED,
+        sport="football",
+    )
+    assert "response-capture-truncated" in bundle.drift_codes
+    assert all(
+        event.completeness.completeness_state is CompletenessState.PARTIAL_TRUNCATED_RESPONSE
+        for event in bundle.events
+    )
+
+
 def test_adapter_uses_response_observation_timestamps(tmp_path: Path) -> None:
     from sports_analytics.sources.betano.adapter import acquire_betano_current_odds
 
@@ -231,6 +289,147 @@ def test_adapter_uses_response_observation_timestamps(tmp_path: Path) -> None:
     assert captures[0].retrieved_at == response_time
     assert bundle.observed_at_utc == response_time
     assert len(bundle.events) == 2
+
+
+def test_adapter_reaches_fake_stage_b_planner_and_executor_offline(
+    tmp_path: Path,
+) -> None:
+    from sports_analytics.sources.betano.adapter import acquire_betano_current_odds
+
+    stage_a = _browser(FIXTURE.read_text(encoding="utf-8"))
+    window = AcquisitionWindow(
+        window_start_utc=datetime(2036, 3, 3, 0, 0, tzinfo=UTC),
+        window_end_utc=datetime(2036, 3, 5, 0, 0, tzinfo=UTC),
+        maximum_events=10,
+        evaluated_at_utc=OBSERVED,
+    )
+
+    class _FakeCapability:
+        provider_id = PROVIDER_ID
+        sport = "football"
+        enabled = True
+
+        def __init__(self) -> None:
+            self.candidate_calls = 0
+            self.plan_calls = 0
+            self.validation_calls = 0
+
+        def candidates(self, *, stage_a_result, stage_a_bundle):
+            self.candidate_calls += 1
+            assert stage_a_result is stage_a
+            return tuple(
+                EventNavigationCandidate(
+                    source_event_id=event.source_event_id,
+                    scheduled_start_utc=event.scheduled_start_utc,
+                    provider_url=f"https://www.provider.test/event/{event.source_event_id}",
+                )
+                for event in stage_a_bundle.events
+            )
+
+        def build_plan(self, *, candidates, acquisition_window):
+            self.plan_calls += 1
+            return build_event_navigation_plan(
+                provider_id=self.provider_id,
+                sport=self.sport,
+                candidates=candidates,
+                acquisition_window=acquisition_window,
+                allowed_hostnames=frozenset({"www.provider.test"}),
+                approved_event_path_pattern=re.compile(r"/event/[a-z0-9-]{1,80}"),
+                approved_path_template="/event/{event-route-id}",
+            )
+
+        def validate_target(self, target) -> None:
+            self.validation_calls += 1
+            validate_event_navigation_target(
+                target,
+                allowed_hostnames=frozenset({"www.provider.test"}),
+                approved_event_path_pattern=re.compile(r"/event/[a-z0-9-]{1,80}"),
+            )
+
+    class _FakeExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, plan):
+            self.calls += 1
+            assert [target.source_event_id for target in plan.targets] == [
+                "synth-event-alpha",
+                "synth-event-beta",
+            ]
+            return BrowserAcquisitionResult(
+                provider_id=plan.provider_id,
+                sport=plan.sport,
+                acquisition_cycle_id=stage_a.acquisition_cycle_id,
+                observed_at_utc=OBSERVED + timedelta(seconds=1),
+                browser_mode=BrowserMode.VISIBLE,
+                pages=(),
+                responses=(),
+                diagnostics=(),
+                block_reason=None,
+                warnings=("synthetic-stage-b-evidence",),
+            )
+
+    capability = _FakeCapability()
+    executor = _FakeExecutor()
+    merged, bundle, captures = acquire_betano_current_odds(
+        sport="football",
+        acquisition_cycle_id=stage_a.acquisition_cycle_id,
+        observed_at_utc=OBSERVED,
+        raw_directory=tmp_path / "raw",
+        session=RecordingBrowserSession(stage_a),
+        acquisition_window=window,
+        stage_b_capability=capability,
+        stage_b_executor=executor,
+    )
+    assert capability.candidate_calls == 1
+    assert capability.plan_calls == 1
+    assert capability.validation_calls == 2
+    assert executor.calls == 1
+    assert merged.warnings == ("synthetic-stage-b-evidence",)
+    assert len(bundle.events) == 2
+    assert len(captures) == 1
+
+
+def test_adapter_disabled_stage_b_never_invokes_executor(tmp_path: Path) -> None:
+    from sports_analytics.sources.betano.adapter import acquire_betano_current_odds
+
+    stage_a = _browser(FIXTURE.read_text(encoding="utf-8"))
+
+    class _ForbiddenExecutor:
+        def execute(self, _plan):
+            raise AssertionError("disabled Stage-B must not invoke the executor")
+
+    _result, bundle, _captures = acquire_betano_current_odds(
+        sport="football",
+        acquisition_cycle_id=stage_a.acquisition_cycle_id,
+        observed_at_utc=OBSERVED,
+        raw_directory=tmp_path / "raw",
+        session=RecordingBrowserSession(stage_a),
+        stage_b_capability=DisabledStageBNavigationCapability(
+            provider_id=PROVIDER_ID,
+            sport="football",
+        ),
+        stage_b_executor=_ForbiddenExecutor(),
+    )
+    assert len(bundle.events) == 2
+
+
+def test_adapter_rejects_mismatched_stage_b_capability(tmp_path: Path) -> None:
+    from sports_analytics.sources.betano.adapter import acquire_betano_current_odds
+
+    stage_a = _browser(FIXTURE.read_text(encoding="utf-8"))
+    with pytest.raises(PermanentSourceError, match="provider/sport mismatch"):
+        acquire_betano_current_odds(
+            sport="football",
+            acquisition_cycle_id=stage_a.acquisition_cycle_id,
+            observed_at_utc=OBSERVED,
+            raw_directory=tmp_path / "raw",
+            session=RecordingBrowserSession(stage_a),
+            stage_b_capability=DisabledStageBNavigationCapability(
+                provider_id="betclic-pt",
+                sport="football",
+            ),
+        )
 
 
 def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
@@ -303,7 +502,18 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
                 observed_at_utc=base.observed_at_utc,
                 browser_mode=base.browser_mode,
                 pages=base.pages,
-                responses=base.responses,
+                responses=tuple(
+                    replace(
+                        response,
+                        acquisition_cycle_id=str(
+                            kwargs.get(
+                                "acquisition_cycle_id",
+                                base.acquisition_cycle_id,
+                            )
+                        ),
+                    )
+                    for response in base.responses
+                ),
                 diagnostics=base.diagnostics,
                 block_reason=base.block_reason,
                 warnings=base.warnings,
@@ -323,8 +533,14 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
         sport="football",
         observed_at_utc=observed_1,
         acquisition_cycle_id="e2e-betano-1",
+        acquisition_window=AcquisitionWindow(
+            window_start_utc=datetime(2036, 3, 3, 0, 0, tzinfo=UTC),
+            window_end_utc=datetime(2036, 3, 5, 0, 0, tzinfo=UTC),
+            maximum_events=100,
+            evaluated_at_utc=observed_1,
+        ),
     )
-    assert first.status == "succeeded"
+    assert first.status == "partial"
     assert first.snapshot_id is not None
     assert first.events_observed >= 2
     assert first.valid_quotes_observed >= 2
@@ -344,8 +560,14 @@ def test_end_to_end_publish_and_strict_reload(tmp_path: Path) -> None:
         sport="football",
         observed_at_utc=observed_2,
         acquisition_cycle_id="e2e-betano-2",
+        acquisition_window=AcquisitionWindow(
+            window_start_utc=datetime(2036, 3, 3, 0, 0, tzinfo=UTC),
+            window_end_utc=datetime(2036, 3, 5, 0, 0, tzinfo=UTC),
+            maximum_events=100,
+            evaluated_at_utc=observed_2,
+        ),
     )
-    assert second.status == "succeeded"
+    assert second.status == "partial"
     assert second.snapshot_id is not None
 
     with connect_database(tmp_path / "db.sqlite3", read_only=True) as connection:

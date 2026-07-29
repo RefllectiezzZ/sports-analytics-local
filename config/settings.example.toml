@@ -55,8 +55,18 @@ enabled = false
 preferred_provider = "betano-pt"
 comparison_provider = "betclic-pt"
 selection_mode = "preferred-unless-better"
-browser_mode = "visible"
+browser_mode = "headless"
 quote_maximum_age_seconds = 300
+default_window_hours = 48
+maximum_window_hours = 168
+maximum_events_per_sport = 100
+market_depth = "all-observed-markets"
+maximum_response_bytes = 2097152
+maximum_total_capture_bytes = 16777216
+event_detail_concurrency = 1
+minimum_event_detail_interval_ms = 1000
+navigation_timeout_ms = 30000
+explicit_retry_limit = 0
 
 [bookmakers.betano]
 enabled = true

@@ -1,4 +1,4 @@
-"""Visible-browser structural probe for bookmaker providers."""
+"""Bounded browser-observed structural probe for bookmaker providers."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from sports_analytics.bookmakers.diagnostics.fingerprint import structural_fingerprint
 from sports_analytics.bookmakers.diagnostics.paths import resolve_diagnostic_directory
@@ -103,6 +102,7 @@ def probe_bookmaker(
     diagnostic_directory: str | Path | None = None,
     session: BrowserSession | None = None,
     clock: Callable[[], datetime] | None = None,
+    browser_mode: BrowserMode = BrowserMode.HEADLESS,
 ) -> ProbeResult:
     """Collect sanitized structural evidence from one provider sport route."""
     if provider_id not in _PROVIDER_CATALOGS:
@@ -145,7 +145,7 @@ def probe_bookmaker(
         allowed_hostnames=catalog.allowed_hostnames,
         start_urls=routes,
         observed_at_utc=started_at,
-        browser_mode=BrowserMode.VISIBLE,
+        browser_mode=browser_mode,
         deadline_at_utc=deadline,
         observation_window_ms=observation_window_ms,
         observation_complete=observation_complete,
@@ -247,7 +247,6 @@ def handle_cookie_consent(page: Any, *, provider_id: str) -> bool:
 
 
 def _response_evidence(item: BrowserResponseObservation) -> ProbeResponseEvidence:
-    hostname = urlparse(item.response_url).hostname or ""
     parsed: dict[str, Any] | None = None
     try:
         loaded = json.loads(item.body_text)
@@ -265,7 +264,7 @@ def _response_evidence(item: BrowserResponseObservation) -> ProbeResponseEvidenc
     return ProbeResponseEvidence(
         provider=item.provider_id,
         route_id=item.page_route_id,
-        hostname=hostname,
+        hostname=item.hostname or "",
         http_status=item.status_code,
         content_type=item.content_type,
         byte_size=len(item.body_text.encode("utf-8")),
@@ -298,15 +297,30 @@ def _page_evidence(item: BrowserPageObservation) -> ProbePageEvidence:
 
 def _network_metadata_payload(item: BrowserNetworkMetadata) -> dict[str, Any]:
     return {
+        "provider_id": item.provider_id,
+        "sport": item.sport,
+        "acquisition_cycle_id": item.acquisition_cycle_id,
+        "page_route_id": item.page_route_id,
+        "source_event_id": item.source_event_id,
+        "request_method": item.request_method,
+        "transport_type": (None if item.transport_type is None else item.transport_type.value),
         "hostname": item.hostname,
         "resource_type": item.resource_type,
         "status_code": item.status_code,
         "content_type": item.content_type,
         "byte_size": item.byte_size,
+        "declared_content_length": item.declared_content_length,
+        "actual_captured_byte_length": item.actual_captured_byte_length,
+        "redirect_classification": item.redirect_classification.value,
+        "body_capture_state": item.body_capture_state.value,
+        "contributing_capture_checksum": item.contributing_capture_checksum,
         "sanitized_path_hash": item.sanitized_path_hash,
         "structural_fingerprint": item.structural_fingerprint,
         "hostname_approved": item.hostname_approved,
         "candidate_keys_detected": item.candidate_keys_detected,
+        "event_candidate_count": item.event_candidate_count,
+        "market_candidate_count": item.market_candidate_count,
+        "selection_candidate_count": item.selection_candidate_count,
         "body_captured": item.body_captured,
         "grpc_web_envelope_recognized": item.grpc_web_envelope_recognized,
         "grpc_web_failure_code": item.grpc_web_failure_code,
@@ -403,6 +417,7 @@ def _write_probe_artifact(
         "responses": [asdict(item) for item in responses],
         "pages": [asdict(item) for item in pages],
         "network_metadata": list(network_metadata),
+        "transport_summary": _transport_summary(network_metadata),
         "grpc_web_diagnostics": [
             _grpc_web_diagnostic_payload(item) for item in acquisition.grpc_web_diagnostics
         ],
@@ -421,6 +436,58 @@ def _write_probe_artifact(
         _remove_new_grpc_evidence(output_dir, acquisition=acquisition)
         raise
     return filename
+
+
+def _transport_summary(
+    network_metadata: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    """Aggregate safe structural counts without provider-controlled values."""
+
+    def _counts(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in network_metadata:
+            value = item.get(key)
+            if value is None:
+                continue
+            normalized = str(value)
+            counts[normalized] = counts.get(normalized, 0) + 1
+        return dict(sorted(counts.items()))
+
+    approved_hosts: dict[str, int] = {}
+    for item in network_metadata:
+        if not item.get("hostname_approved"):
+            continue
+        hostname = item.get("hostname")
+        if hostname is not None:
+            key = str(hostname)
+            approved_hosts[key] = approved_hosts.get(key, 0) + 1
+    return {
+        "response_metadata_count": len(network_metadata),
+        "resource_type_counts": _counts("resource_type"),
+        "transport_type_counts": _counts("transport_type"),
+        "status_code_counts": _counts("status_code"),
+        "body_capture_state_counts": _counts("body_capture_state"),
+        "approved_host_counts": dict(sorted(approved_hosts.items())),
+        "captured_body_count": sum(bool(item.get("body_captured")) for item in network_metadata),
+        "truncated_or_budget_rejected_count": sum(
+            item.get("body_capture_state")
+            in {
+                "declared-size-rejected",
+                "actual-size-rejected",
+                "total-budget-rejected",
+            }
+            for item in network_metadata
+        ),
+        "event_candidate_count": sum(
+            int(item.get("event_candidate_count") or 0) for item in network_metadata
+        ),
+        "market_candidate_count": sum(
+            int(item.get("market_candidate_count") or 0) for item in network_metadata
+        ),
+        "selection_candidate_count": sum(
+            int(item.get("selection_candidate_count") or 0) for item in network_metadata
+        ),
+    }
 
 
 def _remove_new_grpc_evidence(

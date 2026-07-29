@@ -35,6 +35,7 @@ from sports_analytics.markets.contracts import (
     QuotePhase,
     QuoteQualityStatus,
     QuoteTimestampPrecision,
+    SelectionStatus,
 )
 from sports_analytics.markets.identifiers import (
     build_quote_observation_id,
@@ -44,6 +45,7 @@ from sports_analytics.markets.schemas import quote_sort_key
 from sports_analytics.sources.bookmaker_contracts import (
     ProviderAcquisitionBundle,
     ProviderParserWarning,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sports.contracts import (
     CanonicalParticipant,
@@ -467,9 +469,15 @@ def _build_quotes(
                     unknown.append(mapped)
                     continue
                 for selection_obs in market.selections:
-                    outcome_key = _outcome_key(
-                        selection_obs.display_label, selection_obs.source_selection_id
-                    )
+                    if (
+                        selection_obs.canonical_outcome_key is None
+                        or selection_obs.price_state is not ProviderSelectionPriceState.PRICED
+                        or selection_obs.decimal_odds is None
+                        or selection_obs.selection_status is not SelectionStatus.ACTIVE
+                    ):
+                        continue
+                    outcome_key = selection_obs.canonical_outcome_key.value
+                    quote_source_file_sha256 = selection_obs.source_capture_id or source_file_sha256
                     selection = canonical_selection(
                         mapped.definition,
                         outcome_key=outcome_key,
@@ -492,7 +500,7 @@ def _build_quotes(
                         quote_phase=QuotePhase.CURRENT.value,
                         source_observed_at_utc=bundle.observed_at_utc,
                         quoted_at_utc=None,
-                        source_file_sha256=source_file_sha256,
+                        source_file_sha256=quote_source_file_sha256,
                         source_field=None,
                     )
                     quotes.append(
@@ -519,7 +527,7 @@ def _build_quotes(
                             source_field=None,
                             quality_status=QuoteQualityStatus.SOURCE_PROVIDED.value,
                             quality_reason=None,
-                            source_file_sha256=source_file_sha256,
+                            source_file_sha256=quote_source_file_sha256,
                             schema_version=BOOKMAKER_SCHEMA_VERSION,
                         )
                     )
@@ -597,26 +605,3 @@ def _warning_to_finding(
         acquisition_cycle_id=bundle.acquisition_cycle_id,
         observed_at_utc=bundle.observed_at_utc,
     )
-
-
-def _outcome_key(display_label: str, source_selection_id: str) -> str:
-    collapsed = " ".join(display_label.strip().casefold().split())
-    aliases = {
-        "1": "home",
-        "x": "draw",
-        "2": "away",
-        "home": "home",
-        "draw": "draw",
-        "away": "away",
-        "over": "over",
-        "under": "under",
-        "yes": "yes",
-        "no": "no",
-    }
-    if collapsed in aliases:
-        return aliases[collapsed]
-    token = source_selection_id.strip().casefold().replace(" ", "-")
-    if not token:
-        msg = "unable to derive canonical selection outcome_key"
-        raise NormalizationError(msg)
-    return token

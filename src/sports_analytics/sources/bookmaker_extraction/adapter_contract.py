@@ -10,6 +10,7 @@ from typing import Any
 from sports_analytics.core.exceptions import NormalizationError, ParserError
 from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.bookmaker_contracts import (
+    CanonicalOutcomeKey,
     ParserDriftSeverity,
     ProviderAcquisitionBundle,
     ProviderEventObservation,
@@ -18,6 +19,7 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderParserWarning,
     ProviderParticipantObservation,
     ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sources.bookmaker_extraction.contracts import ADAPTER_CONTRACT_SCHEMA
 from sports_analytics.sports.contracts import require_utc
@@ -176,8 +178,12 @@ def _parse_event(raw: dict[str, Any]) -> ProviderEventObservation:
         for item in raw.get("participants", [])
         if isinstance(item, dict)
     )
+    native_market_payload = raw.get("nativeMarkets", raw.get("markets", []))
+    native_markets = tuple(
+        _parse_market(item) for item in native_market_payload if isinstance(item, dict)
+    )
     markets = tuple(
-        _parse_market(item) for item in raw.get("markets", []) if isinstance(item, dict)
+        market for market in native_markets if market.canonical_market_definition_id is not None
     )
     start = raw.get("startTimeUtc")
     if not isinstance(start, str):
@@ -203,15 +209,13 @@ def _parse_event(raw: dict[str, Any]) -> ProviderEventObservation:
         competition_display_name=(
             str(raw["competitionName"]) if raw.get("competitionName") is not None else None
         ),
+        native_markets=native_markets,
     )
 
 
 def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
     type_code = str(raw.get("marketTypeCode") or "")
     canonical = _map_market_type(type_code)
-    if canonical is None:
-        msg = f"unsupported market type code {type_code!r}"
-        raise ParserError(msg)
     status_raw = str(raw.get("status") or "").upper()
     if not status_raw:
         msg = "missing market status"
@@ -225,8 +229,11 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
     if period_code is not None:
         period = _PERIOD_CODES.get(str(period_code).upper())
         if period is None:
-            msg = f"unsupported market period {period_code!r}"
-            raise ParserError(msg)
+            if canonical is None:
+                period = str(period_code)
+            else:
+                msg = f"unsupported market period {period_code!r}"
+                raise ParserError(msg)
     overtime_scope = raw.get("overtimeScope")
     if overtime_scope is not None and str(overtime_scope) not in {"none", "including-overtime"}:
         msg = f"unsupported overtime scope {overtime_scope!r}"
@@ -245,13 +252,17 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             msg = "duplicate source selection identities"
             raise ParserError(msg)
         seen.add(sel_id)
-        if item.get("price") is None:
-            continue
-        try:
-            odds = Decimal(str(item["price"]).replace(",", "."))
-        except (InvalidOperation, KeyError) as exc:
-            msg = "invalid decimal odds"
-            raise ParserError(msg) from exc
+        price = item.get("price")
+        if price is None:
+            odds = None
+            price_state = ProviderSelectionPriceState.UNPRICED
+        else:
+            try:
+                odds = Decimal(str(price).replace(",", "."))
+            except InvalidOperation as exc:
+                msg = "invalid decimal odds"
+                raise ParserError(msg) from exc
+            price_state = ProviderSelectionPriceState.PRICED
         status_value = str(item.get("status") or "").upper()
         if not status_value:
             msg = "missing selection status"
@@ -269,7 +280,18 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 display_label=str(item.get("name", sel_id)),
                 decimal_odds=odds,
                 selection_status=sel_status,
+                price_state=price_state,
+                canonical_outcome_key=_parse_reviewed_outcome_key(item),
                 line=line,
+                provider_selection_type=(
+                    str(item["providerTypeId"]) if item.get("providerTypeId") is not None else None
+                ),
+                provider_order=len(selections),
+                source_capture_id=(
+                    str(item["sourceCaptureId"])
+                    if item.get("sourceCaptureId") is not None
+                    else None
+                ),
             )
         )
     market_line = None
@@ -285,7 +307,25 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
         overtime_scope=(str(overtime_scope) if overtime_scope is not None else None),
         rules_scope=(str(rules_scope) if rules_scope is not None else None),
         canonical_market_definition_id=canonical,
+        provider_market_type=(
+            str(raw["providerType"]) if raw.get("providerType") is not None else type_code
+        ),
+        provider_order=0,
+        source_capture_id=(
+            str(raw["sourceCaptureId"]) if raw.get("sourceCaptureId") is not None else None
+        ),
     )
+
+
+def _parse_reviewed_outcome_key(raw: dict[str, Any]) -> CanonicalOutcomeKey | None:
+    value = raw.get("canonicalOutcomeKey")
+    if value is None:
+        return None
+    try:
+        return CanonicalOutcomeKey(str(value))
+    except ValueError as exc:
+        msg = "unsupported canonicalOutcomeKey"
+        raise ParserError(msg) from exc
 
 
 def _map_sport_code(code: str) -> str:

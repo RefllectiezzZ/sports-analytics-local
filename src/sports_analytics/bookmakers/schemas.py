@@ -6,6 +6,15 @@ from typing import Any, Final
 
 import pyarrow as pa
 
+from sports_analytics.bookmakers.native_inventory import (
+    DATASET_PROVIDER_NATIVE_EVENTS,
+    DATASET_PROVIDER_NATIVE_MARKETS,
+    DATASET_PROVIDER_NATIVE_SELECTIONS,
+    provider_native_events_schema,
+    provider_native_markets_schema,
+    provider_native_rows,
+    provider_native_selections_schema,
+)
 from sports_analytics.bookmakers.normalization import (
     AcquisitionMetadataRecord,
     ComparisonEligibilityRecord,
@@ -13,7 +22,10 @@ from sports_analytics.bookmakers.normalization import (
     ParserDriftFinding,
 )
 from sports_analytics.bookmakers.status import ProviderStatusRecord
-from sports_analytics.bookmakers.types import BOOKMAKER_SCHEMA_VERSION
+from sports_analytics.bookmakers.types import (
+    BOOKMAKER_SCHEMA_VERSION,
+    BOOKMAKER_SCHEMA_VERSION_V2,
+)
 from sports_analytics.markets.schemas import (
     DATASET_MARKET_QUOTES,
     market_quote_rows,
@@ -25,6 +37,7 @@ from sports_analytics.snapshots.arrow import (
     utc_timestamp,
 )
 from sports_analytics.snapshots.spec import DatasetDescriptor, SnapshotDatasetSuite
+from sports_analytics.sources.bookmaker_contracts import ProviderAcquisitionBundle
 from sports_analytics.sports.schemas import (
     DATASET_EVENT_RECONCILIATIONS,
     DATASET_PARTICIPANT_RECONCILIATIONS,
@@ -75,6 +88,18 @@ def acquisition_metadata_schema(*, schema_version: str) -> pa.Schema:
 
 def provider_status_schema(*, schema_version: str) -> pa.Schema:
     """Return the provider status dataset schema."""
+    count_fields: list[pa.Field] = []
+    if schema_version == BOOKMAKER_SCHEMA_VERSION_V2:
+        count_fields = [
+            pa.field("provider_native_markets", pa.int32(), nullable=False),
+            pa.field("provider_native_priced_selections", pa.int32(), nullable=False),
+            pa.field("canonical_markets", pa.int32(), nullable=False),
+            pa.field("canonical_quotes", pa.int32(), nullable=False),
+            pa.field("unmapped_markets", pa.int32(), nullable=False),
+            pa.field("non_comparable_quotes", pa.int32(), nullable=False),
+            pa.field("complete_events", pa.int32(), nullable=False),
+            pa.field("partial_events", pa.int32(), nullable=False),
+        ]
     return pa.schema(
         [
             pa.field("provider_id", dictionary_string(), nullable=False),
@@ -87,6 +112,7 @@ def provider_status_schema(*, schema_version: str) -> pa.Schema:
             pa.field("valid_quotes_observed", pa.int32(), nullable=False),
             pa.field("unresolved_events", pa.int32(), nullable=False),
             pa.field("rejected_markets", pa.int32(), nullable=False),
+            *count_fields,
             pa.field("warnings", pa.string(), nullable=False),
             pa.field(
                 "current_block_or_failure_classification", dictionary_string(), nullable=False
@@ -189,6 +215,14 @@ def provider_status_rows(records: tuple[ProviderStatusRecord, ...]) -> list[dict
             "valid_quotes_observed": item.valid_quotes_observed,
             "unresolved_events": item.unresolved_events,
             "rejected_markets": item.rejected_markets,
+            "provider_native_markets": item.provider_native_markets,
+            "provider_native_priced_selections": item.provider_native_priced_selections,
+            "canonical_markets": item.canonical_markets,
+            "canonical_quotes": item.canonical_quotes,
+            "unmapped_markets": item.unmapped_markets,
+            "non_comparable_quotes": item.non_comparable_quotes,
+            "complete_events": item.complete_events,
+            "partial_events": item.partial_events,
             "warnings": "|".join(item.warnings),
             "current_block_or_failure_classification": (
                 item.current_block_or_failure_classification.value
@@ -248,9 +282,9 @@ def comparison_eligibility_rows(
     ]
 
 
-def _build_suite(*, sport_code: str) -> SnapshotDatasetSuite:
-    version = BOOKMAKER_SCHEMA_VERSION
-    descriptors = (
+def _build_suite(*, sport_code: str, schema_version: str) -> SnapshotDatasetSuite:
+    version = schema_version
+    descriptors: tuple[DatasetDescriptor, ...] = (
         DatasetDescriptor(
             dataset_name=DATASET_ACQUISITION_METADATA,
             relative_filename="acquisition_metadata.parquet",
@@ -305,15 +339,40 @@ def _build_suite(*, sport_code: str) -> SnapshotDatasetSuite:
             schema=comparison_eligibility_schema(schema_version=version),
         ),
     )
+    primary_dataset_name = DATASET_MARKET_QUOTES
+    if version == BOOKMAKER_SCHEMA_VERSION_V2:
+        descriptors = (
+            DatasetDescriptor(
+                dataset_name=DATASET_PROVIDER_NATIVE_EVENTS,
+                relative_filename="provider_native_events.parquet",
+                schema=provider_native_events_schema(schema_version=version),
+            ),
+            DatasetDescriptor(
+                dataset_name=DATASET_PROVIDER_NATIVE_MARKETS,
+                relative_filename="provider_native_markets.parquet",
+                schema=provider_native_markets_schema(schema_version=version),
+            ),
+            DatasetDescriptor(
+                dataset_name=DATASET_PROVIDER_NATIVE_SELECTIONS,
+                relative_filename="provider_native_selections.parquet",
+                schema=provider_native_selections_schema(schema_version=version),
+            ),
+            *descriptors,
+        )
+        primary_dataset_name = DATASET_PROVIDER_NATIVE_SELECTIONS
     return SnapshotDatasetSuite(
         descriptors=descriptors,
-        primary_dataset_name=DATASET_MARKET_QUOTES,
+        primary_dataset_name=primary_dataset_name,
     )
 
 
-def bookmaker_snapshot_suite(*, sport_code: str) -> SnapshotDatasetSuite:
+def bookmaker_snapshot_suite(
+    *,
+    sport_code: str,
+    schema_version: str = BOOKMAKER_SCHEMA_VERSION,
+) -> SnapshotDatasetSuite:
     """Return the immutable current-bookmaker-odds dataset suite for ``sport_code``."""
-    return _build_suite(sport_code=sport_code)
+    return _build_suite(sport_code=sport_code, schema_version=schema_version)
 
 
 def bundle_to_tables(
@@ -321,9 +380,14 @@ def bundle_to_tables(
     *,
     sport_code: str,
     provider_statuses: tuple[ProviderStatusRecord, ...] = (),
+    provider_bundle: ProviderAcquisitionBundle | None = None,
+    schema_version: str = BOOKMAKER_SCHEMA_VERSION,
 ) -> dict[str, pa.Table]:
     """Convert a normalized bookmaker bundle into explicitly typed Arrow tables."""
-    suite = bookmaker_snapshot_suite(sport_code=sport_code)
+    suite = bookmaker_snapshot_suite(
+        sport_code=sport_code,
+        schema_version=schema_version,
+    )
     rows_by_dataset: dict[str, list[dict[str, Any]]] = {
         DATASET_ACQUISITION_METADATA: acquisition_metadata_rows(bundle.acquisition_metadata),
         DATASET_PROVIDER_STATUS: provider_status_rows(provider_statuses),
@@ -338,6 +402,11 @@ def bundle_to_tables(
         DATASET_PARSER_DRIFT_FINDINGS: parser_drift_finding_rows(bundle.parser_drift_findings),
         DATASET_COMPARISON_ELIGIBILITY: comparison_eligibility_rows(bundle.comparison_eligibility),
     }
+    if provider_bundle is not None:
+        if schema_version != BOOKMAKER_SCHEMA_VERSION_V2:
+            msg = "provider-native inventory requires bookmaker-native-v2"
+            raise ValueError(msg)
+        rows_by_dataset.update(provider_native_rows(provider_bundle, schema_version=schema_version))
     tables: dict[str, pa.Table] = {}
     for descriptor in suite.descriptors:
         rows = rows_by_dataset[descriptor.dataset_name]

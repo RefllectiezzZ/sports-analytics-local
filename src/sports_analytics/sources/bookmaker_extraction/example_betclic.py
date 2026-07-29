@@ -30,6 +30,7 @@ class ExampleBetclicSyntheticExtractionProfile:
     profile_id = EXAMPLE_BETCLIC_PROFILE_ID
     verified = False
     provider_id = PROVIDER_ID
+    sport = "football"
     raw_directory: Path | None = None
 
     def extract(

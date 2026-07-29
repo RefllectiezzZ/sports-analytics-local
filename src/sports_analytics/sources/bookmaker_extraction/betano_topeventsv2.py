@@ -77,6 +77,11 @@ class BetanoFootballTopEventsV2Profile:
     profile_id = BETANO_TOPEVENTSV2_PROFILE_ID
     verified = True
     provider_id = PROVIDER_ID
+    sport = "football"
+    schema_version = "betano-topeventsv2-profile-v1"
+    supported_capture_surfaces = ("sport-landing-popular-events",)
+    completeness_capability = "landing-inventory-only"
+    market_extraction_capability = "reviewed-canonical-subset"
     raw_directory: Path | None = None
 
     def extract(
@@ -113,6 +118,11 @@ class BetanoFootballTopEventsV2Profile:
                 warnings.append(str(exc))
                 drift_codes.append("topeventsv2-rejected")
                 continue
+            capture_checksum = response.contributing_capture_checksum
+            if capture_checksum is None:
+                msg = "captured response is missing its content checksum"
+                raise ParserError(msg)
+            _bind_payload_capture(translated["payload"], capture_checksum)
             payloads.append(translated["payload"])
             evidence_times.append(response.observed_at_utc)
             drift_codes.extend(translated["drift_codes"])
@@ -138,6 +148,7 @@ class BetanoFootballTopEventsV2Profile:
                     warnings.append(str(exc))
                     drift_codes.append("topeventsv2-rejected")
                     continue
+                _bind_payload_capture(translated["payload"], capture.checksum_sha256)
                 payloads.append(translated["payload"])
                 evidence_times.append(observed)
                 drift_codes.extend(translated["drift_codes"])
@@ -177,6 +188,30 @@ def looks_like_topeventsv2(raw: dict[str, Any]) -> bool:
         return False
     required = ("eventIdList", "events", "markets", "selections")
     return all(key in top for key in required)
+
+
+def _bind_payload_capture(payload: dict[str, object], checksum: str) -> None:
+    """Attach exact response provenance to every translated native row."""
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        for key in ("markets", "nativeMarkets"):
+            markets = event.get(key)
+            if not isinstance(markets, list):
+                continue
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
+                market["sourceCaptureId"] = checksum
+                selections = market.get("selections")
+                if not isinstance(selections, list):
+                    continue
+                for selection in selections:
+                    if isinstance(selection, dict):
+                        selection["sourceCaptureId"] = checksum
 
 
 def translate_topeventsv2(
@@ -279,6 +314,7 @@ def translate_topeventsv2(
             drift_codes.append("malformed-market-list")
             continue
         markets_out: list[dict[str, object]] = []
+        native_markets_out: list[dict[str, object]] = []
         seen_market_ids: set[str] = set()
         for market_id_raw in market_id_list:
             market_id = str(market_id_raw)
@@ -300,14 +336,27 @@ def translate_topeventsv2(
                 selections_dict=selections_dict,
             )
             if mapped["kind"] == "unsupported":
-                unsupported.append(mapped["record"])
+                record = mapped["record"]
+                assert isinstance(record, dict)
+                native_markets_out.append(record)
+                unsupported.append(
+                    {
+                        "marketId": record["marketId"],
+                        "name": record["name"],
+                        "providerType": record["providerType"],
+                        "providerTypeId": record["providerTypeId"],
+                    }
+                )
                 drift_codes.append("unknown-market")
                 continue
             if mapped["kind"] == "rejected":
                 drift_codes.append(str(mapped["drift"]))
                 warnings.append(str(mapped["warning"]))
                 continue
-            markets_out.append(mapped["record"])
+            record = mapped["record"]
+            assert isinstance(record, dict)
+            markets_out.append(record)
+            native_markets_out.append(record)
 
         if not markets_out:
             drift_codes.append("event-without-supported-markets")
@@ -331,6 +380,7 @@ def translate_topeventsv2(
                 "sourcePageRouteId": "football-prematch",
                 "participants": participants_out,
                 "markets": markets_out,
+                "nativeMarkets": native_markets_out,
             }
         )
 
@@ -360,11 +410,45 @@ def _translate_market(
         type_id = None
     mapping = _SUPPORTED_MARKET_TYPES.get(provider_type)
     if mapping is None:
+        generic_selections: list[dict[str, object]] = []
+        selection_id_list = market.get("selectionIdList")
+        if not isinstance(selection_id_list, list) or not selection_id_list:
+            return {
+                "kind": "rejected",
+                "drift": "malformed-selection-list",
+                "warning": f"market {market_id} missing selectionIdList",
+            }
+        for selection_id_raw in selection_id_list:
+            selection_id = str(selection_id_raw)
+            selection = selections_dict.get(selection_id)
+            if not isinstance(selection, dict):
+                return {
+                    "kind": "rejected",
+                    "drift": "malformed-selection-reference",
+                    "warning": f"selectionIdList references missing selection {selection_id}",
+                }
+            translated = _translate_native_selection(
+                selection_id=selection_id,
+                selection=selection,
+            )
+            if translated is None:
+                return {
+                    "kind": "rejected",
+                    "drift": "malformed-selection",
+                    "warning": f"selection {selection_id} has invalid native price evidence",
+                }
+            generic_selections.append(translated)
         return {
             "kind": "unsupported",
             "record": {
                 "marketId": market_id,
-                "name": market.get("name"),
+                "marketTypeCode": provider_type,
+                "name": str(market.get("name") or provider_type or market_id),
+                "status": (
+                    "SUSPENDED" if _sparse_is_suspended(market.get("isSuspended")) else "OPEN"
+                ),
+                "period": str(market.get("period") or "FT"),
+                "selections": generic_selections,
                 "providerType": provider_type,
                 "providerTypeId": type_id,
             },
@@ -498,9 +582,19 @@ def _translate_selection(
         return None
 
     suspended = _sparse_is_suspended(selection.get("isSuspended"))
+    canonical_outcome = {
+        ("MRES", 1): "home",
+        ("MRES", 2): "draw",
+        ("MRES", 3): "away",
+        ("HCTG", 39): "over",
+        ("HCTG", 40): "under",
+        ("BTSC", 43): "yes",
+        ("BTSC", 44): "no",
+    }[(provider_type, type_id)]
     out: dict[str, object] = {
         "selectionId": selection_id,
         "name": canonical_name,
+        "canonicalOutcomeKey": canonical_outcome,
         "price": format(price, "f"),
         "status": "SUSPENDED" if suspended else "ACTIVE",
         "providerTypeId": type_id,
@@ -509,6 +603,39 @@ def _translate_selection(
         handicap = selection.get("handicap")
         if handicap is None:
             return None
+        try:
+            line = Decimal(str(handicap).replace(",", "."))
+        except (InvalidOperation, TypeError):
+            return None
+        if not line.is_finite():
+            return None
+        out["line"] = format(line, "f")
+    return out
+
+
+def _translate_native_selection(
+    *,
+    selection_id: str,
+    selection: dict[str, Any],
+) -> dict[str, object] | None:
+    """Preserve an observed unknown selection without assigning semantics."""
+    price_raw = selection.get("price")
+    try:
+        price = Decimal(str(price_raw).replace(",", "."))
+    except (InvalidOperation, AttributeError, TypeError):
+        return None
+    if not price.is_finite() or price <= Decimal("1"):
+        return None
+    out: dict[str, object] = {
+        "selectionId": selection_id,
+        "name": str(selection.get("name") or selection_id),
+        "price": format(price, "f"),
+        "status": ("SUSPENDED" if _sparse_is_suspended(selection.get("isSuspended")) else "ACTIVE"),
+    }
+    if selection.get("typeId") is not None:
+        out["providerTypeId"] = str(selection["typeId"])
+    handicap = selection.get("handicap")
+    if handicap is not None:
         try:
             line = Decimal(str(handicap).replace(",", "."))
         except (InvalidOperation, TypeError):

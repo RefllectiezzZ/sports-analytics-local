@@ -111,12 +111,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--probe-bookmaker",
         action="store_true",
-        help="Run a visible localhost structural probe for one bookmaker provider.",
+        help="Run a bounded local structural probe for one bookmaker provider.",
     )
     mode.add_argument(
         "--smoke-bookmaker",
         action="store_true",
-        help="Run a bounded localhost smoke test for one bookmaker provider.",
+        help="Run a bounded local smoke test for one bookmaker provider.",
     )
     parser.add_argument(
         "--competition",
@@ -171,6 +171,42 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="Local-only diagnostic output directory (git-ignored by default).",
+    )
+    parser.add_argument(
+        "--window-start-utc",
+        default=None,
+        metavar="UTC",
+        help="Canonical UTC event-horizon start for bookmaker acquisition.",
+    )
+    parser.add_argument(
+        "--window-end-utc",
+        default=None,
+        metavar="UTC",
+        help="Canonical UTC event-horizon end for bookmaker acquisition.",
+    )
+    parser.add_argument(
+        "--window-hours",
+        default=None,
+        metavar="INTEGER",
+        help="Rolling event horizon in hours; mutually exclusive with explicit bounds.",
+    )
+    parser.add_argument(
+        "--maximum-events",
+        default=None,
+        metavar="INTEGER",
+        help="Maximum admitted events for bookmaker acquisition.",
+    )
+    parser.add_argument(
+        "--market-depth",
+        default=None,
+        choices=("all-observed-markets",),
+        help="Explicit bookmaker market acquisition depth.",
+    )
+    parser.add_argument(
+        "--browser-mode",
+        default=None,
+        choices=("headless", "visible", "visible-minimized"),
+        help="Browser presentation for probe/smoke; acquisition normally uses settings.",
     )
     return parser
 
@@ -232,6 +268,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sport=args.sport,
                 priority=args.priority,
                 maximum_attempts=args.maximum_attempts,
+                window_start_utc=args.window_start_utc,
+                window_end_utc=args.window_end_utc,
+                window_hours=args.window_hours,
+                maximum_events=args.maximum_events,
+                market_depth=args.market_depth,
             )
 
         if args.probe_bookmaker:
@@ -240,6 +281,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sport=args.sport,
                 duration_seconds=args.duration_seconds,
                 diagnostic_directory=args.diagnostic_directory,
+                browser_mode=args.browser_mode or "headless",
             )
 
         if args.smoke_bookmaker:
@@ -250,6 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sport=args.sport,
                 duration_seconds=args.duration_seconds,
                 diagnostic_directory=args.diagnostic_directory,
+                browser_mode=args.browser_mode,
             )
 
         parser.error("select a scraper mode such as --list-competitions or --enqueue-football-data")
@@ -294,9 +337,16 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             args.raw_sha256,
             args.priority,
             args.maximum_attempts,
+            args.window_start_utc,
+            args.window_end_utc,
+            args.window_hours,
+            args.maximum_events,
+            args.market_depth,
         )
     )
-    bookmaker_args = any(value is not None for value in (args.provider, args.sport))
+    bookmaker_args = any(
+        value is not None for value in (args.provider, args.sport, args.browser_mode)
+    )
     if common and (any(scraper_modes) or enqueue_args or bookmaker_args):
         parser.error("scraper modes cannot be combined with shared CLI modes")
     if enqueue_args and not args.enqueue_football_data and not args.enqueue_bookmaker_acquisition:
@@ -307,6 +357,13 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         parser.error("--enqueue-football-data requires --competition and --season")
     if args.enqueue_bookmaker_acquisition and (args.provider is None or args.sport is None):
         parser.error("--enqueue-bookmaker-acquisition requires --provider and --sport")
+    explicit_window = args.window_start_utc is not None or args.window_end_utc is not None
+    if explicit_window and (args.window_start_utc is None or args.window_end_utc is None):
+        parser.error("--window-start-utc and --window-end-utc must be supplied together")
+    if explicit_window and args.window_hours is not None:
+        parser.error("--window-hours is mutually exclusive with explicit window bounds")
+    if args.browser_mode is not None and not (args.probe_bookmaker or args.smoke_bookmaker):
+        parser.error("--browser-mode requires --probe-bookmaker or --smoke-bookmaker")
     if args.probe_bookmaker and (args.provider is None or args.sport is None):
         parser.error("--probe-bookmaker requires --provider and --sport")
     if args.smoke_bookmaker and (args.provider is None or args.sport is None):

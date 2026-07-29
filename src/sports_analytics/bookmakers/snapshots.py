@@ -14,6 +14,7 @@ from sports_analytics.bookmakers.types import (
     BOOKMAKER_COMBINED_SOURCE_NAME,
     BOOKMAKER_NORMALIZER_VERSION,
     BOOKMAKER_SCHEMA_VERSION,
+    BOOKMAKER_SCHEMA_VERSION_V2,
     BOOKMAKER_SNAPSHOT_TYPE,
     PARTITION_KEY_SPORT,
 )
@@ -31,6 +32,10 @@ from sports_analytics.snapshots.writer import (
     PreparedSnapshot,
     discard_prepared_snapshot,
     prepare_snapshot_directory,
+)
+from sports_analytics.sources.bookmaker_contracts import (
+    ProviderAcquisitionBundle,
+    provider_native_markets,
 )
 from sports_analytics.sports.contracts import require_utc
 
@@ -56,14 +61,18 @@ def build_bookmaker_snapshot_spec(
     raw_artifact: RawArtifactReference | None = None,
     producer_versions: dict[str, str] | None = None,
     domain_metadata: dict[str, JsonValue] | None = None,
+    provider_bundle: ProviderAcquisitionBundle | None = None,
 ) -> SnapshotSpec:
     """Build the validated snapshot specification for one bookmaker normalize pass."""
     validate_identifier(sport_code, field_name="sport_code")
     validate_identifier(source_version, field_name="source_version")
     observed = require_utc(source_observed_at_utc, field_name="source_observed_at_utc")
+    snapshot_schema_version = (
+        BOOKMAKER_SCHEMA_VERSION_V2 if provider_bundle is not None else BOOKMAKER_SCHEMA_VERSION
+    )
     identity = SnapshotIdentity(
         snapshot_type=BOOKMAKER_SNAPSHOT_TYPE,
-        schema_version=BOOKMAKER_SCHEMA_VERSION,
+        schema_version=snapshot_schema_version,
         source_name=BOOKMAKER_COMBINED_SOURCE_NAME,
         source_version=source_version,
         partition_keys=((PARTITION_KEY_SPORT, sport_code),),
@@ -83,12 +92,38 @@ def build_bookmaker_snapshot_spec(
         producers.update(producer_versions)
     metadata: dict[str, JsonValue] = {
         "sport_code": sport_code,
-        "schema_version": BOOKMAKER_SCHEMA_VERSION,
+        "schema_version": snapshot_schema_version,
         "unknown_market_count": len(bundle.unknown_markets),
         "quote_count": len(bundle.market_quotes),
         "resolved_event_count": len(bundle.events),
         "source_event_count": len(bundle.source_events),
     }
+    if provider_bundle is not None:
+        native_markets = sum(
+            len(provider_native_markets(event)) for event in provider_bundle.events
+        )
+        native_selections = sum(
+            len(market.selections)
+            for event in provider_bundle.events
+            for market in provider_native_markets(event)
+        )
+        native_priced_selections = sum(
+            selection.decimal_odds is not None
+            for event in provider_bundle.events
+            for market in provider_native_markets(event)
+            for selection in market.selections
+        )
+        metadata.update(
+            {
+                "provider_native_event_count": len(provider_bundle.events),
+                "provider_native_market_count": native_markets,
+                "provider_native_selection_count": native_selections,
+                "provider_native_priced_selection_count": native_priced_selections,
+                "provider_native_unpriced_selection_count": (
+                    native_selections - native_priced_selections
+                ),
+            }
+        )
     if domain_metadata:
         metadata.update(domain_metadata)
     quality_summary = {
@@ -99,7 +134,10 @@ def build_bookmaker_snapshot_spec(
     }
     return SnapshotSpec(
         identity=identity,
-        suite=bookmaker_snapshot_suite(sport_code=sport_code),
+        suite=bookmaker_snapshot_suite(
+            sport_code=sport_code,
+            schema_version=snapshot_schema_version,
+        ),
         source_url="bookmakers://current-odds",
         source_policy_version=BOOKMAKER_SOURCE_POLICY_VERSION,
         source_observed_at_utc=observed,
@@ -123,6 +161,7 @@ def prepare_bookmaker_snapshot(
     raw_artifact: RawArtifactReference | None = None,
     producer_versions: dict[str, str] | None = None,
     domain_metadata: dict[str, JsonValue] | None = None,
+    provider_bundle: ProviderAcquisitionBundle | None = None,
 ) -> PreparedSnapshot:
     """Prepare an immutable current-bookmaker-odds snapshot directory."""
     spec = build_bookmaker_snapshot_spec(
@@ -133,11 +172,17 @@ def prepare_bookmaker_snapshot(
         raw_artifact=raw_artifact,
         producer_versions=producer_versions,
         domain_metadata=domain_metadata,
+        provider_bundle=provider_bundle,
+    )
+    snapshot_schema_version = (
+        BOOKMAKER_SCHEMA_VERSION_V2 if provider_bundle is not None else BOOKMAKER_SCHEMA_VERSION
     )
     tables = bundle_to_tables(
         bundle,
         sport_code=sport_code,
         provider_statuses=provider_statuses,
+        provider_bundle=provider_bundle,
+        schema_version=snapshot_schema_version,
     )
     return prepare_snapshot_directory(
         snapshots_directory=snapshots_directory,
@@ -158,6 +203,7 @@ def publish_bookmaker_snapshot(
     raw_artifact: RawArtifactReference | None = None,
     producer_versions: dict[str, str] | None = None,
     domain_metadata: dict[str, JsonValue] | None = None,
+    provider_bundle: ProviderAcquisitionBundle | None = None,
     actor: str = "bookmaker-snapshot-service",
     correlation_id: str | None = None,
 ) -> BookmakerSnapshotPublicationResult:
@@ -175,12 +221,16 @@ def publish_bookmaker_snapshot(
             raw_artifact=raw_artifact,
             producer_versions=producer_versions,
             domain_metadata=domain_metadata,
+            provider_bundle=provider_bundle,
         )
         owns_prepared = True
         publisher = SnapshotPublicationService(
             database_path=database_path,
             snapshots_directory=snapshots_directory,
-            suite=bookmaker_snapshot_suite(sport_code=sport_code),
+            suite=bookmaker_snapshot_suite(
+                sport_code=sport_code,
+                schema_version=prepared.schema_version,
+            ),
         )
         published = publisher.publish_or_reuse(
             prepared,

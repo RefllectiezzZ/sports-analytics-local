@@ -289,8 +289,8 @@ returns exit code `2` for verification failures without a traceback.
 
 ## Bookmaker current-odds snapshots
 
-Snapshot type: `current-bookmaker-odds`  
-Schema version: `bookmaker-canonical-v1`  
+Snapshot type: `current-bookmaker-odds`
+Schema versions: `bookmaker-canonical-v1` and `bookmaker-native-v2`
 Partition key: `sport`
 
 ```text
@@ -311,6 +311,28 @@ storage/snapshots/current-bookmaker-odds/bookmaker-canonical-v1/<sport>/<snapsho
 Publication follows the same READY / reuse / verification rules as football
 ingestion. Stale last-valid snapshots may be referenced after provider failure
 but must never be labelled current.
+
+`bookmaker-canonical-v1` is immutable and remains supported exactly as written
+above. New native-inventory publications use:
+
+```text
+storage/snapshots/current-bookmaker-odds/bookmaker-native-v2/<sport>/<snapshot-uuid>/
+    provider_native_events.parquet
+    provider_native_markets.parquet
+    provider_native_selections.parquet
+    <all bookmaker-canonical-v1 datasets>
+    manifest.json
+```
+
+The v2 primary dataset is provider-native selections, so valid native evidence
+may publish with zero canonical quotes. The strict loader verifies native
+event/market/selection identities, graph relationships, exact decimal strings,
+deterministic order, evidence checksums, completeness counts, and the canonical
+projection independently. Every v2 canonical quote must cross-link to exactly
+one open-market, active, priced native selection with identical odds, reviewed
+outcome semantics, source identities, and admitted capture provenance. Unknown
+markets and unknown, suspended, or unpriced selections remain native and
+non-comparable.
 
 ## Implementation status
 

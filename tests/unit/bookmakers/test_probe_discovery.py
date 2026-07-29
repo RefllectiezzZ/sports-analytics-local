@@ -182,6 +182,9 @@ def test_probe_passes_observation_window_and_advancing_clock(
     payload = json.loads(artifact.read_text(encoding="utf-8"))
     assert "network_metadata" in payload
     assert payload["network_metadata"][0]["hostname_approved"] is False
+    assert payload["transport_summary"]["response_metadata_count"] == 1
+    assert payload["transport_summary"]["resource_type_counts"] == {"image": 1}
+    assert payload["transport_summary"]["captured_body_count"] == 0
 
 
 def test_collect_probe_persists_structural_candidates_without_dom_preview(

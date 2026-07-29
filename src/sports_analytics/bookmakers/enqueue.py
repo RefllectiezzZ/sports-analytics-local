@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sports_analytics.bookmakers.types import (
@@ -11,6 +11,7 @@ from sports_analytics.bookmakers.types import (
     PROVIDER_BETANO_PT,
     PROVIDER_BETCLIC_PT,
 )
+from sports_analytics.bookmakers.window import AcquisitionWindow, rolling_acquisition_window
 from sports_analytics.core.exceptions import ConfigurationError, PermanentSourceError
 from sports_analytics.core.settings import BookmakersSettings
 from sports_analytics.data.codec import format_utc_timestamp
@@ -39,6 +40,7 @@ def enqueue_bookmaker_acquisition(
     actor: str = "bookmaker-cli",
     created_at: datetime | None = None,
     idempotency_key: str | None = None,
+    acquisition_window: AcquisitionWindow | None = None,
 ) -> JobRecord:
     """Create one pending ``ingest.bookmaker-current-odds`` job."""
     if not bookmakers.enabled:
@@ -69,6 +71,13 @@ def enqueue_bookmaker_acquisition(
     except Exception as exc:  # noqa: BLE001
         raise ConfigurationError(str(exc)) from exc
 
+    evaluated_at = created_at or datetime.now(tz=UTC)
+    window = acquisition_window or rolling_acquisition_window(
+        evaluated_at,
+        window_hours=bookmakers.default_window_hours,
+        maximum_events=bookmakers.maximum_events_per_sport,
+        maximum_window_hours=bookmakers.maximum_window_hours,
+    )
     payload: dict[str, JsonValue] = {
         "provider_id": provider,
         "sport": sport_code,
@@ -76,7 +85,13 @@ def enqueue_bookmaker_acquisition(
             None if observed_at_utc is None else format_utc_timestamp(observed_at_utc)
         ),
         "acquisition_cycle_id": acquisition_cycle_id,
+        "acquisition_window": window.as_payload(),
     }
+    material_idempotency_key = idempotency_key
+    if material_idempotency_key is not None:
+        material_idempotency_key = (
+            f"{material_idempotency_key}:window:{window.identity_digest[:16]}"
+        )
     with connect_database(database_path) as connection:
         with transaction(connection, immediate=True):
             jobs = JobRepository(connection)
@@ -87,5 +102,5 @@ def enqueue_bookmaker_acquisition(
                 actor=actor,
                 priority=priority,
                 created_at=created_at,
-                idempotency_key=idempotency_key,
+                idempotency_key=material_idempotency_key,
             )

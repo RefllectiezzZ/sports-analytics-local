@@ -13,6 +13,7 @@ from sports_analytics.bookmakers.types import (
     INGEST_BOOKMAKER_AUTONOMOUS_CYCLE_JOB_TYPE,
     INGEST_BOOKMAKER_CURRENT_ODDS_JOB_TYPE,
 )
+from sports_analytics.bookmakers.window import AcquisitionWindow
 from sports_analytics.core.exceptions import (
     NormalizationError,
     ParserError,
@@ -66,8 +67,8 @@ def ingest_bookmaker_current_odds_handler(
     database_path, raw_directory, snapshots_directory, bookmakers = _require_runtime(context)
     try:
         payload_object = _require_payload_object(payload)
-        provider_id, sport, observed_at, cycle_id = validate_bookmaker_ingest_payload(
-            {key: value for key, value in payload_object.items()}
+        provider_id, sport, observed_at, cycle_id, acquisition_window = (
+            validate_bookmaker_ingest_payload({key: value for key, value in payload_object.items()})
         )
         service = BookmakerIngestionService(
             database_path=database_path,
@@ -87,6 +88,7 @@ def ingest_bookmaker_current_odds_handler(
             checkpoint=context.checkpoint,
             attempt_number=context.attempt,
             maximum_attempts=context.maximum_attempts,
+            acquisition_window=acquisition_window,
         )
         context.logger.info(
             "bookmaker acquisition complete job_id=%s provider=%s sport=%s "
@@ -128,7 +130,7 @@ def ingest_bookmaker_current_odds_handler(
 
 def validate_autonomous_cycle_payload(
     payload: dict[str, object],
-) -> tuple[str, str | None, str | None, str | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None, str | None, AcquisitionWindow]:
     """Validate an autonomous sport acquisition job payload."""
     allowed = {
         "sport",
@@ -138,6 +140,7 @@ def validate_autonomous_cycle_payload(
         "enqueued_at_utc",
         "acquisition_started_at_utc",
         "acquisition_finished_at_utc",
+        "acquisition_window",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
@@ -167,6 +170,10 @@ def validate_autonomous_cycle_payload(
             msg = "acquisition_cycle_id must be a string or null"
             raise PermanentJobError(msg)
         cycle_id = validate_identifier(cycle_raw, field_name="acquisition_cycle_id")
+    if "acquisition_window" not in payload:
+        msg = "payload requires acquisition_window"
+        raise PermanentJobError(msg)
+    window = AcquisitionWindow.from_payload(payload["acquisition_window"])
     return (
         sport_code,
         observed_at,
@@ -176,6 +183,7 @@ def validate_autonomous_cycle_payload(
             payload.get("enqueued_at_utc"),
             field_name="enqueued_at_utc",
         ),
+        window,
     )
 
 
@@ -196,8 +204,8 @@ def ingest_bookmaker_autonomous_cycle_handler(
     """Execute one autonomous Betano-first / Betclic-fallback sport cycle."""
     database_path, raw_directory, snapshots_directory, bookmakers = _require_runtime(context)
     payload_object = _require_payload_object(payload)
-    sport, observed_raw, cycle_id, scheduled_raw, enqueued_raw = validate_autonomous_cycle_payload(
-        {key: value for key, value in payload_object.items()}
+    sport, observed_raw, cycle_id, scheduled_raw, enqueued_raw, acquisition_window = (
+        validate_autonomous_cycle_payload({key: value for key, value in payload_object.items()})
     )
     observed_at = parse_utc_timestamp(observed_raw) if observed_raw is not None else None
     scheduled_for = parse_utc_timestamp(scheduled_raw) if scheduled_raw is not None else None
@@ -228,6 +236,7 @@ def ingest_bookmaker_autonomous_cycle_handler(
             actor="worker",
             attempt_number=context.attempt,
             maximum_attempts=context.maximum_attempts,
+            acquisition_window=acquisition_window,
         )
     except RetryableJobError:
         raise

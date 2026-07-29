@@ -188,6 +188,11 @@ def enqueue_bookmaker_acquisition_cli(
     sport: str,
     priority: str | None = None,
     maximum_attempts: str | None = None,
+    window_start_utc: str | None = None,
+    window_end_utc: str | None = None,
+    window_hours: str | None = None,
+    maximum_events: str | None = None,
+    market_depth: str | None = None,
 ) -> int:
     """Validate args, bootstrap, and enqueue one bookmaker acquisition job."""
     try:
@@ -208,6 +213,46 @@ def enqueue_bookmaker_acquisition_cli(
         config_path=config,
         env_file=env_file,
     )
+    from sports_analytics.bookmakers.window import (
+        ALL_OBSERVED_MARKETS,
+        AcquisitionWindow,
+        rolling_acquisition_window,
+    )
+    from sports_analytics.data.codec import parse_utc_timestamp
+
+    settings = runtime.settings.bookmakers
+    maximum_events_value = settings.maximum_events_per_sport
+    if maximum_events is not None:
+        maximum_events_value = parse_cli_positive_bounded_int(
+            maximum_events,
+            field_name="maximum_events",
+        )
+    depth = market_depth or settings.market_depth
+    if depth != ALL_OBSERVED_MARKETS:
+        raise ConfigurationError("market_depth must be all-observed-markets")
+    if (window_start_utc is None) != (window_end_utc is None):
+        raise ConfigurationError("explicit window start and end must be supplied together")
+    if window_hours is not None and window_start_utc is not None:
+        raise ConfigurationError("window_hours is mutually exclusive with explicit bounds")
+    if window_start_utc is not None and window_end_utc is not None:
+        acquisition_window = AcquisitionWindow(
+            window_start_utc=parse_utc_timestamp(window_start_utc),
+            window_end_utc=parse_utc_timestamp(window_end_utc),
+            maximum_events=maximum_events_value,
+            requested_market_depth=depth,
+            evaluated_at_utc=runtime.started_at,
+            maximum_window_hours=settings.maximum_window_hours,
+        )
+    else:
+        hours = settings.default_window_hours
+        if window_hours is not None:
+            hours = parse_cli_positive_bounded_int(window_hours, field_name="window_hours")
+        acquisition_window = rolling_acquisition_window(
+            runtime.started_at,
+            window_hours=hours,
+            maximum_events=maximum_events_value,
+            maximum_window_hours=settings.maximum_window_hours,
+        )
     job = enqueue_bookmaker_acquisition(
         database_path=runtime.database_path,
         bookmakers=runtime.settings.bookmakers,
@@ -217,6 +262,7 @@ def enqueue_bookmaker_acquisition_cli(
         maximum_attempts=maximum_attempts_value,
         actor="scraper-cli",
         created_at=runtime.started_at,
+        acquisition_window=acquisition_window,
     )
     print(
         json.dumps(
@@ -226,6 +272,8 @@ def enqueue_bookmaker_acquisition_cli(
                 "provider_id": provider,
                 "sport": sport,
                 "status": job.status.value,
+                "browser_mode": settings.browser_mode,
+                "acquisition_window": acquisition_window.as_payload(),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -240,8 +288,11 @@ def probe_bookmaker_cli(
     sport: str,
     duration_seconds: str | None = None,
     diagnostic_directory: str | None = None,
+    browser_mode: str = "headless",
 ) -> int:
-    """Run one visible localhost probe and print sanitized structural evidence."""
+    """Run one localhost probe and print sanitized structural evidence."""
+    from sports_analytics.sources.browser.contracts import BrowserMode
+
     duration = 30
     if duration_seconds is not None:
         duration = parse_cli_positive_bounded_int(duration_seconds, field_name="duration_seconds")
@@ -250,12 +301,14 @@ def probe_bookmaker_cli(
         sport=sport,
         duration_seconds=duration,
         diagnostic_directory=diagnostic_directory,
+        browser_mode=BrowserMode(browser_mode),
     )
     print(
         json.dumps(
             {
                 "provider": result.provider,
                 "sport": result.sport,
+                "browser_mode": browser_mode,
                 "duration_seconds": result.duration_seconds,
                 "blocked": result.blocked,
                 "block_reason": result.block_reason,
@@ -278,6 +331,7 @@ def smoke_bookmaker_cli(
     sport: str,
     duration_seconds: str | None = None,
     diagnostic_directory: str | None = None,
+    browser_mode: str | None = None,
 ) -> int:
     """Run one bounded provider smoke test."""
     runtime = bootstrap_runtime(
@@ -296,6 +350,11 @@ def smoke_bookmaker_cli(
         database_path=runtime.database_path,
         raw_directory=runtime.paths.raw_directory,
         snapshots_directory=runtime.paths.snapshots_directory,
+        bookmakers=(
+            runtime.settings.bookmakers
+            if browser_mode is None
+            else runtime.settings.bookmakers.model_copy(update={"browser_mode": browser_mode})
+        ),
     )
     print(
         json.dumps(

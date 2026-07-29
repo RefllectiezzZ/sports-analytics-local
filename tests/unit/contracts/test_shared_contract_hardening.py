@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -307,15 +309,22 @@ def test_symlink_checksum_sidecar_rejected(tmp_path: Path) -> None:
     text = dumps_canonical_json(document) + "\n"
     (model_dir / "model.json").write_text(text, encoding="utf-8", newline="\n")
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    real = model_dir / "real.sha256"
-    real.write_text(f"{digest}\n", encoding="utf-8", newline="\n")
-    (model_dir / MODEL_CHECKSUM_SIDECAR).symlink_to(real)
-    with pytest.raises(ModelError, match="symlink"):
-        load_model_artifact(
-            models_root=models_root,
-            relative_path="bad/model.json",
-            specification=specification,
-        )
+    sidecar = model_dir / MODEL_CHECKSUM_SIDECAR
+    sidecar.write_text(f"{digest}\n", encoding="utf-8", newline="\n")
+    original_lstat = Path.lstat
+
+    def fake_lstat(candidate: Path) -> object:
+        if candidate == sidecar:
+            return SimpleNamespace(st_mode=stat.S_IFLNK)
+        return original_lstat(candidate)
+
+    with patch.object(Path, "lstat", fake_lstat):
+        with pytest.raises(ModelError, match="symlink"):
+            load_model_artifact(
+                models_root=models_root,
+                relative_path="bad/model.json",
+                specification=specification,
+            )
 
 
 def test_altered_feature_parquet_schema_rejected(tmp_path: Path) -> None:

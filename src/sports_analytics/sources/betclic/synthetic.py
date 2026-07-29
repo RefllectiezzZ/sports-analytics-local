@@ -10,6 +10,7 @@ from sports_analytics.core.exceptions import NormalizationError, ParserError
 from sports_analytics.markets.contracts import MarketStatus, SelectionStatus
 from sports_analytics.sources.betclic.catalog import PARSER_VERSION
 from sports_analytics.sources.bookmaker_contracts import (
+    CanonicalOutcomeKey,
     ParserDriftSeverity,
     ProviderAcquisitionBundle,
     ProviderEventObservation,
@@ -18,6 +19,7 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderParserWarning,
     ProviderParticipantObservation,
     ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sports.contracts import require_utc
 
@@ -159,13 +161,17 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             raise ParserError(msg)
         if sel_id:
             seen.add(sel_id)
-        if item.get("decimal_odds") is None:
-            continue
-        try:
-            odds = Decimal(str(item["decimal_odds"]).replace(",", "."))
-        except (InvalidOperation, KeyError) as exc:
-            msg = "invalid decimal odds"
-            raise ParserError(msg) from exc
+        price = item.get("decimal_odds")
+        if price is None:
+            odds = None
+            price_state = ProviderSelectionPriceState.UNPRICED
+        else:
+            try:
+                odds = Decimal(str(price).replace(",", "."))
+            except InvalidOperation as exc:
+                msg = "invalid decimal odds"
+                raise ParserError(msg) from exc
+            price_state = ProviderSelectionPriceState.PRICED
         selection_status = SelectionStatus(str(item.get("selection_status") or "active"))
         line = None
         if item.get("line") is not None:
@@ -176,6 +182,16 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 display_label=str(item["display_label"]),
                 decimal_odds=odds,
                 selection_status=selection_status,
+                price_state=price_state,
+                canonical_outcome_key=_reviewed_synthetic_outcome(
+                    canonical_market_definition_id=(
+                        str(raw["canonical_market_definition_id"])
+                        if raw.get("canonical_market_definition_id") is not None
+                        else None
+                    ),
+                    display_label=str(item["display_label"]),
+                    explicit=item.get("canonical_outcome_key"),
+                ),
                 line=line,
             )
         )
@@ -199,3 +215,36 @@ def _parse_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             else None
         ),
     )
+
+
+def _reviewed_synthetic_outcome(
+    *,
+    canonical_market_definition_id: str | None,
+    display_label: str,
+    explicit: object,
+) -> CanonicalOutcomeKey | None:
+    if explicit is not None:
+        try:
+            return CanonicalOutcomeKey(str(explicit))
+        except ValueError as exc:
+            raise ParserError("unsupported synthetic canonical outcome") from exc
+    exact: dict[tuple[str, str], CanonicalOutcomeKey] = {
+        ("football-match-result-1x2", "Home"): CanonicalOutcomeKey.HOME,
+        ("football-match-result-1x2", "Draw"): CanonicalOutcomeKey.DRAW,
+        ("football-match-result-1x2", "Away"): CanonicalOutcomeKey.AWAY,
+        ("football-total-goals", "Over"): CanonicalOutcomeKey.OVER,
+        ("football-total-goals", "Under"): CanonicalOutcomeKey.UNDER,
+        ("football-btts", "Yes"): CanonicalOutcomeKey.YES,
+        ("football-btts", "No"): CanonicalOutcomeKey.NO,
+        ("basketball-match-winner-with-ot", "Home"): CanonicalOutcomeKey.HOME,
+        ("basketball-match-winner-with-ot", "Away"): CanonicalOutcomeKey.AWAY,
+        ("basketball-total-points-with-ot", "Over"): CanonicalOutcomeKey.OVER,
+        ("basketball-total-points-with-ot", "Under"): CanonicalOutcomeKey.UNDER,
+        ("basketball-spread-with-ot", "Home -3.5"): CanonicalOutcomeKey.HOME,
+        ("basketball-spread-with-ot", "Away +3.5"): CanonicalOutcomeKey.AWAY,
+        ("tennis-match-winner", "Elena Marquez"): CanonicalOutcomeKey.HOME,
+        ("tennis-match-winner", "Sofia Lindqvist"): CanonicalOutcomeKey.AWAY,
+    }
+    if canonical_market_definition_id is None:
+        return None
+    return exact.get((canonical_market_definition_id, display_label))

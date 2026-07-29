@@ -159,7 +159,8 @@ def test_football_backtest_repeated_publication_is_deterministic(tmp_path: Path)
             random_seed=7,
         ),
     )
-    paths_two = _runtime(tmp_path / "repeat-two")
+    # Keep the copied immutable artifact below the legacy Windows MAX_PATH limit.
+    paths_two = _runtime(tmp_path / "r")
     paths_two.features_directory.mkdir(parents=True, exist_ok=True)
     import shutil
 

@@ -146,7 +146,7 @@ def smoke_bookmaker(
     if duration_seconds < 1 or duration_seconds > 600:
         msg = "duration_seconds must be between 1 and 600"
         raise ConfigurationError(msg)
-    profile = extraction_profile or get_verified_extraction_profile(provider_id)
+    profile = extraction_profile or get_verified_extraction_profile(provider_id, sport)
     profile_id = None if profile is None else profile.profile_id
     profile_verified = False if profile is None else bool(profile.verified)
     if profile is None or not profile.verified:

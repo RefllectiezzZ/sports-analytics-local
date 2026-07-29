@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,18 @@ from sports_analytics.sources.raw_store import RawSourceStore
 SOURCE_NAME = "football-data-co-uk"
 SOURCE_URL = "https://www.football-data.co.uk/mmz4281/2324/E0.csv"
 RETRIEVED_AT = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+def _mark_as_symlink(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """Exercise the production lstat guard without creating a Windows symlink."""
+    original_lstat = Path.lstat
+
+    def fake_lstat(candidate: Path) -> object:
+        if candidate == path:
+            return SimpleNamespace(st_mode=stat.S_IFLNK)
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
 
 
 def test_store_bytes_writes_content_addressed_artifact(tmp_path: Path) -> None:
@@ -198,12 +212,14 @@ def test_load_verified_rejects_checksum_mismatch(tmp_path: Path) -> None:
         )
 
 
-def test_absolute_path_rejects_symlink_intermediate_component(tmp_path: Path) -> None:
+def test_absolute_path_rejects_symlink_intermediate_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     raw_root = tmp_path / "raw"
     raw_root.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (raw_root / SOURCE_NAME).symlink_to(outside, target_is_directory=True)
+    source_directory = raw_root / SOURCE_NAME
+    source_directory.mkdir()
+    _mark_as_symlink(monkeypatch, source_directory)
     store = RawSourceStore(raw_root)
     relative = f"{SOURCE_NAME}/sha256/{'a' * 2}/{'a' * 64}.csv"
 
@@ -229,7 +245,9 @@ def test_store_bytes_rejects_existing_corrupt_artifact_at_digest_path(tmp_path: 
         )
 
 
-def test_load_verified_rejects_symlink_artifact(tmp_path: Path) -> None:
+def test_load_verified_rejects_symlink_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = RawSourceStore(tmp_path / "raw")
     stored = store.store_bytes(
         source_name=SOURCE_NAME,
@@ -238,10 +256,7 @@ def test_load_verified_rejects_symlink_artifact(tmp_path: Path) -> None:
         retrieved_at=RETRIEVED_AT,
     )
     artifact_path = store.absolute_path_for(stored.relative_path)
-    artifact_path.unlink()
-    target_path = tmp_path / "outside.csv"
-    target_path.write_bytes(b"Div,Date\n")
-    artifact_path.symlink_to(target_path)
+    _mark_as_symlink(monkeypatch, artifact_path)
 
     with pytest.raises(
         PermanentSourceError,

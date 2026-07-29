@@ -22,6 +22,7 @@ from sports_analytics.bookmakers.types import (
     FailureClassification,
     SelectionMode,
 )
+from sports_analytics.bookmakers.window import AcquisitionWindow
 from sports_analytics.core.exceptions import PermanentJobError, RetryableJobError
 from sports_analytics.core.settings import BookmakersSettings
 from sports_analytics.data.codec import parse_utc_timestamp
@@ -111,6 +112,7 @@ class BookmakerAcquisitionOrchestrator:
         actor: str = "bookmaker-orchestrator",
         attempt_number: int = 1,
         maximum_attempts: int = 2,
+        acquisition_window: AcquisitionWindow | None = None,
     ) -> OrchestratedAcquisitionResult:
         """Acquire providers per selection mode with independent sub-attempts."""
         cycle_id = (
@@ -159,6 +161,7 @@ class BookmakerAcquisitionOrchestrator:
                     actor=actor,
                     attempt_number=attempt_number,
                     maximum_attempts=maximum_attempts,
+                    acquisition_window=acquisition_window,
                 )
             except RetryableJobError:
                 outcome = ProviderAttemptOutcome(
@@ -270,6 +273,7 @@ class BookmakerAcquisitionOrchestrator:
         actor: str,
         attempt_number: int,
         maximum_attempts: int,
+        acquisition_window: AcquisitionWindow | None,
     ) -> BookmakerIngestionResult:
         try:
             return self._service.ingest(
@@ -280,6 +284,7 @@ class BookmakerAcquisitionOrchestrator:
                 actor=actor,
                 attempt_number=attempt_number,
                 maximum_attempts=maximum_attempts,
+                acquisition_window=acquisition_window,
             )
         except RetryableJobError:
             raise

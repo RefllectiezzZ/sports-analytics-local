@@ -357,19 +357,85 @@ Explicitly **not** implemented yet:
 
 ## Bookmaker acquisition
 
-PR #11 adds a localhost-only bookmaker acquisition path:
+The bookmaker acquisition foundation provides:
 
 - Fixed public HTTPS routes for `betano-pt` and `betclic-pt` only.
-- Visible Playwright Chromium sessions (no headless production scraping).
+- Ordinary headless Chromium by default, with visible and best-effort minimized
+  visible presentation modes under identical safety policy.
 - Content-addressed minimized raw captures and immutable
   `current-bookmaker-odds` snapshots (`bookmaker-canonical-v1`).
-- Betano preferred / Betclic comparison selection with auditable reason codes.
+- Betclic is the next priority provider integration, but is not operational:
+  no event transport or extraction profile is verified yet. Betano remains
+  experimental and lower priority; its access limitations do not block the
+  remainder of the product workflow.
 - Same-bookmaker multiple invariant; mixed-provider singles comparison is a
   separate type and never a multiple.
 - Explicit fallback: Betclic first; stale last-valid snapshot may be preserved
   but never labelled current; no third-party fallback enabled by default.
 - Durable job `ingest.bookmaker-current-odds`, local scheduler, and migration
   `0005` operational tables.
+- An immutable exact UTC acquisition window (`bookmaker-acquisition-window-v1`)
+  separating refresh cadence from the upcoming-event horizon.
+- A provider-neutral, deterministic Stage-B event-navigation extension wired
+  into the production adapter call chain. Provider-derived targets require
+  exact HTTPS host approval and a reviewed provider-specific event-path grammar;
+  no arbitrary URL is accepted from a job. All current provider/sport
+  capabilities are explicitly disabled, and only an offline synthetic
+  capability/executor exercises the extension end to end.
+- A backward-compatible `bookmaker-native-v2` suite that preserves native
+  events, markets, priced and explicitly unpriced selections, nullable exact
+  decimals, per-row evidence links, and completeness counts before the reviewed
+  canonical subset.
+
+The transport call chain is:
+
+```text
+Playwright Chromium
+-> fixed provider-owned public route
+-> provider page naturally generates network activity
+-> page.on("response") observes the response in the active cycle
+-> allowlisted host plus reviewed structural response gate
+-> bounded body capture and content checksum
+-> optional provider-owned Stage-B candidates and reviewed navigation plan
+   (disabled for every current provider/sport profile)
+-> provider-native parser
+-> immutable snapshot publication
+-> strict reload
+```
+
+There is no independent bookmaker HTTP client. The runtime does not reconstruct
+or replay observed REST, GraphQL, or gRPC requests and does not copy browser
+headers, cookies, tokens, or request bodies. Safe transport metadata distinguishes
+document, fetch, XHR, gRPC-Web, EventSource, script/configuration, and other
+approved public responses. WebSocket connection metadata is admitted only for
+`wss://` on the exact approved public hostname and retains only the hostname and
+path hash plus acquisition identity and time. Raw WebSocket frames, HTML,
+scripts, complete URLs, queries, fragments, and headers are not persisted.
+
+Each retained response is linked to provider, sport, acquisition cycle, and page
+route. It records request method, safe transport type, approved hostname,
+approved route classification or path hash, status/content type, declared and
+captured lengths, redirect class, capture/truncation state, observation time,
+and a content checksum. Configuration JSON or URL keywords alone do not satisfy
+an extraction profile.
+
+Completeness is event-scoped. Only provider-reference equality or a reviewed
+structurally complete event-detail payload can produce a complete state.
+Landing/popular-event evidence remains `unknown-completeness`; deadlines,
+truncation, navigation failure, and parser rejection produce explicit partial
+states. Unknown markets may publish in native inventory but never become
+canonical or comparable without a reviewed mapping. Provider selection IDs
+remain source identities rather than canonical-outcome fallbacks. Multi-chunk
+completeness requires one unique chunk for each expected sequence; duplicate
+sequence claims fail closed.
+
+Verification is provider/sport specific. At this implementation point only the
+Betano football landing-inventory profile is registered, and its completeness
+capability is explicitly non-exhaustive. Betano basketball/tennis and Betclic
+football/basketball/tennis remain unverified rather than borrowing the football
+profile or guessed protobuf fields.
 
 Operators must review current provider terms before enabling
 `bookmakers.enabled`.
+Technical evidence verification and legal authorization are separate. Localhost
+or private analytical use does not itself grant access permission.

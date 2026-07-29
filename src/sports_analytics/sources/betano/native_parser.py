@@ -15,6 +15,7 @@ from sports_analytics.sources.betano.native_mappings import (
     BETANO_PARTICIPANT_ROLE_MAPPINGS,
     BETANO_PERIOD_MAPPINGS,
     map_betano_market_type,
+    map_betano_selection_outcome,
     map_betano_sport_code,
 )
 from sports_analytics.sources.bookmaker_contracts import (
@@ -26,6 +27,7 @@ from sports_analytics.sources.bookmaker_contracts import (
     ProviderParserWarning,
     ProviderParticipantObservation,
     ProviderSelectionObservation,
+    ProviderSelectionPriceState,
 )
 from sports_analytics.sources.browser.contracts import BrowserAcquisitionResult
 from sports_analytics.sports.contracts import require_utc
@@ -270,13 +272,17 @@ def _parse_native_market(raw: dict[str, Any]) -> ProviderMarketObservation:
             msg = "duplicate source selection identities"
             raise ParserError(msg)
         seen.add(sel_id)
-        if item.get("price") is None:
-            continue
-        try:
-            odds = Decimal(str(item["price"]).replace(",", "."))
-        except (InvalidOperation, KeyError) as exc:
-            msg = "invalid decimal odds"
-            raise ParserError(msg) from exc
+        price = item.get("price")
+        if price is None:
+            odds = None
+            price_state = ProviderSelectionPriceState.UNPRICED
+        else:
+            try:
+                odds = Decimal(str(price).replace(",", "."))
+            except InvalidOperation as exc:
+                msg = "invalid decimal odds"
+                raise ParserError(msg) from exc
+            price_state = ProviderSelectionPriceState.PRICED
         sel_status = _BETANO_SELECTION_STATUS.get(
             str(item.get("status", "ACTIVE")).upper(),
             SelectionStatus.ACTIVE,
@@ -290,6 +296,11 @@ def _parse_native_market(raw: dict[str, Any]) -> ProviderMarketObservation:
                 display_label=str(item.get("name", sel_id)),
                 decimal_odds=odds,
                 selection_status=sel_status,
+                price_state=price_state,
+                canonical_outcome_key=map_betano_selection_outcome(
+                    type_code,
+                    str(item.get("name", sel_id)),
+                ),
                 line=line,
             )
         )
