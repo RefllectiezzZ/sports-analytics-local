@@ -38,7 +38,7 @@ def render_football_product(
     )
     columns = st.columns(4)
     columns[0].metric("Product mode", _metric_value(product.get("mode"), "unavailable"))
-    columns[1].metric("Proposed singles", _metric_value(product.get("proposal_count"), 0))
+    columns[1].metric("Placeable manual proposals", _metric_value(product.get("proposal_count"), 0))
     columns[2].metric(
         "Proposed accumulators",
         _metric_value(product.get("accumulator_count"), 0),

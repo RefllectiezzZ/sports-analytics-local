@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +11,11 @@ from sports_analytics.artifacts import build_analytical_artifact_document
 from sports_analytics.core.exceptions import ArtifactError, ConfigurationError
 from sports_analytics.data.codec import dumps_canonical_json
 from sports_analytics.services import engine_cli
+from sports_analytics.sports.football.participant_registry import (
+    RegisteredFootballParticipant,
+    load_participant_registry_artifact,
+    write_participant_registry_artifact,
+)
 from sports_analytics.upcoming_events import (
     UPCOMING_EVENT_ARTIFACT_SCHEMA,
     UPCOMING_EVENT_ARTIFACT_TYPE,
@@ -23,6 +28,47 @@ from sports_analytics.upcoming_events import (
 )
 
 CUTOFF = datetime(2026, 8, 1, 12, tzinfo=UTC)
+
+
+def _registry(root, events, relative: str = "participants"):
+    participants = tuple(
+        RegisteredFootballParticipant(
+            participant_id,
+            "football",
+            "team",
+            f"Team {index}",
+            ("prt-primeira-liga",),
+            "exact",
+            "verified-football-snapshot",
+            f"source-team-{index}",
+            "verified-source-artifact",
+            "0" * 64,
+            date(2026, 7, 1),
+            None,
+        )
+        for index, participant_id in enumerate(
+            sorted(
+                {
+                    events[0].canonical_home_participant_id,
+                    events[0].canonical_away_participant_id,
+                }
+            )
+        )
+    )
+    artifact = write_participant_registry_artifact(
+        root=root,
+        relative_directory=relative,
+        registry_revision="registry-1",
+        generated_at_utc=CUTOFF,
+        evaluated_at_utc=CUTOFF,
+        participants=participants,
+    )
+    return load_participant_registry_artifact(
+        root=root,
+        relative_directory=relative,
+        expected_artifact_id=artifact.artifact_id,
+        expected_checksum=artifact.checksum_sha256,
+    )
 
 
 def test_exact_templates_valid_import_and_strict_reload(tmp_path) -> None:
@@ -38,6 +84,7 @@ def test_exact_templates_valid_import_and_strict_reload(tmp_path) -> None:
         relative_directory="events",
         events=json_events,
         evaluated_at_utc=CUTOFF,
+        participant_registry=_registry(tmp_path, json_events),
     )
     loaded, rows = load_upcoming_event_artifact(
         root=tmp_path,
@@ -47,6 +94,36 @@ def test_exact_templates_valid_import_and_strict_reload(tmp_path) -> None:
     )
     assert loaded.artifact_id == artifact.artifact_id
     assert rows == json_events
+    lineage = artifact.payload["participant_registry"]
+    assert lineage["artifact_id"]
+    assert lineage["checksum_sha256"]
+    assert lineage["registry_revision"] == "registry-1"
+    assert lineage["validated_participant_ids"] == sorted(
+        [
+            json_events[0].canonical_home_participant_id,
+            json_events[0].canonical_away_participant_id,
+        ]
+    )
+
+
+def test_event_publication_rejects_unregistered_and_wrong_scope_participant(tmp_path) -> None:
+    events = parse_upcoming_event_json(
+        upcoming_event_json_template().encode(), evaluated_at_utc=CUTOFF
+    )
+    registry = _registry(tmp_path, events)
+    document = json.loads(upcoming_event_json_template())
+    document["events"][0]["canonical_home_participant_id"] = "33333333-3333-5333-8333-333333333333"
+    unknown = parse_upcoming_event_json(
+        dumps_canonical_json(document).encode(), evaluated_at_utc=CUTOFF
+    )
+    with pytest.raises(ConfigurationError, match="not registered"):
+        write_upcoming_event_artifact(
+            root=tmp_path,
+            relative_directory="unknown-events",
+            events=unknown,
+            evaluated_at_utc=CUTOFF,
+            participant_registry=registry,
+        )
 
 
 def test_duplicate_is_idempotent_but_contradictory_schedule_is_rejected() -> None:
@@ -99,6 +176,7 @@ def test_unexpected_field_and_checksum_tampering_are_rejected(tmp_path) -> None:
         relative_directory="events",
         events=events,
         evaluated_at_utc=CUTOFF,
+        participant_registry=_registry(tmp_path, events),
     )
     manifest = tmp_path / "events" / "manifest.json"
     manifest.write_text(manifest.read_text().replace("round-1", "round-2"), encoding="utf-8")
@@ -115,6 +193,7 @@ def test_semantic_tampering_after_reidentity_and_rechecksum_is_rejected(tmp_path
         relative_directory="events",
         events=events,
         evaluated_at_utc=CUTOFF,
+        participant_registry=_registry(tmp_path, events),
     )
     assert isinstance(artifact.payload, dict)
     payload = dict(artifact.payload)
@@ -161,6 +240,8 @@ def test_all_upcoming_event_operator_cli_modes(tmp_path, monkeypatch, capsys) ->
     exports = tmp_path / "exports"
     runtime = SimpleNamespace(paths=SimpleNamespace(exports_directory=exports))
     monkeypatch.setattr(engine_cli, "bootstrap_runtime", lambda *_args, **_kwargs: runtime)
+    parsed_events = parse_upcoming_event_json(source.read_bytes(), evaluated_at_utc=CUTOFF)
+    registry = _registry(exports, parsed_events, "operator/participants")
     assert (
         engine_cli.main(
             [
@@ -170,6 +251,12 @@ def test_all_upcoming_event_operator_cli_modes(tmp_path, monkeypatch, capsys) ->
                 cutoff,
                 "--output-relative",
                 "operator/events",
+                "--participant-registry-relative",
+                "operator/participants",
+                "--participant-registry-artifact-id",
+                registry.artifact.artifact_id,
+                "--participant-registry-checksum",
+                registry.artifact.checksum_sha256,
             ]
         )
         == 0
@@ -183,12 +270,32 @@ def test_all_upcoming_event_operator_cli_modes(tmp_path, monkeypatch, capsys) ->
                 "operator/events",
                 "--checksum",
                 imported["checksum_sha256"],
+                "--participant-registry-relative",
+                "operator/participants",
+                "--participant-registry-artifact-id",
+                registry.artifact.artifact_id,
+                "--participant-registry-checksum",
+                registry.artifact.checksum_sha256,
             ]
         )
         == 0
     )
     assert json.loads(capsys.readouterr().out)["state"] == "verified"
-    assert engine_cli.main(["--list-upcoming-events", "operator/events"]) == 0
+    assert (
+        engine_cli.main(
+            [
+                "--list-upcoming-events",
+                "operator/events",
+                "--participant-registry-relative",
+                "operator/participants",
+                "--participant-registry-artifact-id",
+                registry.artifact.artifact_id,
+                "--participant-registry-checksum",
+                registry.artifact.checksum_sha256,
+            ]
+        )
+        == 0
+    )
     listed = json.loads(capsys.readouterr().out)
     assert listed["row_count"] == 1
     assert listed["events"][0]["event_status"] == "scheduled"

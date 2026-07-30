@@ -30,10 +30,11 @@ def probability_surface_payload(
     model_artifact_id: str,
     distribution: JointScoreDistribution,
     markets: tuple[FootballMarketProbability, ...] | None = None,
+    participant_identity: dict[str, JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
     """Serialize one bounded coherent score surface and all derived fair odds."""
     derived = markets or derive_full_time_markets(distribution)
-    return {
+    payload: dict[str, JsonValue] = {
         "canonical_event_id": canonical_event_id,
         "model_artifact_id": model_artifact_id,
         "prediction_cutoff": distribution.prediction_cutoff.isoformat(),
@@ -80,6 +81,9 @@ def probability_surface_payload(
         },
         "capability_state": "fair-odds-only",
     }
+    if participant_identity is not None:
+        payload["participant_identity"] = participant_identity
+    return payload
 
 
 def write_football_probability_artifact(
@@ -89,6 +93,7 @@ def write_football_probability_artifact(
     canonical_event_id: str,
     model_artifact_id: str,
     distribution: JointScoreDistribution,
+    participant_identity: dict[str, JsonValue] | None = None,
 ) -> AnalyticalArtifact:
     return write_analytical_artifact(
         root=root,
@@ -99,6 +104,7 @@ def write_football_probability_artifact(
             canonical_event_id=canonical_event_id,
             model_artifact_id=model_artifact_id,
             distribution=distribution,
+            participant_identity=participant_identity,
         ),
     )
 
@@ -118,7 +124,7 @@ def load_football_probability_artifact(
         expected_checksum=expected_checksum,
     )
     payload = artifact.payload
-    if not isinstance(payload, dict) or set(payload) != {
+    required_fields = {
         "canonical_event_id",
         "model_artifact_id",
         "prediction_cutoff",
@@ -137,6 +143,10 @@ def load_football_probability_artifact(
         "markets",
         "price_semantics",
         "capability_state",
+    }
+    if not isinstance(payload, dict) or set(payload) not in {
+        frozenset(required_fields),
+        frozenset(required_fields | {"participant_identity"}),
     }:
         raise ArtifactError("football probability artifact fields are not exact")
     if payload["capability_state"] != "fair-odds-only":

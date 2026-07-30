@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -44,6 +45,7 @@ from sports_analytics.players.evidence import (
 from sports_analytics.policies.proposal import PublishedProposalPolicy, publish_proposal_policy
 from sports_analytics.services import football_product as research_product
 from sports_analytics.services.champion_resolution import (
+    resolve_active_score_champion,
     write_score_calibration_artifact,
 )
 from sports_analytics.services.production_football_product import (
@@ -52,6 +54,11 @@ from sports_analytics.services.production_football_product import (
 )
 from sports_analytics.services.production_football_product_cli import (
     run_production_football_product_document,
+)
+from sports_analytics.sports.football.participant_registry import (
+    RegisteredFootballParticipant,
+    load_participant_registry_artifact,
+    write_participant_registry_artifact,
 )
 from sports_analytics.ui.product_catalogue import ProductReadModelEntry, load_product_read_model
 from sports_analytics.upcoming_events import (
@@ -96,11 +103,50 @@ def _evidence(tmp_path):
     events = parse_upcoming_event_json(
         upcoming_event_json_template().encode(), evaluated_at_utc=NOW
     )
+    registry_rows = tuple(
+        RegisteredFootballParticipant(
+            participant_id,
+            "football",
+            "team",
+            f"Team {index}",
+            ("prt-primeira-liga",),
+            "exact",
+            "verified-football-snapshot",
+            f"source-team-{index}",
+            "verified-source-artifact",
+            "0" * 64,
+            date(2026, 7, 1),
+            None,
+        )
+        for index, participant_id in enumerate(
+            sorted(
+                {
+                    events[0].canonical_home_participant_id,
+                    events[0].canonical_away_participant_id,
+                }
+            )
+        )
+    )
+    registry_artifact = write_participant_registry_artifact(
+        root=exports,
+        relative_directory="evidence/participants",
+        registry_revision="registry-1",
+        generated_at_utc=NOW,
+        evaluated_at_utc=NOW,
+        participants=registry_rows,
+    )
+    registry = load_participant_registry_artifact(
+        root=exports,
+        relative_directory="evidence/participants",
+        expected_artifact_id=registry_artifact.artifact_id,
+        expected_checksum=registry_artifact.checksum_sha256,
+    )
     event_artifact = write_upcoming_event_artifact(
         root=exports,
         relative_directory="evidence/events",
         events=events,
         evaluated_at_utc=NOW,
+        participant_registry=registry,
     )
     policy_artifact = publish_proposal_policy(
         root=exports,
@@ -111,6 +157,9 @@ def _evidence(tmp_path):
         upcoming_event_relative_directory="evidence/events",
         upcoming_event_artifact_id=event_artifact.artifact_id,
         upcoming_event_checksum_sha256=event_artifact.checksum_sha256,
+        participant_registry_relative_directory="evidence/participants",
+        participant_registry_artifact_id=registry_artifact.artifact_id,
+        participant_registry_checksum_sha256=registry_artifact.checksum_sha256,
         competition_id="prt-primeira-liga",
         market_key=MARKET_KEY,
         evaluated_at_utc=NOW,
@@ -121,8 +170,8 @@ def _evidence(tmp_path):
     return exports, models, events, request
 
 
-def _register_champion(connection, models, events):
-    teams = tuple(
+def _register_champion(connection, models, events, *, model_teams=None):
+    teams = model_teams or tuple(
         sorted(
             {
                 events[0].canonical_home_participant_id,
@@ -138,8 +187,8 @@ def _register_champion(connection, models, events):
         teams=teams,
         base_log_rate=0.1,
         home_advantage=0.15,
-        attack_strengths=(0.0, 0.0),
-        defence_strengths=(0.0, 0.0),
+        attack_strengths=tuple(0.0 for _ in teams),
+        defence_strengths=tuple(0.0 for _ in teams),
         rho=0.0,
         configuration=ScoreModelConfiguration(minimum_matches=1),
         diagnostics=ScoreModelDiagnostics(True, 1, 1.0, 0.0, 0),
@@ -323,6 +372,71 @@ def test_production_uses_registered_champion_and_never_trains(tmp_path, monkeypa
     assert result.read_model_artifact.payload["product_state"]["operational_state"] == (
         "fair-odds-only"
     )
+    identity = result.read_model_artifact.payload["model_status"]["participant_identity_by_event"][
+        events[0].canonical_event_id
+    ]
+    assert identity["home_participant_identity_state"] == "registered-model-seen"
+    assert identity["unseen_team_fallback_used"] is False
+
+
+def test_registered_model_unseen_team_uses_recorded_competition_average_fallback(
+    tmp_path,
+) -> None:
+    exports, models, events, request = _evidence(tmp_path)
+    connection = _connection()
+    _register_champion(
+        connection,
+        models,
+        events,
+        model_teams=(events[0].canonical_home_participant_id,),
+    )
+    result = run_and_publish_production_football_product(
+        connection=connection,
+        exports_root=exports,
+        model_root=models,
+        request=request,
+    )
+    identity = result.read_model_artifact.payload["model_status"]["participant_identity_by_event"][
+        events[0].canonical_event_id
+    ]
+    assert identity["away_participant_identity_state"] == "registered-model-unseen"
+    assert identity["unseen_team_fallback_used"] is True
+    assert identity["unseen_participant_ids"] == [events[0].canonical_away_participant_id]
+    assert identity["fallback_policy"] == "competition-average-zero-effect"
+    assert result.probability_artifacts[0].payload["participant_identity"] == identity
+
+
+def test_product_rejects_mismatched_participant_registry_before_probability(tmp_path) -> None:
+    exports, models, events, request = _evidence(tmp_path)
+    connection = _connection()
+    _register_champion(connection, models, events)
+    original = load_participant_registry_artifact(
+        root=exports,
+        relative_directory=request.participant_registry_relative_directory,
+        expected_artifact_id=request.participant_registry_artifact_id,
+        expected_checksum=request.participant_registry_checksum_sha256,
+    )
+    duplicate = write_participant_registry_artifact(
+        root=exports,
+        relative_directory="evidence/participants-copy",
+        registry_revision=original.registry_revision,
+        generated_at_utc=original.generated_at_utc,
+        evaluated_at_utc=original.evaluated_at_utc,
+        participants=original.participants,
+    )
+    with pytest.raises(ArtifactError, match="participant registry lineage mismatch"):
+        run_and_publish_production_football_product(
+            connection=connection,
+            exports_root=exports,
+            model_root=models,
+            request=replace(
+                request,
+                participant_registry_relative_directory="evidence/participants-copy",
+                participant_registry_artifact_id=duplicate.artifact_id,
+                participant_registry_checksum_sha256=duplicate.checksum_sha256,
+            ),
+        )
+    assert not (exports / "product" / "probabilities").exists()
 
 
 def test_current_quote_is_analysed_but_economic_holds_prevent_proposal(tmp_path) -> None:
@@ -494,6 +608,62 @@ def test_champion_checksum_competition_and_multiplicity_are_fail_closed(tmp_path
         )
 
 
+def test_inference_revalidates_current_event_cutoff_before_writing_probabilities(tmp_path) -> None:
+    exports, models, events, request = _evidence(tmp_path)
+    connection = _connection()
+    _register_champion(connection, models, events)
+    with pytest.raises(EvaluationError, match="event-no-longer-pre-match"):
+        run_and_publish_production_football_product(
+            connection=connection,
+            exports_root=exports,
+            model_root=models,
+            request=replace(request, evaluated_at_utc=events[0].event_start_utc),
+        )
+    assert not (exports / "product" / "probabilities").exists()
+    valid = run_and_publish_production_football_product(
+        connection=connection,
+        exports_root=exports,
+        model_root=models,
+        request=replace(
+            request,
+            relative_root="product/one-microsecond-before",
+            evaluated_at_utc=events[0].event_start_utc - timedelta(microseconds=1),
+        ),
+    )
+    assert valid.probability_artifacts
+
+
+def test_champions_in_distinct_competitions_coexist_in_one_registry(tmp_path) -> None:
+    exports, models, events, _request = _evidence(tmp_path)
+    connection = _connection()
+    champion = _register_champion(connection, models, events)
+    portugal = connection.execute(
+        "SELECT provenance_json FROM model_registry_entries WHERE model_artifact_id = ?",
+        (champion.artifact_id,),
+    ).fetchone()["provenance_json"]
+    england = json.loads(portugal)
+    england["competition_id"] = "eng-premier-league"
+    connection.execute(
+        """
+        INSERT INTO model_registry_entries
+        SELECT ?, model_checksum_sha256, model_relative_path,
+               model_specification_version, feature_specification_version,
+               sport_code, market_key, role, lifecycle_status, registered_at,
+               actor, ?, superseded_model_artifact_id, version
+        FROM model_registry_entries
+        """,
+        ("england-champion", dumps_canonical_json(england)),
+    )
+    resolved = resolve_active_score_champion(
+        connection=connection,
+        model_root=models,
+        competition_id="prt-primeira-liga",
+        market_key=MARKET_KEY,
+    )
+    assert resolved is not None
+    assert resolved.model_artifact_id == champion.artifact_id
+
+
 def test_production_json_rejects_inline_training_and_model_fields(tmp_path) -> None:
     exports, models, _events, request = _evidence(tmp_path)
     base = {
@@ -505,6 +675,11 @@ def test_production_json_rejects_inline_training_and_model_fields(tmp_path) -> N
             "relative_directory": request.upcoming_event_relative_directory,
             "artifact_id": request.upcoming_event_artifact_id,
             "checksum_sha256": request.upcoming_event_checksum_sha256,
+        },
+        "participant_registry_artifact": {
+            "relative_directory": request.participant_registry_relative_directory,
+            "artifact_id": request.participant_registry_artifact_id,
+            "checksum_sha256": request.participant_registry_checksum_sha256,
         },
         "proposal_policy_artifact": {
             "relative_directory": request.proposal_policy_relative_directory,

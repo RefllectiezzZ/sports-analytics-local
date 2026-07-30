@@ -83,6 +83,15 @@ league and cup inside one association receives the same ID; the same normalized
 name in England and Portugal receives different IDs. Player identity uses
 `participant_identity_scope` without requiring `competition_id`.
 
+Production upcoming-event registration adds the immutable
+`canonical-football-participant-registry-v1` competition-membership boundary.
+It reuses canonical participant IDs and accepted reconciliation states rather
+than redefining identity. Each row binds a reconciled football team to
+competition membership and validity dates with exact source-artifact lineage.
+UUID syntax alone is insufficient. Upcoming-event publication and production
+inference verify the same registry artifact ID, checksum, revision, and scope
+before probabilities are written.
+
 Canonical event IDs use `event_occurrence_key`, not `event_date` or kickoff time.
 Dates and scheduled starts are mutable metadata so postponed or rescheduled
 fixtures retain one canonical identity. For the current Football-Data.co.uk

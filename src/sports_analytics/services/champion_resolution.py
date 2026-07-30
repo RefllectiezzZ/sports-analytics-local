@@ -126,7 +126,7 @@ def resolve_active_score_champion(
     market_key: str,
 ) -> ResolvedScoreChampion | None:
     """Resolve exactly one compatible champion; never scan files or fit a model."""
-    active = tuple(
+    candidates = tuple(
         entry
         for entry in ModelGovernanceRepository(connection).list_models()
         if entry.role is ModelRole.CHAMPION
@@ -134,38 +134,22 @@ def resolve_active_score_champion(
         and entry.sport_code == "football"
         and entry.market_key == market_key
     )
+    # Provenance is a governance boundary.  Validate every potentially relevant
+    # row before selection: malformed rows must not be silently hidden merely
+    # because another competition happens to have a usable champion.
+    active = tuple(
+        entry
+        for entry in candidates
+        if _matches_requested_scope(entry, competition_id=competition_id)
+    )
     if len(active) > 1:
         raise GovernanceError("multiple compatible active champions")
     if not active:
         return None
     entry = active[0]
     provenance = entry.provenance
-    if not isinstance(provenance, dict):
+    if not isinstance(provenance, dict):  # guarded above; keeps the type narrow.
         raise GovernanceError("active champion provenance is not an object")
-    required = {
-        "competition_id",
-        "model_purpose",
-        "probability_generator_scope",
-        "evaluation_mode",
-        "artifact_type",
-        "artifact_schema",
-        "model_family",
-        "training_lineage",
-        "calibration",
-    }
-    if set(provenance) != required:
-        raise GovernanceError("active champion provenance fields are not exact")
-    if provenance["competition_id"] != competition_id:
-        raise GovernanceError("active champion competition does not match product scope")
-    expected = {
-        "model_purpose": FOOTBALL_PRODUCT_MODEL_PURPOSE,
-        "probability_generator_scope": FOOTBALL_PROBABILITY_GENERATOR_SCOPE,
-        "evaluation_mode": FOOTBALL_PRODUCTION_EVALUATION_MODE,
-        "artifact_type": FOOTBALL_SCORE_ARTIFACT_TYPE,
-        "artifact_schema": FOOTBALL_SCORE_ARTIFACT_SCHEMA,
-    }
-    if any(provenance.get(key) != value for key, value in expected.items()):
-        raise GovernanceError("active champion production scope is incompatible")
     if entry.model_specification_version != FOOTBALL_SCORE_MODEL_VERSION:
         raise GovernanceError("active champion model specification is incompatible")
     calibration = provenance["calibration"]
@@ -220,6 +204,38 @@ def resolve_active_score_champion(
             connection,
             model_artifact_id=entry.model_artifact_id,
         ),
+    )
+
+
+def _matches_requested_scope(entry: object, *, competition_id: str) -> bool:
+    """Validate candidate provenance and select only its exact product scope."""
+    provenance = getattr(entry, "provenance", None)
+    if not isinstance(provenance, dict):
+        raise GovernanceError("active champion provenance is not an object")
+    required = {
+        "competition_id",
+        "model_purpose",
+        "probability_generator_scope",
+        "evaluation_mode",
+        "artifact_type",
+        "artifact_schema",
+        "model_family",
+        "training_lineage",
+        "calibration",
+    }
+    if set(provenance) != required:
+        raise GovernanceError("active champion provenance fields are not exact")
+    expected = {
+        "model_purpose": FOOTBALL_PRODUCT_MODEL_PURPOSE,
+        "probability_generator_scope": FOOTBALL_PROBABILITY_GENERATOR_SCOPE,
+        "evaluation_mode": FOOTBALL_PRODUCTION_EVALUATION_MODE,
+        "artifact_type": FOOTBALL_SCORE_ARTIFACT_TYPE,
+        "artifact_schema": FOOTBALL_SCORE_ARTIFACT_SCHEMA,
+    }
+    if any(provenance[key] != value for key, value in expected.items()):
+        return False
+    return (
+        type(provenance["competition_id"]) is str and provenance["competition_id"] == competition_id
     )
 
 

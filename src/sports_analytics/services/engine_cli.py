@@ -43,6 +43,10 @@ from sports_analytics.core.validation import (
 from sports_analytics.data.codec import dumps_canonical_json, ensure_json_value
 from sports_analytics.data.database import connect_database
 from sports_analytics.data.types import JsonValue
+from sports_analytics.economics.football_evidence import (
+    FootballEconomicEligibilityPolicy,
+    load_football_economic_evidence,
+)
 from sports_analytics.evaluation.temporal import TemporalSplitConfig
 from sports_analytics.features.football.specification import (
     FOOTBALL_1X2_FEATURE_NAMES_V1,
@@ -91,6 +95,13 @@ from sports_analytics.services.training import (
     train_football_1x2_model,
     verify_model_artifact,
 )
+from sports_analytics.sports.football.participant_registry import (
+    RegisteredFootballParticipant,
+    load_participant_registry_artifact,
+    parse_participant_registry_json,
+    participant_registry_json_template,
+    write_participant_registry_artifact,
+)
 from sports_analytics.upcoming_events import (
     UpcomingEvent,
     load_upcoming_event_artifact,
@@ -98,6 +109,7 @@ from sports_analytics.upcoming_events import (
     parse_upcoming_event_json,
     upcoming_event_csv_template,
     upcoming_event_json_template,
+    verify_upcoming_event_participant_registry,
     write_upcoming_event_artifact,
 )
 
@@ -239,6 +251,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     mode.add_argument("--list-upcoming-events", metavar="RELATIVE_DIRECTORY", default=None)
     mode.add_argument(
+        "--verify-football-economic-evidence", metavar="RELATIVE_DIRECTORY", default=None
+    )
+    mode.add_argument("--inspect-football-economic-policy", action="store_true")
+    mode.add_argument("--export-participant-registry-json-template", action="store_true")
+    mode.add_argument("--validate-participant-registry-input", metavar="PATH", default=None)
+    mode.add_argument("--build-participant-registry", metavar="PATH", default=None)
+    mode.add_argument("--verify-participant-registry", metavar="RELATIVE_DIRECTORY", default=None)
+    mode.add_argument("--list-participant-registry", metavar="RELATIVE_DIRECTORY", default=None)
+    mode.add_argument(
         "--football-market-capabilities",
         action="store_true",
         help="Print the exact sport and market capability matrix.",
@@ -302,6 +323,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         metavar="RELATIVE_DIRECTORY",
         help="Safe output directory for an immutable imported artifact.",
     )
+    parser.add_argument("--participant-registry-relative", default=None)
+    parser.add_argument("--participant-registry-artifact-id", default=None)
+    parser.add_argument("--participant-registry-checksum", default=None)
     parser.add_argument(
         "--seed",
         default=None,
@@ -455,6 +479,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _verify_upcoming_events(args, list_rows=False)
         if args.list_upcoming_events is not None:
             return _verify_upcoming_events(args, list_rows=True)
+        if args.verify_football_economic_evidence is not None:
+            return _verify_football_economic_evidence(args)
+        if args.inspect_football_economic_policy:
+            print(
+                dumps_canonical_json(
+                    {
+                        "policy_version": FootballEconomicEligibilityPolicy().policy_version,
+                        "policy_id": FootballEconomicEligibilityPolicy().policy_id,
+                        "configuration_id": FootballEconomicEligibilityPolicy().configuration_id,
+                        "configuration": FootballEconomicEligibilityPolicy().to_json(),
+                    }
+                )
+            )
+            return SUCCESS_EXIT
+        if args.export_participant_registry_json_template:
+            print(participant_registry_json_template(), end="")
+            return SUCCESS_EXIT
+        if args.validate_participant_registry_input is not None:
+            return _validate_participant_registry(args)
+        if args.build_participant_registry is not None:
+            return _build_participant_registry(args)
+        if args.verify_participant_registry is not None:
+            return _verify_participant_registry(args, list_rows=False)
+        if args.list_participant_registry is not None:
+            return _verify_participant_registry(args, list_rows=True)
         if args.football_market_capabilities:
             print(dumps_canonical_json(capability_payload()))
             return SUCCESS_EXIT
@@ -514,6 +563,13 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.import_upcoming_events is not None,
         args.verify_upcoming_event_artifact is not None,
         args.list_upcoming_events is not None,
+        args.verify_football_economic_evidence is not None,
+        args.inspect_football_economic_policy,
+        args.export_participant_registry_json_template,
+        args.validate_participant_registry_input is not None,
+        args.build_participant_registry is not None,
+        args.verify_participant_registry is not None,
+        args.list_participant_registry is not None,
         args.football_market_capabilities,
         args.export_current_quote_template,
         args.export_current_quote_json_template,
@@ -547,6 +603,9 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             args.artifact_type,
             args.artifact_schema,
             args.output_relative,
+            args.participant_registry_relative,
+            args.participant_registry_artifact_id,
+            args.participant_registry_checksum,
         )
     )
     if common and (any(engine_modes) or domain_args):
@@ -972,12 +1031,28 @@ def _import_upcoming_events(args: argparse.Namespace) -> int:
     if type(args.output_relative) is not str or not args.output_relative:
         raise ConfigurationError("--output-relative is required for upcoming-event import")
     runtime = bootstrap_runtime("engine", config_path=args.config, env_file=args.env_file)
+    if not all(
+        type(value) is str and value
+        for value in (
+            args.participant_registry_relative,
+            args.participant_registry_artifact_id,
+            args.participant_registry_checksum,
+        )
+    ):
+        raise ConfigurationError("upcoming-event import requires exact participant registry")
+    registry = load_participant_registry_artifact(
+        root=runtime.paths.exports_directory,
+        relative_directory=args.participant_registry_relative,
+        expected_artifact_id=args.participant_registry_artifact_id,
+        expected_checksum=args.participant_registry_checksum,
+    )
     events = _parse_upcoming_path(args.import_upcoming_events, cutoff=cutoff)
     artifact = write_upcoming_event_artifact(
         root=runtime.paths.exports_directory,
         relative_directory=args.output_relative,
         events=events,
         evaluated_at_utc=cutoff,
+        participant_registry=registry,
     )
     print(
         dumps_canonical_json(
@@ -1001,6 +1076,26 @@ def _verify_upcoming_events(args: argparse.Namespace, *, list_rows: bool) -> int
         relative_directory=relative,
         expected_checksum=args.checksum,
     )
+    if not all(
+        type(value) is str and value
+        for value in (
+            args.participant_registry_relative,
+            args.participant_registry_artifact_id,
+            args.participant_registry_checksum,
+        )
+    ):
+        raise ConfigurationError("upcoming-event verification requires exact participant registry")
+    registry = load_participant_registry_artifact(
+        root=runtime.paths.exports_directory,
+        relative_directory=args.participant_registry_relative,
+        expected_artifact_id=args.participant_registry_artifact_id,
+        expected_checksum=args.participant_registry_checksum,
+    )
+    verify_upcoming_event_participant_registry(
+        artifact=artifact,
+        events=events,
+        participant_registry=registry,
+    )
     result: dict[str, JsonValue] = {
         "state": "verified",
         "artifact_id": artifact.artifact_id,
@@ -1009,6 +1104,110 @@ def _verify_upcoming_events(args: argparse.Namespace, *, list_rows: bool) -> int
     }
     if list_rows:
         result["events"] = [item.to_json() for item in events]
+    print(dumps_canonical_json(result))
+    return SUCCESS_EXIT
+
+
+def _verify_football_economic_evidence(args: argparse.Namespace) -> int:
+    runtime = bootstrap_runtime("engine", config_path=args.config, env_file=args.env_file)
+    evidence = load_football_economic_evidence(
+        root=runtime.paths.exports_directory,
+        relative_directory=args.verify_football_economic_evidence,
+        expected_checksum=args.checksum,
+    )
+    print(
+        dumps_canonical_json(
+            {
+                "state": "verified",
+                "artifact_id": evidence.artifact.artifact_id,
+                "checksum_sha256": evidence.artifact.checksum_sha256,
+                "evaluation_mode": evidence.payload["evaluation_mode"],
+                "source_classification": evidence.payload["source_classification"],
+            }
+        )
+    )
+    return SUCCESS_EXIT
+
+
+def _read_participant_registry(
+    path_text: str,
+) -> tuple[
+    str,
+    datetime,
+    datetime,
+    tuple[RegisteredFootballParticipant, ...],
+]:
+    try:
+        raw = Path(path_text.replace("\\", "/")).read_bytes()
+    except OSError as exc:
+        raise ConfigurationError("cannot read participant registry input") from exc
+    return parse_participant_registry_json(raw)
+
+
+def _validate_participant_registry(args: argparse.Namespace) -> int:
+    revision, generated, evaluated, participants = _read_participant_registry(
+        args.validate_participant_registry_input
+    )
+    print(
+        dumps_canonical_json(
+            {
+                "state": "valid",
+                "registry_revision": revision,
+                "generated_at_utc": generated.isoformat(),
+                "evaluated_at_utc": evaluated.isoformat(),
+                "row_count": len(participants),
+            }
+        )
+    )
+    return SUCCESS_EXIT
+
+
+def _build_participant_registry(args: argparse.Namespace) -> int:
+    if type(args.output_relative) is not str or not args.output_relative:
+        raise ConfigurationError("--output-relative is required for participant registry build")
+    revision, generated, evaluated, participants = _read_participant_registry(
+        args.build_participant_registry
+    )
+    runtime = bootstrap_runtime("engine", config_path=args.config, env_file=args.env_file)
+    artifact = write_participant_registry_artifact(
+        root=runtime.paths.exports_directory,
+        relative_directory=args.output_relative,
+        registry_revision=revision,
+        generated_at_utc=generated,
+        evaluated_at_utc=evaluated,
+        participants=participants,
+    )
+    print(
+        dumps_canonical_json(
+            {
+                "state": "built",
+                "artifact_id": artifact.artifact_id,
+                "checksum_sha256": artifact.checksum_sha256,
+                "relative_directory": artifact.relative_directory,
+                "row_count": len(participants),
+            }
+        )
+    )
+    return SUCCESS_EXIT
+
+
+def _verify_participant_registry(args: argparse.Namespace, *, list_rows: bool) -> int:
+    relative = args.list_participant_registry if list_rows else args.verify_participant_registry
+    runtime = bootstrap_runtime("engine", config_path=args.config, env_file=args.env_file)
+    registry = load_participant_registry_artifact(
+        root=runtime.paths.exports_directory,
+        relative_directory=relative,
+        expected_checksum=args.checksum,
+    )
+    result: dict[str, JsonValue] = {
+        "state": "verified",
+        "artifact_id": registry.artifact.artifact_id,
+        "checksum_sha256": registry.artifact.checksum_sha256,
+        "registry_revision": registry.registry_revision,
+        "row_count": len(registry.participants),
+    }
+    if list_rows:
+        result["participants"] = [item.to_json() for item in registry.participants]
     print(dumps_canonical_json(result))
     return SUCCESS_EXIT
 

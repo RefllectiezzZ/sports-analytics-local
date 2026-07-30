@@ -52,17 +52,28 @@ def run_production_football_product_document(
         "competition_id",
         "market_key",
         "upcoming_event_artifact",
+        "participant_registry_artifact",
         "proposal_policy_artifact",
         "registered_provider_ids",
         "operator_quotes",
         "player_context_artifact",
+        "economic_evidence_artifact",
     }:
         raise ConfigurationError("production football product JSON fields are not exact")
     events = _reference(document["upcoming_event_artifact"], "upcoming_event_artifact", True)
+    participants = _reference(
+        document["participant_registry_artifact"], "participant_registry_artifact", True
+    )
     policy = _reference(document["proposal_policy_artifact"], "proposal_policy_artifact", False)
     player_raw = document["player_context_artifact"]
     player = (
         None if player_raw is None else _reference(player_raw, "player_context_artifact", False)
+    )
+    evidence_raw = document["economic_evidence_artifact"]
+    evidence = (
+        None
+        if evidence_raw is None
+        else _reference(evidence_raw, "economic_evidence_artifact", True)
     )
     providers_raw = document["registered_provider_ids"]
     if not isinstance(providers_raw, list) or any(
@@ -87,6 +98,9 @@ def run_production_football_product_document(
             upcoming_event_relative_directory=events["relative_directory"],
             upcoming_event_artifact_id=events["artifact_id"],
             upcoming_event_checksum_sha256=events["checksum_sha256"],
+            participant_registry_relative_directory=participants["relative_directory"],
+            participant_registry_artifact_id=participants["artifact_id"],
+            participant_registry_checksum_sha256=participants["checksum_sha256"],
             competition_id=_text(document["competition_id"], "competition_id"),
             market_key=_text(document["market_key"], "market_key"),
             evaluated_at_utc=_timestamp(document["evaluated_at_utc"]),
@@ -99,6 +113,13 @@ def run_production_football_product_document(
                 None if player is None else player["relative_directory"]
             ),
             player_context_checksum_sha256=(None if player is None else player["checksum_sha256"]),
+            economic_evidence_relative_directory=(
+                None if evidence is None else evidence["relative_directory"]
+            ),
+            economic_evidence_artifact_id=(None if evidence is None else evidence["artifact_id"]),
+            economic_evidence_checksum_sha256=(
+                None if evidence is None else evidence["checksum_sha256"]
+            ),
         ),
     )
     return {

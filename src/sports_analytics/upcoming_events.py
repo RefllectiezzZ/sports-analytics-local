@@ -21,11 +21,12 @@ from sports_analytics.artifacts import (
 )
 from sports_analytics.core.exceptions import ArtifactError, ConfigurationError
 from sports_analytics.data.codec import format_utc_timestamp, parse_utc_timestamp
-from sports_analytics.data.types import JsonValue, validate_identifier
+from sports_analytics.data.types import JsonValue, validate_identifier, validate_sha256_checksum
 from sports_analytics.snapshots.paths import is_absolute_path_text
 from sports_analytics.sources.football_data_co_uk.catalog import get_competition
 from sports_analytics.sports.contracts import EventStatus, require_utc
 from sports_analytics.sports.football.identifiers import parse_canonical_season
+from sports_analytics.sports.football.participant_registry import FootballParticipantRegistry
 from sports_analytics.sports.identifiers import build_canonical_event_id, build_season_id
 
 UPCOMING_EVENT_ARTIFACT_TYPE: Final[str] = "canonical-upcoming-events"
@@ -163,6 +164,7 @@ def write_upcoming_event_artifact(
     relative_directory: str,
     events: tuple[UpcomingEvent, ...],
     evaluated_at_utc: datetime,
+    participant_registry: FootballParticipantRegistry,
 ) -> AnalyticalArtifact:
     if not events:
         raise ConfigurationError("upcoming-event artifact requires at least one event")
@@ -171,6 +173,7 @@ def write_upcoming_event_artifact(
     batches = {item.import_batch_id for item in ordered}
     if len(batches) != 1:
         raise ConfigurationError("upcoming-event artifact requires one import batch")
+    _validate_registered_event_participants(ordered, participant_registry)
     return write_analytical_artifact(
         root=root,
         relative_directory=relative_directory,
@@ -182,7 +185,28 @@ def write_upcoming_event_artifact(
             "evaluated_at_utc": format_utc_timestamp(cutoff),
             "import_batch_id": next(iter(batches)),
             "row_count": len(ordered),
-            "participant_lineage": "canonical-reconciled-participant-id",
+            "participant_registry": {
+                "relative_directory": participant_registry.artifact.relative_directory,
+                "artifact_id": participant_registry.artifact.artifact_id,
+                "checksum_sha256": participant_registry.artifact.checksum_sha256,
+                "registry_revision": participant_registry.registry_revision,
+                "validated_participant_ids": cast(
+                    JsonValue,
+                    sorted(
+                        {
+                            participant_id
+                            for event in ordered
+                            for participant_id in (
+                                event.canonical_home_participant_id,
+                                event.canonical_away_participant_id,
+                            )
+                        }
+                    ),
+                ),
+                "competition_ids": cast(
+                    JsonValue, sorted({event.competition_id for event in ordered})
+                ),
+            },
             "competition_lineage": "fixed-football-data-competition-registry",
             "events": [item.to_json() for item in ordered],
         },
@@ -211,13 +235,14 @@ def load_upcoming_event_artifact(
         "evaluated_at_utc",
         "import_batch_id",
         "row_count",
-        "participant_lineage",
+        "participant_registry",
         "competition_lineage",
         "events",
     }:
         raise ArtifactError("upcoming-event artifact payload fields are not exact")
     if payload["source_classification"] != "strict-offline-operator-import":
         raise ArtifactError("upcoming-event source classification is invalid")
+    _validate_participant_registry_lineage(payload["participant_registry"])
     imported_at = _artifact_timestamp(payload["imported_at_utc"], "imported_at_utc")
     cutoff = _artifact_timestamp(payload["evaluated_at_utc"], "evaluated_at_utc")
     if imported_at != cutoff:
@@ -236,6 +261,87 @@ def load_upcoming_event_artifact(
     ):
         raise ArtifactError("upcoming-event rows are not canonically ordered")
     return artifact, events
+
+
+def verify_upcoming_event_participant_registry(
+    *,
+    artifact: AnalyticalArtifact,
+    events: tuple[UpcomingEvent, ...],
+    participant_registry: FootballParticipantRegistry,
+) -> None:
+    """Require exact event-to-registry lineage and revalidate every participant."""
+    payload = require_dict(artifact.payload, field="upcoming_event_artifact")
+    lineage = require_dict(payload.get("participant_registry"), field="participant_registry")
+    expected = {
+        "relative_directory": participant_registry.artifact.relative_directory,
+        "artifact_id": participant_registry.artifact.artifact_id,
+        "checksum_sha256": participant_registry.artifact.checksum_sha256,
+        "registry_revision": participant_registry.registry_revision,
+        "validated_participant_ids": sorted(
+            {
+                participant_id
+                for event in events
+                for participant_id in (
+                    event.canonical_home_participant_id,
+                    event.canonical_away_participant_id,
+                )
+            }
+        ),
+        "competition_ids": sorted({event.competition_id for event in events}),
+    }
+    if lineage != expected:
+        raise ArtifactError("upcoming-event participant registry lineage mismatch")
+    try:
+        _validate_registered_event_participants(events, participant_registry)
+    except ConfigurationError as exc:
+        raise ArtifactError(str(exc)) from exc
+
+
+def _validate_participant_registry_lineage(value: object) -> None:
+    lineage = require_dict(value, field="participant_registry")
+    if set(lineage) != {
+        "relative_directory",
+        "artifact_id",
+        "checksum_sha256",
+        "registry_revision",
+        "validated_participant_ids",
+        "competition_ids",
+    }:
+        raise ArtifactError("upcoming-event participant registry lineage fields are not exact")
+    for field in ("relative_directory", "artifact_id", "checksum_sha256", "registry_revision"):
+        if type(lineage[field]) is not str or not lineage[field]:
+            raise ArtifactError("upcoming-event participant registry lineage is invalid")
+    if is_absolute_path_text(cast(str, lineage["relative_directory"])):
+        raise ArtifactError("upcoming-event participant registry path is invalid")
+    try:
+        validate_sha256_checksum(cast(str, lineage["checksum_sha256"]))
+    except Exception as exc:
+        raise ArtifactError("upcoming-event participant registry checksum is invalid") from exc
+    for field in ("validated_participant_ids", "competition_ids"):
+        values = lineage[field]
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(type(item) is not str or not item for item in values)
+            or cast(list[str], values) != sorted(set(cast(list[str], values)))
+        ):
+            raise ArtifactError("upcoming-event participant registry lineage is invalid")
+
+
+def _validate_registered_event_participants(
+    events: tuple[UpcomingEvent, ...],
+    registry: FootballParticipantRegistry,
+) -> None:
+    for event in events:
+        for participant_id in (
+            event.canonical_home_participant_id,
+            event.canonical_away_participant_id,
+        ):
+            registry.require_registered_participant(
+                participant_id,
+                competition_id=event.competition_id,
+                event_date=event.event_start_utc.date(),
+            )
 
 
 def _validate_rows(

@@ -8,7 +8,20 @@ resolves exactly one manually promoted active champion from the governance
 registry and strictly reloads its score-model and calibration artifacts.
 
 The primary v1 path is local historical modelling, not direct bookmaker
-acquisition:
+acquisition. Upcoming-event publication requires an exact
+`canonical-football-participant-registry-v1` reference. UUIDv5 syntax alone is
+not registration evidence. Registry rows retain reconciled football-team
+identity, competition membership, validity, and checksum-addressed source
+lineage. Event artifacts retain the exact registry artifact ID, checksum,
+revision, competition scope, and validated participant IDs. Production verifies
+the same registry before champion resolution.
+
+A registered team absent from the champion's training parameters uses the
+reviewed `competition-average-zero-effect` fallback. Probability and product
+lineage report the affected participant IDs and `registered-model-unseen`; this
+is not team-specific historical strength. Unregistered or out-of-scope teams
+cannot reach inference. Registry operations are offline and involve no
+bookmaker access.
 
 ```text
 verified upcoming-event artifact
@@ -109,12 +122,18 @@ without one real bookmaker-offered combined-selection price.
 There is no staking, login, bookmaker submission, or automatic placement path.
 Final placement remains manual.
 
-Current production proposal publication is also held by the economic evidence
-state: historical prices are closing-benchmark diagnostics, corrected real
-historical backtests are negative, the compatible historical market-only 1X2
-baseline materially outperforms the score model, and no prospective timestamped
-quote-to-result settlement cycle exists. These holds do not prevent champion
-fair-odds inference, but they do prevent placeable proposals.
+Current production proposal publication is held unless immutable,
+`prospective-operator` economic evidence passes the versioned football economic
+eligibility policy. Historical closing prices and synthetic contract fixtures
+are diagnostic only: they cannot authorize a proposal. The present runtime has
+no qualifying prospective timestamped quote-to-result settlement population, so
+it remains held. A caller cannot supply an eligibility boolean or raw metrics;
+the product reloads a checksum-bound evidence artifact and independently checks
+its active-champion, competition, market, policy, freshness, and upstream
+lineage. Future qualifying evidence can enable a `placeable-manual-proposal`
+without a source-code change. Test fixtures prove this contract only, not real
+profitability. Placement stays manual-only; this product has no bookmaker access,
+staking, submission, or automatic betting path.
 
 ## Commands and UI
 
