@@ -69,6 +69,14 @@ initialization, starts the durable worker and Streamlit UI, prints the loopback
 URL, and never opens a browser automatically. The CLI remains available for
 diagnostics, backup, restore, and advanced operations.
 
+The confirmed **Prepare system** action is also the explicit authorization for
+the existing governed champion path. For a competition without a champion it
+uses only verified historical snapshots, enforces the current tournament and
+production-evidence gates, strictly reloads the selected score model, records
+the champion–challenger policy decision, and applies an atomic promotion only
+when that persisted decision is `promote`. Startup and periodic refresh never
+train or promote.
+
 Implemented now:
 
 - packaging, typed configuration, local runtime bootstrap, and logging;

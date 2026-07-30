@@ -4,6 +4,12 @@ All notable local releases are documented here.
 
 ## Unreleased — operational local MVP
 
+- Completed confirmed UI-only champion preparation through verified historical
+  score tournaments, strict artifact reload, persisted governance decisions,
+  and atomic audited promotion; non-promote decisions remain recorded without
+  activating a champion.
+- Made product-run identity include every semantic operator-quote field,
+  including line, scope, settlement rules, validity, and source kind.
 - Added the portable **Sports Analytics Local MVP** VS Code F5 launch.
 - Made normal `sports-analytics-v1` launch initialize the runtime idempotently
   before starting the durable worker and loopback Streamlit UI.

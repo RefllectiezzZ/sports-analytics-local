@@ -76,12 +76,12 @@ def write_score_calibration_artifact(
     )
 
 
-def _load_score_calibration_artifact(
+def load_score_calibration_artifact(
     *,
     root: Path,
     relative_directory: str,
-    expected_artifact_id: str,
-    expected_checksum: str,
+    expected_artifact_id: str | None = None,
+    expected_checksum: str | None = None,
     expected_model_artifact_id: str,
     expected_training_lineage: str,
 ) -> tuple[AnalyticalArtifact, float]:
@@ -175,7 +175,7 @@ def resolve_active_score_champion(
         raise GovernanceError("active champion model family mismatch")
     if artifact.artifact_type != provenance["artifact_type"]:
         raise GovernanceError("active champion artifact type mismatch")
-    calibration_artifact, temperature = _load_score_calibration_artifact(
+    calibration_artifact, temperature = load_score_calibration_artifact(
         root=model_root,
         relative_directory=_required_text(
             calibration["relative_directory"], "calibration relative directory"

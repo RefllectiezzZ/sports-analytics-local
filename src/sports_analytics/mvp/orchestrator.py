@@ -22,6 +22,7 @@ from sports_analytics.bookmakers.operator_quotes import (
     OPERATOR_QUOTE_ARTIFACT_TYPE,
     OperatorQuoteInput,
     OperatorQuotePolicy,
+    operator_quote_identity_payload,
 )
 from sports_analytics.core.exceptions import (
     ArtifactError,
@@ -38,6 +39,7 @@ from sports_analytics.governance.repository import ModelGovernanceRepository
 from sports_analytics.ingestion.football import enqueue_football_data_ingestion
 from sports_analytics.jobs.errors import sanitize_error_text
 from sports_analytics.jobs.service import WorkerService
+from sports_analytics.mvp.champion_preparation import prepare_score_champions
 from sports_analytics.mvp.operator_inputs import (
     MatchOption,
     MatchValidation,
@@ -60,6 +62,7 @@ from sports_analytics.policies.proposal import (
     publish_proposal_policy,
 )
 from sports_analytics.release.cli import initialize_v1
+from sports_analytics.services.champion_resolution import resolve_active_score_champion
 from sports_analytics.services.football_product import (
     FOOTBALL_PRODUCT_READ_MODEL_SCHEMA,
     FOOTBALL_PRODUCT_READ_MODEL_TYPE,
@@ -263,11 +266,25 @@ class MVPOrchestrator:
                 actions.append("participant registry derived from verified snapshots")
             else:
                 actions.append("existing verified participant registry reused")
+        if references:
+            try:
+                champion_report = prepare_score_champions(
+                    paths=paths,
+                    references=references,
+                    evaluated_at_utc=self._now(),
+                )
+            except (SportsAnalyticsError, OSError, sqlite3.Error, ValueError) as exc:
+                blockers.append(_safe_failure(exc))
+            else:
+                for champion in champion_report.champions:
+                    action = "reused" if champion.reused else "promoted"
+                    actions.append(f"{champion.competition_id} governed champion {action}")
+                blockers.extend(champion_report.blockers)
         champions = self._champions(paths)
         if not champions:
             blockers.append(
-                "No governance-authorized active champion exists; synthetic or "
-                "caller-selected models are not eligible."
+                "No governance-authorized active champion exists after verified "
+                "historical preparation."
             )
         else:
             actions.append("governance-authorized active champion verified")
@@ -490,23 +507,11 @@ class MVPOrchestrator:
                 "production analysis requires a governance-authorized active champion"
             )
         policy_artifact, _policy = self._ensure_default_policy(paths)
-        identity = _digest(
-            {
-                "event_artifact_id": event_artifact.artifact_id,
-                "quote_inputs": sorted(
-                    (
-                        item.provider_id,
-                        item.canonical_event_id,
-                        item.market_family,
-                        item.outcome_key,
-                        str(item.offered_decimal_odds),
-                        item.observed_at_utc.isoformat(),
-                    )
-                    for item in operator_quotes
-                ),
-                "champion": champion[2],
-                "policy": policy_artifact.artifact_id,
-            }
+        identity = _analysis_identity(
+            event_artifact_id=event_artifact.artifact_id,
+            operator_quotes=operator_quotes,
+            champion_artifact_id=champion[2],
+            policy_artifact_id=policy_artifact.artifact_id,
         )
         base = f"mvp/product-runs/{competition}/{identity}"
         read_model_relative = f"{base}/read-model"
@@ -725,17 +730,34 @@ class MVPOrchestrator:
             return ()
         with connect_database(paths.sqlite_path, read_only=True) as connection:
             entries = ModelGovernanceRepository(connection).list_models()
-        champions: list[tuple[str, str, str]] = []
-        for item in entries:
-            if (
-                item.role is not ModelRole.CHAMPION
-                or item.lifecycle_status is not ModelLifecycleStatus.PROMOTED
-                or not isinstance(item.provenance, dict)
-            ):
-                continue
-            competition = item.provenance.get("competition_id")
-            if type(competition) is str and competition:
-                champions.append((competition, item.market_key, item.model_artifact_id))
+            champions: list[tuple[str, str, str]] = []
+            for item in entries:
+                if (
+                    item.role is not ModelRole.CHAMPION
+                    or item.lifecycle_status is not ModelLifecycleStatus.PROMOTED
+                    or not isinstance(item.provenance, dict)
+                ):
+                    continue
+                competition = item.provenance.get("competition_id")
+                if type(competition) is not str or not competition:
+                    continue
+                resolved = resolve_active_score_champion(
+                    connection=connection,
+                    model_root=paths.models_directory,
+                    competition_id=competition,
+                    market_key=item.market_key,
+                )
+                if resolved is None:
+                    raise ConfigurationError(
+                        "active champion does not strictly resolve for its competition"
+                    )
+                champions.append(
+                    (
+                        competition,
+                        item.market_key,
+                        resolved.model_artifact_id,
+                    )
+                )
         return tuple(sorted(champions))
 
     def _champion_for(self, paths: RuntimePaths, competition: str) -> tuple[str, str, str] | None:
@@ -958,6 +980,31 @@ def _digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
+
+
+def _analysis_identity(
+    *,
+    event_artifact_id: str,
+    operator_quotes: tuple[OperatorQuoteInput, ...],
+    champion_artifact_id: str,
+    policy_artifact_id: str,
+) -> str:
+    quote_payloads = [operator_quote_identity_payload(item) for item in operator_quotes]
+    return _digest(
+        {
+            "event_artifact_id": event_artifact_id,
+            "quote_inputs": sorted(
+                quote_payloads,
+                key=lambda item: json.dumps(
+                    item,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+            "champion": champion_artifact_id,
+            "policy": policy_artifact_id,
+        }
+    )
 
 
 def _safe_failure(exc: BaseException) -> str:

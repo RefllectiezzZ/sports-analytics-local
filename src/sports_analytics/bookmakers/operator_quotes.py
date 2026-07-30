@@ -396,6 +396,20 @@ def operator_catalogue_payload(catalogue: OperatorQuoteCatalogue) -> dict[str, J
     }
 
 
+def operator_quote_identity_payload(item: OperatorQuoteInput) -> dict[str, JsonValue]:
+    """Return every semantic field used to identify one offered-price input.
+
+    Presentation-only provider text, operator notes, and import batch labels do
+    not change the quote's market, settlement, price, or observation semantics.
+    """
+    payload = _input_payload(item)
+    return {
+        field: payload[field]
+        for field in OPERATOR_QUOTE_FIELDS
+        if field not in {"provider_display_name", "operator_note", "import_batch_id"}
+    }
+
+
 def write_operator_quote_artifact(
     *,
     root: Path,

@@ -31,6 +31,21 @@ module. Normal launch initializes the runtime idempotently before supervising
 the durable worker and Streamlit UI. No regular command-line use is required.
 The URL remains loopback-only and the browser is not opened automatically.
 
+Selecting **Prepare system** after checking its confirmation box is the explicit
+operator authorization for governed initial champion preparation. The action
+reuses verified compatible artifacts where possible, otherwise runs the
+existing verified-historical score tournament and its unchanged production
+evidence gates. It strictly reloads the winner and calibration artifacts,
+registers the winner as challenger, persists the existing promotion-policy
+decision, and applies the audited transition only when that exact decision
+authorizes promotion. A hold, retain, reject, incompatible scope, insufficient
+history, synthetic provenance, or verification failure leaves no active
+bootstrap champion and appears as a blocker in the UI.
+
+Repeated preparation reuses an existing valid champion and does not add another
+decision or transition. Merely opening or refreshing Streamlit never runs
+training or promotion.
+
 ## Guided workspace
 
 - **Dashboard** shows readiness, matches analysed, awaiting odds, analytical
