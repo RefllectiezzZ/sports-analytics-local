@@ -3,34 +3,67 @@
 ## Boundaries
 
 Sports Analytics Local v1.0.0 is a single-operator, localhost-only application.
-The website is read-only. Final placement is manual-only. The supported current
-price path is `strict-offline-operator-input`: real offered odds are supplied
-through the existing strict CSV/JSON or shared manual validation contracts.
+The website permits only system preparation, upcoming-match import,
+current-odds import, and product refresh. Final placement is manual-only. The
+supported current price path is `strict-offline-operator-input`: real offered
+odds are supplied through strict CSV/JSON or editable manual tables.
 Bookmaker acquisition is disabled by default and is not required for v1.
 
 There is no login, credential generation, CAPTCHA bypass, automatic betting,
 staking, bankroll management, public bind address, cloud service, or
 profitability claim.
 
-## First run on Windows
+## Normal first run from VS Code
 
-From the checkout:
+1. Open the repository in VS Code.
+2. Open **Run and Debug**.
+3. Select **Sports Analytics Local MVP**.
+4. Press **F5**.
+5. Open the printed `http://127.0.0.1:8501` URL.
+6. Confirm and select **Prepare system**.
+7. Add upcoming matches on **Matches**.
+8. Add real offered odds on **Odds**.
+9. Review persisted candidates on **Bets**.
+10. Place an eligible proposal manually at the bookmaker.
+
+F5 uses the selected repository interpreter and the package-native release
+module. Normal launch initializes the runtime idempotently before supervising
+the durable worker and Streamlit UI. No regular command-line use is required.
+The URL remains loopback-only and the browser is not opened automatically.
+
+## Guided workspace
+
+- **Dashboard** shows readiness, matches analysed, awaiting odds, analytical
+  candidates, held candidates, placeable manual proposals, active competition,
+  active model, last successful analysis, next action, and worker state.
+- **Matches** accepts human-friendly CSV, JSON, or editable rows. Teams come
+  from the verified participant registry; UUIDs, artifact IDs, and checksums
+  are derived internally.
+- **Odds** accepts canonical CSV/JSON or editable rows for a registered provider,
+  match, market, outcome, optional line, decimal odd, and visible UTC timestamp.
+  It accepts no URL, credential, cookie, token, selector, or script material.
+- **Bets** separates ready-for-manual-placement, analytical, held, and rejected
+  rows. It shows real offered odds, fair odds, model probability, edge, EV,
+  exact reasons, and supported same-provider accumulators.
+- **History** summarizes persisted operational state.
+- **System** contains advanced immutable artifact audit information and the
+  explicitly initiated allowlisted Football-Data path.
+
+Saving valid matches triggers fair-odds analysis when an active champion
+exists. Saving a complete current market automatically validates and publishes
+the quotes, runs production inference, calculates probability/edge/EV, builds
+singles and eligible accumulators, publishes the read model, and refreshes the
+dashboard. Periodic refresh only reads persisted state and never retrains.
+
+## CLI diagnostics and compatibility
+
+The CLI remains available for doctor, explicit initialization, backup, restore,
+and advanced diagnostics:
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -e .
 .venv\Scripts\sports-analytics-v1.exe --initialize
 .venv\Scripts\sports-analytics-v1.exe --doctor
 .venv\Scripts\sports-analytics-v1.exe
-```
-
-Repository compatibility:
-
-```powershell
-.venv\Scripts\python.exe launch_v1.py --initialize
-.venv\Scripts\python.exe launch_v1.py --doctor
-.venv\Scripts\python.exe launch_v1.py
 ```
 
 An explicit configuration and dotenv file may be selected with `--config PATH`
@@ -144,3 +177,8 @@ and does not implement down-migrations.
 - player context remains display-only;
 - analytical/audit pages remain read-only and require verified persisted
   artifacts.
+
+Direct bookmaker acquisition is not required. Candidate generation is
+automatic after valid operator input, but bookmaker placement is manual.
+Economic holds are expected until prospective evidence exists, and no
+profitability guarantee is made.

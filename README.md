@@ -46,8 +46,28 @@ See [the coherent football product](docs/football-product.md),
 ## Current status
 
 This repository is the **local v1.0.0 release**. It is a single-operator,
-localhost-only, read-only website with manual placement and strict offline
-operator input for real offered odds. It does not claim profitability.
+localhost-only operational workspace with narrowly allowlisted local writes for
+system preparation, upcoming matches, current odds, and product refresh. Final
+bookmaker placement remains manual. It does not claim profitability.
+
+## Normal operator path
+
+Regular operation does not require terminal commands:
+
+1. Open the repository in VS Code.
+2. Select **Sports Analytics Local MVP** in Run and Debug.
+3. Press **F5**.
+4. Open the printed `http://127.0.0.1:8501` URL.
+5. Confirm and select **Prepare system**.
+6. Add upcoming matches on **Matches**.
+7. Add real offered odds on **Odds**.
+8. Review automatically generated singles and accumulators on **Bets**.
+9. Place an eligible proposal manually at the bookmaker.
+
+F5 uses the selected VS Code Python interpreter, performs safe idempotent
+initialization, starts the durable worker and Streamlit UI, prints the loopback
+URL, and never opens a browser automatically. The CLI remains available for
+diagnostics, backup, restore, and advanced operations.
 
 Implemented now:
 
@@ -75,9 +95,10 @@ Implemented now:
   flat-unit settlement, and rolling-origin backtesting contracts;
 - a Football-Data market-average closing-price **historical benchmark** for
   football 1X2 singles, with content-addressed analytical artifacts;
-- a read-only Streamlit interface for verified analysis/backtest artifact
-  selection, data status, opportunity browsing, single audit, dependency-safe
-  manual previews, persisted combinations, and backtest/audit views;
+- an operator-first Streamlit interface with Dashboard, Bets, Matches, Odds,
+  History, and System navigation; strict human-friendly match and offered-odds
+  input; automatic product refresh; candidate and accumulator display; and
+  advanced immutable audit access under System;
 - canonical result snapshots, deterministic analytical settlement,
   persisted-evidence monitoring, and explicit champion–challenger governance;
 - Betano Portugal / Betclic Portugal bookmaker acquisition foundation (ordinary
@@ -89,9 +110,8 @@ Implemented now:
 **Not implemented**: login or bet placement; CAPTCHA / anti-bot bypass; guaranteed
 indefinite live browser acquisition; additional sports beyond football /
 basketball / tennis pre-match scope; markets beyond the initial canonical
-mapping set; Kelly staking; bet recommendations; production UI accumulators;
-real bookmaker settlement; bankroll management; live automatic bet building;
-cross-source fuzzy resolution.
+mapping set; Kelly staking; bet recommendations; real bookmaker settlement;
+bankroll management; cross-source fuzzy resolution.
 
 ## Supported Python version
 
@@ -103,25 +123,22 @@ Python **3.12** or newer is required.
 - `pip` and the standard library `venv` module
 - Git
 
-## Local v1 first run
+## CLI diagnostics and compatibility
 
-The supported Windows path is:
+Normal launch now initializes automatically. The equivalent CLI path is:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -e .
-.venv\Scripts\sports-analytics-v1.exe --initialize
-.venv\Scripts\sports-analytics-v1.exe --doctor
 .venv\Scripts\sports-analytics-v1.exe
 ```
 
-The repository-compatible alternative is:
+Explicit initialization and doctor remain available:
 
 ```powershell
 .venv\Scripts\python.exe launch_v1.py --initialize
 .venv\Scripts\python.exe launch_v1.py --doctor
-.venv\Scripts\python.exe launch_v1.py
 ```
 
 The website is printed once and served only at
@@ -147,6 +164,13 @@ Restore is fail-closed and only accepts absent or empty configured persistent
 destinations. It never force-overwrites operational state. See the
 [v1 operator runbook](docs/v1-operator-runbook.md) and
 [v1 release notes](docs/release-v1.md).
+
+Direct bookmaker acquisition is not required. Current real offered odds can be
+uploaded as canonical CSV/JSON or entered in the editable Odds table. The
+application validates them, calculates probability, fair odds, edge, and EV,
+and generates supported singles and accumulators automatically. Economic holds
+remain visible and truthful; they are not ready for placement. There is no
+profitability guarantee.
 
 ## Setup
 

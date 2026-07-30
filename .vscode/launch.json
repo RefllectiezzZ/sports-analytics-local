@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Sports Analytics Local MVP",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "sports_analytics.release.cli",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false
+    }
+  ]
+}
