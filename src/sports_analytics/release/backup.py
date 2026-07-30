@@ -99,6 +99,15 @@ def create_backup(
         raise BackupError("operational SQLite database is not initialized")
     _reject_source_symlinks(paths)
 
+    config: Path | None = None
+    if explicit_config is not None:
+        config = _absolute_without_following(Path(explicit_config))
+        _reject_symlink_chain(config)
+        if config.exists():
+            if not config.is_file():
+                raise BackupError("explicit configuration must be a regular non-symlink file")
+            config = config.resolve()
+
     temporary = final.with_name(f".{final.name}.tmp-{uuid.uuid4().hex}")
     _reject_symlink_chain(temporary)
     if temporary.exists():
@@ -117,18 +126,14 @@ def create_backup(
             _copy_tree_verified(source, target)
 
         included_config: dict[str, str] | None = None
-        if explicit_config is not None:
-            config = Path(explicit_config).resolve()
-            if config.exists():
-                if not config.is_file() or config.is_symlink():
-                    raise BackupError("explicit configuration must be a regular non-symlink file")
-                config_target = temporary / CONFIG_RELATIVE_PATH
-                config_target.parent.mkdir()
-                _copy_file_verified(config, config_target)
-                included_config = {
-                    "relative_path": CONFIG_RELATIVE_PATH,
-                    "sha256": _sha256_file(config_target),
-                }
+        if config is not None and config.exists():
+            config_target = temporary / CONFIG_RELATIVE_PATH
+            config_target.parent.mkdir()
+            _copy_file_verified(config, config_target)
+            included_config = {
+                "relative_path": CONFIG_RELATIVE_PATH,
+                "sha256": _sha256_file(config_target),
+            }
 
         files = _inventory_payload_files(temporary)
         database_entry = next(
@@ -180,7 +185,9 @@ def restore_backup(
     issues = inspect_path_safety(paths)
     if issues:
         raise BackupError("configured path safety failed: " + "; ".join(issues))
-    backup = Path(backup_directory).resolve()
+    backup = _absolute_without_following(Path(backup_directory))
+    _reject_symlink_chain(backup)
+    backup = backup.resolve()
     manifest = _verify_backup_directory(backup)
     _validate_restore_targets(paths)
 
@@ -189,6 +196,15 @@ def restore_backup(
     staged_database = paths.sqlite_path.with_name(f".{paths.sqlite_path.name}.restore-{token}")
     published: list[Path] = []
     created_parents: list[Path] = []
+    target_states = {
+        getattr(paths, attribute): "existing-empty"
+        if getattr(paths, attribute).is_dir()
+        else "absent"
+        for _role, attribute in _ROLE_PATHS
+    }
+    preexisting_empty_targets = [
+        target for target, state in target_states.items() if state == "existing-empty"
+    ]
     try:
         required_parents = {
             paths.sqlite_path.parent,
@@ -228,6 +244,9 @@ def restore_backup(
                 shutil.rmtree(item, ignore_errors=True)
             elif item.exists():
                 item.unlink(missing_ok=True)
+        for target in preexisting_empty_targets:
+            if not target.exists():
+                target.mkdir()
         for parent in reversed(created_parents):
             try:
                 parent.rmdir()
@@ -251,7 +270,9 @@ def restore_backup(
 
 def verify_backup(backup_directory: Path | str) -> dict[str, Any]:
     """Verify a backup and return its validated manifest."""
-    return _verify_backup_directory(Path(backup_directory).resolve())
+    backup = _absolute_without_following(Path(backup_directory))
+    _reject_symlink_chain(backup)
+    return _verify_backup_directory(backup.resolve())
 
 
 def _validate_new_destination(final: Path, paths: RuntimePaths) -> None:

@@ -62,8 +62,18 @@ jobs:
         shell: pwsh
         run: |
           $wheel = (Get-ChildItem storage/release-wheel-validation/*.whl | Select-Object -First 1).FullName
-          python -m venv --system-site-packages storage/wheel-smoke-venv
-          storage/wheel-smoke-venv/Scripts/python.exe -m pip install --no-deps $wheel
-          storage/wheel-smoke-venv/Scripts/sports-analytics-v1.exe --version
-          storage/wheel-smoke-venv/Scripts/sports-analytics-v1.exe --help
-          storage/wheel-smoke-venv/Scripts/python.exe -c "import sports_analytics; assert sports_analytics.__version__ == '1.0.0'"
+          $repositoryRoot = (Get-Location).Path
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "sports-analytics-v1-wheel-smoke"
+          python -m venv --system-site-packages $smokeRoot
+          & "$smokeRoot\Scripts\python.exe" -m pip install --force-reinstall --no-deps $wheel
+          $env:SPORTS_ANALYTICS_REPOSITORY_ROOT = $repositoryRoot
+          $env:SPORTS_ANALYTICS_SMOKE_ROOT = $smokeRoot
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & "$smokeRoot\Scripts\sports-analytics-v1.exe" --version
+            & "$smokeRoot\Scripts\sports-analytics-v1.exe" --help
+            & "$smokeRoot\Scripts\python.exe" -c "import os, pathlib, sports_analytics; repository = pathlib.Path(os.environ['SPORTS_ANALYTICS_REPOSITORY_ROOT']).resolve(); smoke = pathlib.Path(os.environ['SPORTS_ANALYTICS_SMOKE_ROOT']).resolve(); package = pathlib.Path(sports_analytics.__file__).resolve(); assert sports_analytics.__version__ == '1.0.0'; assert smoke in package.parents; assert repository not in package.parents"
+          }
+          finally {
+            Pop-Location
+          }

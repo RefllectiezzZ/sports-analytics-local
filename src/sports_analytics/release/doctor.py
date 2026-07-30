@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
+import os
 import sys
 from collections.abc import Mapping
-from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -13,6 +14,7 @@ from sports_analytics import __version__
 from sports_analytics.core.exceptions import SportsAnalyticsError
 from sports_analytics.core.paths import RuntimePaths
 from sports_analytics.core.runtime import validate_configuration
+from sports_analytics.data.codec import format_utc_timestamp
 from sports_analytics.data.database import connect_database, verify_sqlite_file
 from sports_analytics.data.migrations import get_migration_status
 from sports_analytics.governance.contracts import ModelLifecycleStatus, ModelRole
@@ -57,11 +59,15 @@ def inspect_release_readiness(
         "overall_state": "invalid",
         "warnings": warnings,
     }
+    python_version = tuple(int(item) for item in sys.version_info[:3])
+    python_is_supported = _is_supported_python(python_version)
     checks["python"] = {
         "required": ">=3.12",
-        "state": "pass" if sys.version_info >= (3, 12) else "fail",
-        "version": ".".join(str(item) for item in sys.version_info[:3]),
+        "state": "pass" if python_is_supported else "fail",
+        "version": ".".join(str(item) for item in python_version),
     }
+    if not python_is_supported:
+        blockers.append("Python 3.12 or later is required for the local v1 release.")
     checks["package_version"] = {"state": "pass", "value": __version__}
     try:
         settings, paths = validate_configuration(
@@ -72,7 +78,7 @@ def inspect_release_readiness(
     except SportsAnalyticsError as exc:
         checks["configuration"] = {"detail": _safe_detail(exc), "state": "fail"}
         blockers.append("The complete configuration is invalid.")
-        return result
+        return _finish(result, "invalid")
 
     checks["configuration"] = {"state": "pass"}
     path_issues = inspect_path_safety(paths)
@@ -83,15 +89,23 @@ def inspect_release_readiness(
     if path_issues:
         blockers.append("Configured persistent paths do not satisfy the local v1 safety boundary.")
 
-    directory_states = {
-        role.removesuffix("_directory"): getattr(paths, role).is_dir() for role in _PERSISTENT_ROLES
+    directory_paths = {
+        "storage_root": paths.storage_root,
+        "sqlite_parent": paths.sqlite_path.parent,
+        **{role.removesuffix("_directory"): getattr(paths, role) for role in _PERSISTENT_ROLES},
+        "logs": paths.logs_directory,
     }
-    directory_states["storage_root"] = paths.storage_root.is_dir()
-    directory_states["logs"] = paths.logs_directory.is_dir()
+    directory_states = {role: path.is_dir() for role, path in directory_paths.items()}
+    missing_roles = sorted(role for role, exists in directory_states.items() if not exists)
     checks["runtime_directories"] = {
         "directories": directory_states,
+        "missing_roles": missing_roles,
         "state": "pass" if all(directory_states.values()) else "missing",
     }
+    if missing_roles:
+        warnings.append(
+            "Required runtime directories are missing: " + ", ".join(missing_roles) + "."
+        )
 
     checks["bookmakers"] = {
         "enabled": settings.bookmakers.enabled,
@@ -115,8 +129,7 @@ def inspect_release_readiness(
         checks["active_champions"] = {"competitions": [], "state": "optional-data-absent"}
         warnings.append("The operational SQLite database has not been initialized.")
         _inspect_catalogue(paths, checks=checks, warnings=warnings)
-        result["overall_state"] = "invalid" if blockers else "not-initialized"
-        return result
+        return _finish(result, "invalid" if blockers else "not-initialized")
 
     try:
         verify_sqlite_file(paths.sqlite_path, quick=False)
@@ -136,14 +149,26 @@ def inspect_release_readiness(
         checks["migration"] = {"state": "fail"}
         blockers.append("The operational SQLite database is corrupt or incompatible.")
         _inspect_catalogue(paths, checks=checks, warnings=warnings)
-        result["overall_state"] = "invalid"
-        return result
+        return _finish(result, "invalid")
 
     try:
         queue = WorkerService(paths.sqlite_path, settings.worker).get_queue_status(
             observed_at=datetime.now(tz=UTC)
         )
-        checks["queue"] = {"state": "pass", **asdict(queue)}
+        checks["queue"] = {
+            "active_worker_count": queue.active_worker_count,
+            "available_pending_count": queue.available_pending_count,
+            "cancelled_count": queue.cancelled_count,
+            "delayed_pending_count": queue.delayed_pending_count,
+            "expired_running_lease_count": queue.expired_running_lease_count,
+            "failed_count": queue.failed_count,
+            "observed_at": format_utc_timestamp(queue.observed_at),
+            "pending_count": queue.pending_count,
+            "running_count": queue.running_count,
+            "stale_worker_count": queue.stale_worker_count,
+            "state": "pass",
+            "succeeded_count": queue.succeeded_count,
+        }
     except SportsAnalyticsError as exc:
         checks["queue"] = {"detail": _safe_detail(exc), "state": "fail"}
         blockers.append("The durable queue cannot be inspected through its database contract.")
@@ -192,52 +217,95 @@ def inspect_release_readiness(
 
     _inspect_catalogue(paths, checks=checks, warnings=warnings)
     if blockers:
-        result["overall_state"] = "invalid"
-    elif warnings:
-        result["overall_state"] = "degraded"
-    else:
-        result["overall_state"] = "ready"
-    return result
+        return _finish(result, "invalid")
+    if warnings:
+        return _finish(result, "degraded")
+    return _finish(result, "ready")
 
 
 def inspect_path_safety(paths: RuntimePaths) -> list[str]:
     """Return deterministic path-safety findings without mutating the filesystem."""
     issues: list[str] = []
-    root = paths.storage_root.resolve()
+    root = _absolute_without_following(paths.storage_root)
     if root == Path(root.anchor):
         issues.append("storage root must not be a filesystem root")
-    candidates = [
-        paths.sqlite_path,
-        paths.raw_directory,
-        paths.snapshots_directory,
-        paths.features_directory,
-        paths.models_directory,
-        paths.exports_directory,
-        paths.logs_directory,
-    ]
-    resolved = [item.resolve() for item in candidates]
+    candidates = {
+        "storage_root": root,
+        "sqlite": _absolute_without_following(paths.sqlite_path),
+        "raw": _absolute_without_following(paths.raw_directory),
+        "snapshots": _absolute_without_following(paths.snapshots_directory),
+        "features": _absolute_without_following(paths.features_directory),
+        "models": _absolute_without_following(paths.models_directory),
+        "exports": _absolute_without_following(paths.exports_directory),
+        "logs": _absolute_without_following(paths.logs_directory),
+    }
+    for role, path in candidates.items():
+        if _has_symlink_component(path):
+            issues.append(f"configured path contains a symlink component: {role}")
+
+    resolved = [path.resolve() for path in candidates.values()]
     if len(set(resolved)) != len(resolved):
         issues.append("configured runtime paths must be distinct")
     persistent_directories = [
-        paths.raw_directory.resolve(),
-        paths.snapshots_directory.resolve(),
-        paths.features_directory.resolve(),
-        paths.models_directory.resolve(),
-        paths.exports_directory.resolve(),
-        paths.logs_directory.resolve(),
+        candidates[role].resolve()
+        for role in ("raw", "snapshots", "features", "models", "exports", "logs")
     ]
     for index, candidate in enumerate(persistent_directories):
         for other_index, other in enumerate(persistent_directories):
             if index != other_index and _relative_to(candidate, other):
                 issues.append("configured persistent directories must not be nested")
-    for path in candidates:
-        if path.is_symlink():
-            issues.append(f"configured path is a symlink: {path.name}")
+    resolved_root = root.resolve()
+    for role, path in candidates.items():
         try:
-            path.resolve().relative_to(root)
+            path.resolve().relative_to(resolved_root)
         except ValueError:
-            issues.append(f"configured path is outside storage root: {path.name}")
+            issues.append(f"configured path is outside storage root: {role}")
     return sorted(set(issues))
+
+
+def _absolute_without_following(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _has_symlink_component(path: Path) -> bool:
+    current = _absolute_without_following(path)
+    while True:
+        if (current.exists() or current.is_symlink()) and current.is_symlink():
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
+
+
+def _finish(result: dict[str, Any], overall_state: str) -> dict[str, Any]:
+    result["overall_state"] = overall_state
+    _assert_json_safe(result)
+    return result
+
+
+def _assert_json_safe(value: object) -> None:
+    """Reject unsupported values instead of silently coercing doctor output."""
+    if value is None or type(value) in {str, int, bool}:
+        return
+    if type(value) is float:
+        if math.isfinite(value):
+            return
+        raise TypeError("doctor report cannot contain a non-finite float")
+    if isinstance(value, list):
+        for item in value:
+            _assert_json_safe(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError("doctor report JSON object keys must be strings")
+            _assert_json_safe(item)
+        return
+    raise TypeError(f"doctor report contains unsupported JSON value: {type(value).__name__}")
+
+
+def _is_supported_python(version: tuple[int, ...]) -> bool:
+    return version >= (3, 12)
 
 
 def _relative_to(path: Path, parent: Path) -> bool:

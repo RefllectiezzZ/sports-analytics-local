@@ -84,8 +84,7 @@ def run_streamlit_app(
             base_directory=repository_base,
         )
         _render_v1_status(report)
-        if valid or valid_products:
-            return
+        return
     if page == "Football product":
         _render_product_selection(
             root=paths.exports_directory,

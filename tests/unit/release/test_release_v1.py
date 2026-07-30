@@ -13,6 +13,7 @@ import pytest
 
 import sports_analytics
 import sports_analytics.release.backup as backup_module
+import sports_analytics.release.doctor as doctor_module
 from sports_analytics.core.paths import resolve_paths
 from sports_analytics.core.settings import load_settings
 from sports_analytics.local.supervisor import LocalSupervisor
@@ -48,6 +49,17 @@ def _write_config(base: Path, root_name: str = "runtime") -> Path:
 def _paths(base: Path, config: Path):
     settings = load_settings(config_path=config, environ={}, base_directory=base)
     return resolve_paths(settings, base)
+
+
+def _persistent_snapshot(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
+    directories = tuple(
+        sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_dir())
+    )
+    files: dict[str, bytes] = {}
+    for path in root.rglob("*"):
+        if path.is_file():
+            files[str(path.relative_to(root))] = path.read_bytes()
+    return directories, files
 
 
 def test_initialize_is_idempotent_and_creates_only_runtime_state(tmp_path: Path) -> None:
@@ -96,6 +108,95 @@ def test_doctor_initialized_empty_runtime_is_degraded_not_invalid(tmp_path: Path
     assert report["checks"]["sqlite"]["integrity"] == "ok"
     assert report["checks"]["migration"]["current_version"] == 5
     assert report["checks"]["latest_product_state"]["state"] == "optional-data-absent"
+    assert report["checks"]["runtime_directories"]["missing_roles"] == []
+    assert not any("Required runtime directories" in warning for warning in report["warnings"])
+
+
+def test_doctor_cli_initialized_runtime_is_json_safe_and_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _write_config(tmp_path)
+    initialize_v1(config_path=config, base_directory=tmp_path)
+    paths = _paths(tmp_path, config)
+    before = _persistent_snapshot(paths.storage_root)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["--config", str(config), "--doctor"]) == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+
+    assert captured.err == ""
+    assert report["checks"]["queue"]["observed_at"].endswith("Z")
+    assert _persistent_snapshot(paths.storage_root) == before
+
+
+def test_doctor_cli_not_initialized_emits_json_and_exit_code_three(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _write_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["--config", str(config), "--doctor"]) == 3
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out)["overall_state"] == "not-initialized"
+    assert captured.err == ""
+
+
+def test_doctor_missing_required_directory_is_degraded(tmp_path: Path) -> None:
+    config = _write_config(tmp_path)
+    initialize_v1(config_path=config, base_directory=tmp_path)
+    paths = _paths(tmp_path, config)
+    paths.features_directory.rmdir()
+
+    report = inspect_release_readiness(config_path=config, base_directory=tmp_path)
+
+    assert report["overall_state"] == "degraded"
+    assert report["checks"]["runtime_directories"]["missing_roles"] == ["features"]
+    assert "Required runtime directories are missing: features." in report["warnings"]
+
+
+@pytest.mark.parametrize("component", ["storage_root", "storage_parent"])
+def test_doctor_path_safety_rejects_storage_symlink_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    config = _write_config(tmp_path)
+    initialize_v1(config_path=config, base_directory=tmp_path)
+    paths = _paths(tmp_path, config)
+    symlink_component = (
+        paths.storage_root if component == "storage_root" else paths.storage_root.parent
+    )
+    original = Path.is_symlink
+
+    def reported_symlink(path: Path) -> bool:
+        return path == symlink_component or original(path)
+
+    monkeypatch.setattr(Path, "is_symlink", reported_symlink)
+    report = inspect_release_readiness(config_path=config, base_directory=tmp_path)
+
+    assert report["overall_state"] == "invalid"
+    assert any(
+        "symlink component" in issue
+        for issue in report["checks"]["configured_path_safety"]["issues"]
+    )
+
+
+def test_doctor_python_version_failure_is_a_blocker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_config(tmp_path)
+    monkeypatch.setattr(doctor_module.sys, "version_info", (3, 11, 0))
+
+    report = inspect_release_readiness(config_path=config, base_directory=tmp_path)
+
+    assert report["overall_state"] == "invalid"
+    assert any("Python 3.12" in blocker for blocker in report["blockers"])
 
 
 def test_doctor_rejects_corrupt_database_without_disclosing_env(
@@ -230,6 +331,46 @@ def test_backup_rejects_existing_destination_and_source_symlink_contract(
         create_backup(tmp_path / "new-backup", paths=paths)
 
 
+def test_backup_public_boundaries_reject_lexical_symlink_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_config(tmp_path)
+    initialize_v1(config_path=config, base_directory=tmp_path)
+    paths = _paths(tmp_path, config)
+    backup = tmp_path / "backup"
+    create_backup(backup, paths=paths)
+    original = Path.is_symlink
+
+    def reported_symlink(path: Path) -> bool:
+        return path == backup or original(path)
+
+    monkeypatch.setattr(Path, "is_symlink", reported_symlink)
+    with pytest.raises(BackupError, match="symlink"):
+        verify_backup(backup)
+    with pytest.raises(BackupError, match="symlink"):
+        restore_backup(backup, paths=paths)
+
+
+def test_backup_rejects_explicit_config_and_parent_symlink_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_config(tmp_path)
+    initialize_v1(config_path=config, base_directory=tmp_path)
+    paths = _paths(tmp_path, config)
+    backup_parent = tmp_path / "backup-parent"
+    backup = backup_parent / "backup"
+    original = Path.is_symlink
+
+    def reported_symlink(path: Path) -> bool:
+        return path in {config, backup_parent} or original(path)
+
+    monkeypatch.setattr(Path, "is_symlink", reported_symlink)
+    with pytest.raises(BackupError, match="symlink"):
+        create_backup(tmp_path / "new-backup", paths=paths, explicit_config=config)
+    with pytest.raises(BackupError, match="symlink"):
+        verify_backup(backup)
+
+
 def test_recomputed_forged_manifest_with_changed_semantics_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -278,6 +419,44 @@ def test_interrupted_restore_rolls_back_newly_published_state(
     assert not restore_paths.sqlite_path.exists()
     assert not restore_paths.raw_directory.exists()
     assert not restore_paths.snapshots_directory.exists()
+
+
+def test_interrupted_restore_preserves_preexisting_empty_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_config = _write_config(tmp_path, "source")
+    initialize_v1(config_path=source_config, base_directory=tmp_path)
+    backup = tmp_path / "backup"
+    create_backup(backup, paths=_paths(tmp_path, source_config))
+
+    restore_config = _write_config(tmp_path, "restore")
+    restore_paths = _paths(tmp_path, restore_config)
+    targets = (
+        restore_paths.raw_directory,
+        restore_paths.snapshots_directory,
+        restore_paths.features_directory,
+        restore_paths.models_directory,
+        restore_paths.exports_directory,
+    )
+    for target in targets:
+        target.mkdir(parents=True)
+    real_rename = backup_module.os.rename
+    calls = 0
+
+    def fail_second_publish(source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated publication interruption")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(backup_module.os, "rename", fail_second_publish)
+    with pytest.raises(BackupError, match="without retained partial state"):
+        restore_backup(backup, paths=restore_paths)
+
+    assert all(target.is_dir() and not any(target.iterdir()) for target in targets)
+    assert not restore_paths.sqlite_path.exists()
+    assert not list(restore_paths.storage_root.rglob("*.restore-*"))
 
 
 def test_console_version_and_release_package_metadata(capsys: pytest.CaptureFixture[str]) -> None:
