@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -29,9 +29,10 @@ from sports_analytics.monitoring.artifacts import (
 )
 from sports_analytics.monitoring.contracts import MONITORING_REPORT_SCHEMA_VERSION
 from sports_analytics.predictions.football_scores import (
-    FOOTBALL_PROBABILITY_ARTIFACT_SCHEMA,
     FOOTBALL_PROBABILITY_ARTIFACT_TYPE,
-    load_football_probability_artifact,
+    FOOTBALL_PRODUCTION_PROBABILITY_ARTIFACT_SCHEMA,
+    FootballProductionPredictionLineage,
+    load_production_football_probability_artifact,
 )
 from sports_analytics.results.snapshots import (
     RESULT_SNAPSHOT_ARTIFACT_TYPE,
@@ -66,7 +67,7 @@ ECONOMIC_ROLES: Final[tuple[str, ...]] = (
 _ROLE_CONTRACTS: Final[dict[str, tuple[str, str]]] = {
     PREDICTIONS_ROLE: (
         FOOTBALL_PROBABILITY_ARTIFACT_TYPE,
-        FOOTBALL_PROBABILITY_ARTIFACT_SCHEMA,
+        FOOTBALL_PRODUCTION_PROBABILITY_ARTIFACT_SCHEMA,
     ),
     QUOTES_ROLE: (OPERATOR_QUOTE_ARTIFACT_TYPE, OPERATOR_QUOTE_ARTIFACT_SCHEMA),
     RESULTS_ROLE: (RESULT_SNAPSHOT_ARTIFACT_TYPE, RESULT_SNAPSHOT_SCHEMA_VERSION),
@@ -357,10 +358,11 @@ def inspect_economic_prediction_scope(
     for reference in references:
         if reference.role != PREDICTIONS_ROLE:
             continue
-        artifact, distribution = load_football_probability_artifact(
+        artifact, distribution, _ = load_production_football_probability_artifact(
             root=root,
             relative_directory=reference.relative_directory,
             expected_checksum=reference.checksum_sha256,
+            expected_artifact_id=reference.artifact_id,
         )
         _require_artifact_identity(artifact, reference)
         competitions.add(distribution.competition_id)
@@ -523,14 +525,25 @@ def _derive_payload(
     policy_identity: tuple[str, str, str],
 ) -> dict[str, JsonValue]:
     _validate_reference_set(references)
-    predictions: dict[str, tuple[tuple[float, float, float], date]] = {}
+    predictions: dict[
+        str,
+        tuple[tuple[float, float, float], FootballProductionPredictionLineage],
+    ] = {}
     competition_ids: set[str] = set()
     model_ids: set[str] = set()
+    model_checksums: set[str] = set()
+    champion_revisions: set[int] = set()
+    champion_transitions: set[str | None] = set()
+    decision_times: set[datetime] = set()
+    upcoming_event_lineage: set[tuple[str, str]] = set()
+    participant_registry_lineage: set[tuple[str, str]] = set()
     quote_probabilities: dict[str, tuple[float, float, float]] = {}
     quote_times: list[datetime] = []
     quote_times_by_event: dict[str, list[datetime]] = {}
+    quote_observed_as_of: datetime | None = None
     result_outcomes: dict[str, int] = {}
     result_times: dict[str, datetime] = {}
+    result_event_starts: dict[str, datetime] = {}
     result_snapshot_evidence: dict[str, tuple[str, str]] = {}
     settlement_rows: list[dict[str, JsonValue]] = []
     settlement_as_of: datetime | None = None
@@ -541,10 +554,11 @@ def _derive_payload(
 
     for reference in references:
         if reference.role == PREDICTIONS_ROLE:
-            artifact, distribution = load_football_probability_artifact(
+            artifact, distribution, lineage = load_production_football_probability_artifact(
                 root=root,
                 relative_directory=reference.relative_directory,
                 expected_checksum=reference.checksum_sha256,
+                expected_artifact_id=reference.artifact_id,
             )
             _require_artifact_identity(artifact, reference)
             payload = cast(dict[str, Any], artifact.payload)
@@ -553,10 +567,26 @@ def _derive_payload(
                 raise EvaluationError("economic prediction event is duplicated")
             predictions[event_id] = (
                 _market_probabilities(payload["markets"]),
-                distribution.prediction_cutoff,
+                lineage,
             )
             competition_ids.add(distribution.competition_id)
-            model_ids.add(cast(str, payload["model_artifact_id"]))
+            model_ids.add(lineage.model_artifact_id)
+            model_checksums.add(lineage.model_checksum_sha256)
+            champion_revisions.add(lineage.active_champion_role_revision)
+            champion_transitions.add(lineage.active_champion_transition_id)
+            decision_times.add(lineage.decision_as_of_utc)
+            upcoming_event_lineage.add(
+                (
+                    lineage.upcoming_event_artifact_id,
+                    lineage.upcoming_event_checksum_sha256,
+                )
+            )
+            participant_registry_lineage.add(
+                (
+                    lineage.participant_registry_artifact_id,
+                    lineage.participant_registry_checksum_sha256,
+                )
+            )
         elif reference.role == QUOTES_ROLE:
             artifact = load_operator_quote_artifact(
                 root=root,
@@ -564,7 +594,12 @@ def _derive_payload(
                 expected_checksum=reference.checksum_sha256,
             )
             _require_artifact_identity(artifact, reference)
-            rows = cast(list[dict[str, Any]], cast(dict[str, Any], artifact.payload)["quotes"])
+            quote_payload = cast(dict[str, Any], artifact.payload)
+            quote_observed_as_of = _utc(
+                cast(str, quote_payload["observed_as_of_utc"]),
+                "observed_as_of_utc",
+            )
+            rows = cast(list[dict[str, Any]], quote_payload["quotes"])
             grouped: dict[str, dict[str, float]] = {}
             for row in rows:
                 if (
@@ -621,6 +656,7 @@ def _derive_payload(
                 raise EvaluationError("economic result event is duplicated")
             result_outcomes[result.canonical_event_id] = result_index
             result_times[result.canonical_event_id] = result.result_timestamp_utc
+            result_event_starts[result.canonical_event_id] = result.scheduled_start_utc
         elif reference.role == SETTLEMENTS_ROLE:
             report = load_settlement_report(
                 root=root,
@@ -649,8 +685,20 @@ def _derive_payload(
                 (item.evidence_id, item.checksum_sha256) for item in verified.report.evidence
             }
 
-    if len(competition_ids) != 1 or model_ids != {champion.model_artifact_id}:
+    if (
+        len(competition_ids) != 1
+        or model_ids != {champion.model_artifact_id}
+        or model_checksums != {champion.model_checksum_sha256}
+        or champion_revisions != {champion.champion_role_revision}
+        or champion_transitions != {champion.champion_transition_id}
+    ):
         raise EvaluationError("economic prediction model or competition lineage is inconsistent")
+    if (
+        len(decision_times) != 1
+        or len(upcoming_event_lineage) != 1
+        or len(participant_registry_lineage) != 1
+    ):
+        raise EvaluationError("economic prediction prospective lineage is inconsistent")
     prediction_events = set(predictions)
     if (
         not prediction_events
@@ -705,11 +753,18 @@ def _derive_payload(
     if not quote_times or settlement_as_of is None or monitoring_start is None:
         raise EvaluationError("economic evidence is incomplete")
     assert monitoring_end is not None and monitoring_as_of is not None
-    if any(
-        datetime.combine(prediction_date, time.min, tzinfo=UTC) > min(quote_times)
-        for _, prediction_date in predictions.values()
-    ):
-        raise EvaluationError("economic predictions are not prospective to quotes")
+    decision_as_of = next(iter(decision_times))
+    if quote_observed_as_of != decision_as_of:
+        raise EvaluationError("economic quote batch decision cutoff is inconsistent")
+    for event_id, (_, lineage) in predictions.items():
+        if result_event_starts[event_id] != lineage.event_start_utc:
+            raise EvaluationError("economic result event start lineage is inconsistent")
+        if any(
+            quote_time >= lineage.event_start_utc for quote_time in quote_times_by_event[event_id]
+        ):
+            raise EvaluationError("economic quote is not prospective to event start")
+        if any(quote_time > decision_as_of for quote_time in quote_times_by_event[event_id]):
+            raise EvaluationError("economic quote follows the prediction decision cutoff")
     if any(
         quote_time >= result_times[event_id]
         for event_id in prediction_events
@@ -739,10 +794,10 @@ def _derive_payload(
         "sport_code": "football",
         "competition_id": competition_id,
         "market_key": champion.market_key,
-        "model_artifact_id": champion.model_artifact_id,
-        "model_checksum_sha256": champion.model_checksum_sha256,
-        "champion_role_revision": champion.champion_role_revision,
-        "champion_transition_id": champion.champion_transition_id,
+        "model_artifact_id": next(iter(model_ids)),
+        "model_checksum_sha256": next(iter(model_checksums)),
+        "champion_role_revision": next(iter(champion_revisions)),
+        "champion_transition_id": next(iter(champion_transitions)),
         "evaluation_mode": "prospective-operator",
         "evidence_window_start_utc": format_utc_timestamp(monitoring_start),
         "evidence_window_end_utc": format_utc_timestamp(monitoring_end),

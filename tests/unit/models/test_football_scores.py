@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+import hashlib
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from sports_analytics.artifacts import build_analytical_artifact_document
 from sports_analytics.core.exceptions import ArtifactError, ModelError
+from sports_analytics.data.codec import dumps_canonical_json
 from sports_analytics.models.football_scores import (
     DIXON_COLES,
     INDEPENDENT_POISSON,
@@ -21,6 +24,10 @@ from sports_analytics.models.football_scores import (
     score_model_to_payload,
     temperature_scale_distribution,
     write_score_model_artifact,
+)
+from sports_analytics.predictions.football_scores import (
+    load_production_football_probability_artifact,
+    write_production_football_probability_artifact,
 )
 
 
@@ -165,3 +172,80 @@ def test_score_model_loader_rejects_parameter_tampering() -> None:
     parameters["base_log_rate"] = float("nan")
     with pytest.raises(ArtifactError, match="finite"):
         score_model_from_payload(payload)
+
+
+def _write_production_surface(tmp_path, *, predicted_at: datetime, event_start: datetime):
+    distribution = joint_score_from_intensities(
+        home_intensity=1.4,
+        away_intensity=1.2,
+        prediction_cutoff=predicted_at.date(),
+    )
+    return write_production_football_probability_artifact(
+        root=tmp_path,
+        relative_directory="production-probability",
+        canonical_event_id="event-1",
+        model_artifact_id="model-1",
+        model_checksum_sha256="1" * 64,
+        active_champion_role_revision=3,
+        active_champion_transition_id="transition-1",
+        predicted_at_utc=predicted_at,
+        decision_as_of_utc=predicted_at,
+        event_start_utc=event_start,
+        upcoming_event_artifact_id="upcoming-1",
+        upcoming_event_checksum_sha256="2" * 64,
+        participant_registry_artifact_id="participants-1",
+        participant_registry_checksum_sha256="3" * 64,
+        distribution=distribution,
+        participant_identity={
+            "home_participant_identity_state": "registered-model-seen",
+            "away_participant_identity_state": "registered-model-seen",
+            "home_model_team_state": "model-seen",
+            "away_model_team_state": "model-seen",
+            "unseen_team_fallback_used": False,
+            "unseen_participant_ids": [],
+            "fallback_policy": None,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "predicted_at",
+    (
+        datetime(2026, 8, 9, 15, tzinfo=UTC),
+        datetime(2026, 8, 9, 15, 0, 1, tzinfo=UTC),
+    ),
+)
+def test_production_probability_rejects_prediction_at_or_after_event_start(
+    tmp_path, predicted_at
+) -> None:
+    with pytest.raises(ArtifactError, match="precede event start"):
+        _write_production_surface(
+            tmp_path,
+            predicted_at=predicted_at,
+            event_start=datetime(2026, 8, 9, 15, tzinfo=UTC),
+        )
+
+
+def test_production_probability_rejects_resigned_noncanonical_timestamp(tmp_path) -> None:
+    artifact = _write_production_surface(
+        tmp_path,
+        predicted_at=datetime(2026, 8, 8, 12, tzinfo=UTC),
+        event_start=datetime(2026, 8, 9, 15, tzinfo=UTC),
+    )
+    payload = dict(artifact.payload)
+    payload["predicted_at_utc"] = "2026-08-08T12:00:00Z"
+    document = build_analytical_artifact_document(
+        artifact_type=artifact.artifact_type,
+        schema_version=artifact.schema_version,
+        payload=payload,
+    )
+    text = dumps_canonical_json(document) + "\n"
+    directory = tmp_path / "production-probability"
+    (directory / "manifest.json").write_text(text, encoding="utf-8", newline="\n")
+    checksum = hashlib.sha256(text.encode()).hexdigest()
+    (directory / "manifest_checksum.sha256").write_text(checksum + "\n")
+    with pytest.raises(ArtifactError, match="lineage is invalid"):
+        load_production_football_probability_artifact(
+            root=tmp_path,
+            relative_directory="production-probability",
+        )

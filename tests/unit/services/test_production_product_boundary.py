@@ -43,12 +43,17 @@ from sports_analytics.players.evidence import (
     publish_player_evidence_artifact,
 )
 from sports_analytics.policies.proposal import PublishedProposalPolicy, publish_proposal_policy
+from sports_analytics.predictions.football_scores import (
+    FOOTBALL_PRODUCTION_PROBABILITY_ARTIFACT_SCHEMA,
+    load_production_football_probability_artifact,
+)
 from sports_analytics.services import football_product as research_product
 from sports_analytics.services.champion_resolution import (
     resolve_active_score_champion,
     write_score_calibration_artifact,
 )
 from sports_analytics.services.production_football_product import (
+    ABSENT_ECONOMIC_EVIDENCE_HOLDS,
     ProductionFootballProductRequest,
     run_and_publish_production_football_product,
 )
@@ -345,6 +350,27 @@ def test_production_uses_registered_champion_and_never_trains(tmp_path, monkeypa
     ]
     assert identity["home_participant_identity_state"] == "registered-model-seen"
     assert identity["unseen_team_fallback_used"] is False
+    probability = result.probability_artifacts[0]
+    assert probability.schema_version == FOOTBALL_PRODUCTION_PROBABILITY_ARTIFACT_SCHEMA
+    _, _, lineage = load_production_football_probability_artifact(
+        root=exports,
+        relative_directory=probability.relative_directory,
+        expected_artifact_id=probability.artifact_id,
+        expected_checksum=probability.checksum_sha256,
+    )
+    assert lineage.predicted_at_utc == NOW
+    assert lineage.decision_as_of_utc == NOW
+    assert lineage.event_start_utc == events[0].event_start_utc
+    assert lineage.model_artifact_id == artifact.artifact_id
+    assert lineage.model_checksum_sha256 == artifact.checksum_sha256
+    assert lineage.active_champion_role_revision == 3
+    assert lineage.active_champion_transition_id is None
+    assert lineage.upcoming_event_artifact_id == request.upcoming_event_artifact_id
+    assert lineage.upcoming_event_checksum_sha256 == request.upcoming_event_checksum_sha256
+    assert lineage.participant_registry_artifact_id == request.participant_registry_artifact_id
+    assert (
+        lineage.participant_registry_checksum_sha256 == request.participant_registry_checksum_sha256
+    )
 
 
 def test_registered_model_unseen_team_uses_recorded_competition_average_fallback(
@@ -436,6 +462,7 @@ def test_current_quote_is_analysed_but_economic_holds_prevent_proposal(tmp_path)
     assert state["eligibility"]["bet_proposal_eligible"] is False
     assert state["analytical_candidate_count"] == 3
     assert state["placeable_manual_proposal_count"] == 0
+    assert tuple(state["economic_evidence"]["hold_reasons"]) == (ABSENT_ECONOMIC_EVIDENCE_HOLDS)
     loaded = load_product_read_model(
         root=exports,
         entry=ProductReadModelEntry(

@@ -43,7 +43,9 @@ from sports_analytics.policies.proposal import (
     PublishedProposalPolicy,
     load_published_proposal_policy,
 )
-from sports_analytics.predictions.football_scores import write_football_probability_artifact
+from sports_analytics.predictions.football_scores import (
+    write_production_football_probability_artifact,
+)
 from sports_analytics.proposals.football import (
     FootballOpportunityPolicy,
     ProposalRun,
@@ -225,11 +227,23 @@ def run_and_publish_production_football_product(
         )
         event_markets[event.canonical_event_id] = derive_full_time_markets(distribution)
         probability_artifacts.append(
-            write_football_probability_artifact(
+            write_production_football_probability_artifact(
                 root=exports_root,
                 relative_directory=f"{base}/probabilities/{event.canonical_event_id}",
                 canonical_event_id=event.canonical_event_id,
                 model_artifact_id=champion.model_artifact_id,
+                model_checksum_sha256=champion.model_checksum_sha256,
+                active_champion_role_revision=champion.active_role_revision,
+                active_champion_transition_id=champion.active_transition_id,
+                predicted_at_utc=request.evaluated_at_utc,
+                decision_as_of_utc=request.evaluated_at_utc,
+                event_start_utc=event.event_start_utc,
+                upcoming_event_artifact_id=event_artifact.artifact_id,
+                upcoming_event_checksum_sha256=event_artifact.checksum_sha256,
+                participant_registry_artifact_id=participant_registry.artifact.artifact_id,
+                participant_registry_checksum_sha256=(
+                    participant_registry.artifact.checksum_sha256
+                ),
                 distribution=distribution,
                 participant_identity=identity_state,
             )

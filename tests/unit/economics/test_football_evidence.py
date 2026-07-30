@@ -15,6 +15,7 @@ from sports_analytics.artifacts import (
 )
 from sports_analytics.bookmakers.operator_quotes import (
     FOOTBALL_RULES_SCOPE,
+    OPERATOR_QUOTE_FIELDS,
     REGULATION_SCOPE,
     OperatorEventReference,
     OperatorQuoteInput,
@@ -23,7 +24,7 @@ from sports_analytics.bookmakers.operator_quotes import (
     write_operator_quote_artifact,
 )
 from sports_analytics.core.exceptions import ArtifactError, EvaluationError
-from sports_analytics.data.codec import dumps_canonical_json
+from sports_analytics.data.codec import dumps_canonical_json, format_utc_timestamp
 from sports_analytics.economics.football_evidence import (
     MONITORING_ROLE,
     PREDICTIONS_ROLE,
@@ -50,7 +51,12 @@ from sports_analytics.monitoring.contracts import (
     evaluate_monitoring,
 )
 from sports_analytics.predictions.contracts import CanonicalSelectionIdentity
-from sports_analytics.predictions.football_scores import write_football_probability_artifact
+from sports_analytics.predictions.football_scores import (
+    FOOTBALL_PROBABILITY_ARTIFACT_SCHEMA,
+    FOOTBALL_PROBABILITY_ARTIFACT_TYPE,
+    write_football_probability_artifact,
+    write_production_football_probability_artifact,
+)
 from sports_analytics.results.contracts import (
     EventResultStatus,
     build_football_full_match_1x2_result,
@@ -68,6 +74,7 @@ EVENT_ID = "event-verified-1"
 MODEL_ID = "model-verified"
 MODEL_CHECKSUM = "1" * 64
 QUOTE_AT = datetime(2026, 8, 8, 12, tzinfo=UTC)
+EVENT_START = datetime(2026, 8, 9, 15, tzinfo=UTC)
 RESULT_AT = datetime(2026, 8, 9, 17, tzinfo=UTC)
 SETTLED_AT = datetime(2026, 8, 9, 18, tzinfo=UTC)
 NOW = datetime(2026, 8, 10, 12, tzinfo=UTC)
@@ -103,7 +110,16 @@ def _policy(**changes) -> FootballEconomicEligibilityPolicy:
     return replace(policy, **changes)
 
 
-def _typed_sources(tmp_path):
+def _typed_sources(
+    tmp_path,
+    *,
+    prediction_overrides=None,
+    quote_at=QUOTE_AT,
+    quote_batch_at=QUOTE_AT,
+    event_start=EVENT_START,
+    result_event_start=EVENT_START,
+    use_research_prediction=False,
+):
     raw_probabilities = tuple(
         tuple(
             math.exp(-2.0)
@@ -133,13 +149,45 @@ def _typed_sources(tmp_path):
         prediction_cutoff=date(2026, 8, 8),
         fallback_used=False,
     )
-    prediction = write_football_probability_artifact(
-        root=tmp_path,
-        relative_directory="upstream/prediction",
-        canonical_event_id=EVENT_ID,
-        model_artifact_id=MODEL_ID,
-        distribution=distribution,
-    )
+    if use_research_prediction:
+        prediction = write_football_probability_artifact(
+            root=tmp_path,
+            relative_directory="upstream/prediction",
+            canonical_event_id=EVENT_ID,
+            model_artifact_id=MODEL_ID,
+            distribution=distribution,
+        )
+    else:
+        prediction_arguments = {
+            "model_checksum_sha256": MODEL_CHECKSUM,
+            "active_champion_role_revision": 4,
+            "active_champion_transition_id": "transition-verified",
+            "predicted_at_utc": QUOTE_AT,
+            "decision_as_of_utc": QUOTE_AT,
+            "event_start_utc": event_start,
+            "upcoming_event_artifact_id": "upcoming-event-verified",
+            "upcoming_event_checksum_sha256": "4" * 64,
+            "participant_registry_artifact_id": "participant-registry-verified",
+            "participant_registry_checksum_sha256": "5" * 64,
+        }
+        prediction_arguments.update(prediction_overrides or {})
+        prediction = write_production_football_probability_artifact(
+            root=tmp_path,
+            relative_directory="upstream/prediction",
+            canonical_event_id=EVENT_ID,
+            model_artifact_id=MODEL_ID,
+            distribution=distribution,
+            participant_identity={
+                "home_participant_identity_state": "registered-model-seen",
+                "away_participant_identity_state": "registered-model-seen",
+                "home_model_team_state": "model-seen",
+                "away_model_team_state": "model-seen",
+                "unseen_team_fallback_used": False,
+                "unseen_participant_ids": [],
+                "fallback_policy": None,
+            },
+            **prediction_arguments,
+        )
     quote_inputs = tuple(
         OperatorQuoteInput(
             provider_id="operator-book",
@@ -155,8 +203,8 @@ def _typed_sources(tmp_path):
             overtime_scope=REGULATION_SCOPE,
             rules_scope=FOOTBALL_RULES_SCOPE,
             offered_decimal_odds=Decimal(odds),
-            observed_at_utc=QUOTE_AT,
-            valid_until_utc=QUOTE_AT + timedelta(hours=1),
+            observed_at_utc=quote_at,
+            valid_until_utc=quote_at + timedelta(hours=1),
             source_kind=OperatorQuoteSourceKind.MANUAL,
         )
         for outcome, odds in (("home", "1.50"), ("draw", "5.00"), ("away", "10.00"))
@@ -168,10 +216,10 @@ def _typed_sources(tmp_path):
             OperatorEventReference(
                 EVENT_ID,
                 "football",
-                datetime(2026, 8, 9, 15, tzinfo=UTC),
+                event_start,
             ),
         ),
-        evaluated_at_utc=QUOTE_AT,
+        evaluated_at_utc=quote_batch_at,
     )
     quotes = write_operator_quote_artifact(
         root=tmp_path,
@@ -180,7 +228,7 @@ def _typed_sources(tmp_path):
     )
     result = build_football_full_match_1x2_result(
         canonical_event_id=EVENT_ID,
-        scheduled_start_utc=datetime(2026, 8, 9, 15, tzinfo=UTC),
+        scheduled_start_utc=result_event_start,
         event_status=EventResultStatus.COMPLETED,
         source_name="verified-results",
         source_event_id="source-event-1",
@@ -303,6 +351,70 @@ def _derive(tmp_path, *, policy=None):
     return artifact, evidence, selected_policy
 
 
+def _derive_references(tmp_path, references):
+    return derive_football_economic_evidence(
+        root=tmp_path,
+        relative_directory="economic",
+        references=references,
+        champion=CHAMPION,
+        policy=_policy(),
+    )
+
+
+def _resign_quote_times(tmp_path, references, *, observed_at):
+    quote_reference = next(item for item in references if item.role == QUOTES_ROLE)
+    artifact = load_analytical_artifact(
+        root=tmp_path,
+        relative_directory=quote_reference.relative_directory,
+        expected_artifact_type=quote_reference.artifact_type,
+        expected_schema_version=quote_reference.schema_version,
+    )
+    payload = json.loads(json.dumps(artifact.payload))
+    for row in payload["quotes"]:
+        row["observed_at_utc"] = format_utc_timestamp(observed_at)
+    identity_payload = {
+        "evaluated_at_utc": payload["observed_as_of_utc"],
+        "quotes": [
+            {field: row.get(field) for field in OPERATOR_QUOTE_FIELDS}
+            for row in sorted(
+                payload["quotes"],
+                key=lambda item: (
+                    str(item.get("provider_id")),
+                    str(item.get("canonical_event_id")),
+                    str(item.get("market_family")),
+                    str(item.get("outcome_key")),
+                    str(item.get("line_value") or ""),
+                ),
+            )
+        ],
+    }
+    payload["quote_batch_id"] = hashlib.sha256(
+        dumps_canonical_json(identity_payload).encode()
+    ).hexdigest()
+    document = build_analytical_artifact_document(
+        artifact_type=artifact.artifact_type,
+        schema_version=artifact.schema_version,
+        payload=payload,
+    )
+    text = dumps_canonical_json(document) + "\n"
+    directory = tmp_path / quote_reference.relative_directory
+    (directory / "manifest.json").write_text(text, encoding="utf-8", newline="\n")
+    checksum = hashlib.sha256(text.encode()).hexdigest()
+    (directory / "manifest_checksum.sha256").write_text(checksum + "\n")
+    resigned = load_analytical_artifact(
+        root=tmp_path,
+        relative_directory=quote_reference.relative_directory,
+        expected_artifact_type=quote_reference.artifact_type,
+        expected_schema_version=quote_reference.schema_version,
+    )
+    return tuple(
+        sorted(
+            _reference(QUOTES_ROLE, resigned) if item.role == QUOTES_ROLE else item
+            for item in references
+        )
+    )
+
+
 def _decision(evidence, policy):
     return evaluate_football_economic_evidence(
         evidence=evidence,
@@ -325,6 +437,9 @@ def test_real_typed_sources_are_reconciled_recomputed_and_can_pass(tmp_path) -> 
     assert payload["completed_settlement_count"] == 1
     assert payload["realised_profit_loss"] == 0.5
     assert payload["realised_roi"] == 0.5
+    assert payload["model_checksum_sha256"] == MODEL_CHECKSUM
+    assert payload["champion_role_revision"] == 4
+    assert payload["champion_transition_id"] == "transition-verified"
     assert {item["role"] for item in payload["upstream_artifacts"]} == {
         PREDICTIONS_ROLE,
         QUOTES_ROLE,
@@ -336,6 +451,77 @@ def test_real_typed_sources_are_reconciled_recomputed_and_can_pass(tmp_path) -> 
     assert decision.opportunity_analysis_eligible is True
     assert decision.bet_proposal_eligible is True
     assert decision.promotion_eligible is True
+
+
+def test_research_v1_probability_is_not_economic_production_evidence(tmp_path) -> None:
+    references = _typed_sources(tmp_path, use_research_prediction=True)
+    prediction = next(item for item in references if item.role == PREDICTIONS_ROLE)
+    assert prediction.artifact_type == FOOTBALL_PROBABILITY_ARTIFACT_TYPE
+    assert prediction.schema_version == FOOTBALL_PROBABILITY_ARTIFACT_SCHEMA
+    with pytest.raises(EvaluationError, match="role contract is unsupported"):
+        _derive_references(tmp_path, references)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    (
+        ({"model_checksum_sha256": "6" * 64}, "model or competition lineage"),
+        ({"active_champion_role_revision": 5}, "model or competition lineage"),
+        ({"active_champion_transition_id": "wrong-transition"}, "model or competition lineage"),
+    ),
+)
+def test_economic_evidence_rejects_wrong_prediction_champion_lineage(
+    tmp_path, overrides, match
+) -> None:
+    references = _typed_sources(tmp_path, prediction_overrides=overrides)
+    with pytest.raises(EvaluationError, match=match):
+        _derive_references(tmp_path, references)
+
+
+def test_economic_evidence_rejects_quote_batch_decision_cutoff_mismatch(tmp_path) -> None:
+    references = _typed_sources(
+        tmp_path,
+        quote_batch_at=QUOTE_AT + timedelta(minutes=1),
+    )
+    with pytest.raises(EvaluationError, match="batch decision cutoff"):
+        _derive_references(tmp_path, references)
+
+
+def test_economic_evidence_rejects_quote_after_decision_cutoff(tmp_path) -> None:
+    references = _typed_sources(
+        tmp_path,
+        quote_at=QUOTE_AT + timedelta(seconds=1),
+    )
+    with pytest.raises(EvaluationError, match="follows the prediction decision cutoff"):
+        _derive_references(tmp_path, references)
+
+
+def test_economic_evidence_rejects_result_event_start_mismatch(tmp_path) -> None:
+    references = _typed_sources(
+        tmp_path,
+        result_event_start=EVENT_START + timedelta(minutes=1),
+    )
+    with pytest.raises(EvaluationError, match="result event start lineage"):
+        _derive_references(tmp_path, references)
+
+
+def test_economic_evidence_rejects_quote_at_event_start(tmp_path) -> None:
+    references = _resign_quote_times(
+        tmp_path,
+        _typed_sources(tmp_path),
+        observed_at=EVENT_START,
+    )
+    with pytest.raises(EvaluationError, match="not prospective to event start"):
+        _derive_references(tmp_path, references)
+
+
+def test_economic_evidence_rejects_same_date_quote_cutoff_mismatch(tmp_path) -> None:
+    references = _typed_sources(
+        tmp_path,
+        quote_batch_at=QUOTE_AT + timedelta(minutes=10),
+    )
+    with pytest.raises(EvaluationError, match="batch decision cutoff"):
+        _derive_references(tmp_path, references)
 
 
 def test_request_accepts_only_role_bound_references_and_output() -> None:
