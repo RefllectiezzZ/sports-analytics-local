@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sports-analytics-local"
-version = "0.1.0"
-description = "Fully local, deterministic sports analytics and betting-support application."
+version = "1.0.0"
+description = "Localhost-only, deterministic sports analytics and manual betting-support application."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "Sports Analytics Local Contributors" }]
 keywords = ["sports", "analytics", "local", "streamlit"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
@@ -31,6 +31,9 @@ dependencies = [
   "scikit-learn",
   "playwright",
 ]
+
+[project.scripts]
+sports-analytics-v1 = "sports_analytics.release.cli:main"
 
 [project.optional-dependencies]
 dev = [

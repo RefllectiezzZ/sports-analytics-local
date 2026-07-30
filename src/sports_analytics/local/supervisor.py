@@ -125,25 +125,27 @@ class _SupervisedChild:
 
 
 class LocalSupervisor:
-    """Start and supervise local worker and optional bookmaker scheduler processes."""
+    """Supervise the package worker, local UI, and optional bookmaker scheduler."""
 
     def __init__(
         self,
         *,
         worker_script: Path | str | None = None,
         scheduler_module: str = "sports_analytics.bookmakers.scheduler",
+        ui_entry: Path | str | None = None,
         popen_factory: PopenFactory | None = None,
         install_signals: bool = True,
         shutdown_strategy: ProcessShutdownStrategy | None = None,
         platform_name: str | None = None,
         poll_interval_seconds: float = 0.5,
     ) -> None:
-        self._worker_script = (
-            Path(worker_script).resolve()
-            if worker_script is not None
-            else Path(__file__).resolve().parents[3] / "worker.py"
-        )
+        self._worker_script = None if worker_script is None else Path(worker_script).resolve()
         self._scheduler_module = scheduler_module
+        self._ui_entry = (
+            Path(ui_entry).resolve()
+            if ui_entry is not None
+            else Path(__file__).resolve().parents[1] / "ui" / "streamlit_entry.py"
+        )
         self._popen_factory = _default_popen if popen_factory is None else popen_factory
         self._install_signals = install_signals
         self._shutdown_strategy = (
@@ -162,8 +164,10 @@ class LocalSupervisor:
         worker_once: bool = False,
         worker_max_jobs: int | None = None,
         worker_id: str | None = None,
+        start_ui: bool = False,
+        ui_port: int = 8501,
     ) -> int:
-        """Bootstrap run_local, start children, and propagate exit status."""
+        """Bootstrap, start allowlisted children, and propagate exit status."""
         self._graceful_stop_sent = False
         runtime_context = bootstrap_runtime(
             "run_local",
@@ -174,6 +178,10 @@ class LocalSupervisor:
         bookmakers_enabled = runtime_context.settings.bookmakers.enabled
         absolute_config = None if config is None else str(Path(config).resolve())
         absolute_env = None if env_file is None else str(Path(env_file).resolve())
+        if type(ui_port) is not int or not 1 <= ui_port <= 65535:
+            raise WorkerError("UI port must be an integer from 1 through 65535")
+        if worker_once and start_ui:
+            raise WorkerError("worker-once skips the UI and cannot supervise a temporary website")
         if worker_id is not None:
             try:
                 worker_id = normalize_uuid(worker_id)
@@ -194,6 +202,15 @@ class LocalSupervisor:
                 command=worker_command,
             )
             children.append(worker_child)
+
+            if start_ui:
+                ui_command = self._build_ui_command(
+                    config=absolute_config,
+                    env_file=absolute_env,
+                    ui_port=ui_port,
+                )
+                ui_child = self._start_child(name="streamlit-ui", command=ui_command)
+                children.append(ui_child)
 
             # Worker-once modes skip the long-lived scheduler.
             if bookmakers_enabled and not worker_once:
@@ -278,7 +295,9 @@ class LocalSupervisor:
         worker_max_jobs: int | None,
         worker_id: str | None,
     ) -> list[str]:
-        command = [sys.executable, str(self._worker_script.resolve())]
+        command = [sys.executable, "-m", "sports_analytics.jobs"]
+        if self._worker_script is not None:
+            command = [sys.executable, str(self._worker_script.resolve())]
         if config is not None:
             command.extend(["--config", config])
         if env_file is not None:
@@ -289,6 +308,35 @@ class LocalSupervisor:
             command.extend(["--max-jobs", str(worker_max_jobs)])
         if worker_id is not None:
             command.extend(["--worker-id", worker_id])
+        return command
+
+    def _build_ui_command(
+        self,
+        *,
+        config: str | None,
+        env_file: str | None,
+        ui_port: int,
+    ) -> list[str]:
+        if type(ui_port) is not int or not 1 <= ui_port <= 65535:
+            raise WorkerError("UI port must be an integer from 1 through 65535")
+        command = [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(self._ui_entry.resolve()),
+            "--server.address=127.0.0.1",
+            f"--server.port={ui_port}",
+            "--server.headless=true",
+            "--browser.gatherUsageStats=false",
+        ]
+        script_arguments: list[str] = []
+        if config is not None:
+            script_arguments.extend(["--config", config])
+        if env_file is not None:
+            script_arguments.extend(["--env-file", env_file])
+        if script_arguments:
+            command.extend(["--", *script_arguments])
         return command
 
     def _build_scheduler_command(
@@ -329,12 +377,13 @@ class LocalSupervisor:
                 exit_code,
             )
         remaining = [item for item in children if item.name != exited_name]
+        shutdown_code = 0
         if remaining:
-            self._shutdown_children(
+            shutdown_code = self._shutdown_children(
                 remaining,
                 shutdown_grace_seconds=shutdown_grace_seconds,
             )
-        return exit_code
+        return exit_code if exit_code != 0 else shutdown_code
 
     def _install_signal_handlers(
         self,

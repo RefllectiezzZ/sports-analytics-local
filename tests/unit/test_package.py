@@ -8,4 +8,4 @@ def test_version_is_defined() -> None:
     assert hasattr(sports_analytics, "__version__")
     assert isinstance(sports_analytics.__version__, str)
     assert sports_analytics.__version__
-    assert sports_analytics.__version__ == "0.1.0"
+    assert sports_analytics.__version__ == "1.0.0"

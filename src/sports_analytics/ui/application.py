@@ -6,9 +6,11 @@ from pathlib import Path
 
 import streamlit as st
 
+from sports_analytics import __version__
 from sports_analytics.core.exceptions import ArtifactError, ConfigurationError
 from sports_analytics.core.paths import resolve_paths
 from sports_analytics.core.settings import load_settings
+from sports_analytics.release.doctor import inspect_release_readiness
 from sports_analytics.ui.catalogue import (
     ArtifactCatalogueEntry,
     discover_typed_artifacts,
@@ -32,7 +34,12 @@ def running_in_streamlit() -> bool:
     return get_script_run_ctx(suppress_warning=True) is not None
 
 
-def run_streamlit_app(*, base_directory: Path | None = None) -> None:
+def run_streamlit_app(
+    *,
+    base_directory: Path | None = None,
+    config_path: Path | str | None = None,
+    env_file: Path | str | None = None,
+) -> None:
     """Render the local read-only artifact browser."""
     st.set_page_config(
         page_title="Sports analytics workspace",
@@ -43,7 +50,11 @@ def run_streamlit_app(*, base_directory: Path | None = None) -> None:
     apply_theme()
     repository_base = (base_directory or Path.cwd()).resolve()
     try:
-        settings = load_settings(base_directory=repository_base)
+        settings = load_settings(
+            base_directory=repository_base,
+            config_path=config_path,
+            env_file=env_file,
+        )
         paths = resolve_paths(settings, repository_base)
     except ConfigurationError as exc:
         st.title("Sports analytics workspace")
@@ -61,11 +72,20 @@ def run_streamlit_app(*, base_directory: Path | None = None) -> None:
     valid_products = tuple(entry for entry in product_catalogue if entry.is_valid)
     invalid_products = tuple(entry for entry in product_catalogue if not entry.is_valid)
 
-    st.sidebar.title("Sports analytics")
-    st.sidebar.caption("Verified persisted artifacts · read-only")
+    st.sidebar.title("Sports Analytics Local")
+    st.sidebar.caption(f"v{__version__} · localhost-only · read-only")
     page = st.sidebar.radio("Navigation", PAGES, key="sal_page")
     _render_invalid_entries(invalid)
     _render_invalid_product_entries(invalid_products)
+    if page == "V1 system status":
+        report = inspect_release_readiness(
+            config_path=config_path,
+            env_file=env_file,
+            base_directory=repository_base,
+        )
+        _render_v1_status(report)
+        if valid or valid_products:
+            return
     if page == "Football product":
         _render_product_selection(
             root=paths.exports_directory,
@@ -180,4 +200,91 @@ def _artifact_label(entry: ArtifactCatalogueEntry) -> str:
     return (
         f"{entry.artifact_kind} · {entry.schema_version} · "
         f"{entry.relative_directory} · {short_identifier(entry.artifact_id or '')}"
+    )
+
+
+def _render_v1_status(report: dict[str, object]) -> None:
+    """Render the truthful, read-only v1 landing and system status."""
+    st.title(f"Sports Analytics Local · v{__version__}")
+    st.caption(
+        "Localhost-only operator workspace. Final bookmaker placement is manual-only; "
+        "the supported v1 price path is strict offline operator input."
+    )
+    state = str(report.get("overall_state", "invalid"))
+    if state == "ready":
+        st.success("Software state: ready")
+    elif state == "degraded":
+        st.warning("Software state: degraded by absent optional analytical data")
+    elif state == "not-initialized":
+        st.info("Software state: not initialized")
+    else:
+        st.error("Software or configuration state: invalid")
+
+    checks_value = report.get("checks")
+    checks = checks_value if isinstance(checks_value, dict) else {}
+    migration_value = checks.get("migration")
+    migration = migration_value if isinstance(migration_value, dict) else {}
+    catalogue_value = checks.get("export_catalogue")
+    catalogue = catalogue_value if isinstance(catalogue_value, dict) else {}
+    latest_value = checks.get("latest_product_state")
+    latest = latest_value if isinstance(latest_value, dict) else {}
+    champions_value = checks.get("active_champions")
+    champions = champions_value if isinstance(champions_value, dict) else {}
+    queue_value = checks.get("queue")
+    queue = queue_value if isinstance(queue_value, dict) else {}
+
+    columns = st.columns(4)
+    columns[0].metric(
+        "Database migration",
+        f"{migration.get('current_version', 0)}/{migration.get('latest_version', 5)}",
+    )
+    columns[1].metric("Verified products", catalogue.get("product_count", 0))
+    competitions = champions.get("competitions")
+    columns[2].metric(
+        "Active competition models",
+        len(competitions) if isinstance(competitions, list) else 0,
+    )
+    columns[3].metric(
+        "Placeable manual proposals",
+        latest.get("placeable_manual_proposal_count", 0),
+    )
+
+    st.subheader("Latest verified product/read-model state")
+    st.write(
+        {
+            "model probability": latest.get("active_model_state", "unavailable"),
+            "fair odds": (
+                "available"
+                if latest.get("economic_state") not in {"not-evaluated", "no-production-champion"}
+                else "unavailable"
+            ),
+            "real offered odds": latest.get("current_quote_availability", "absent"),
+            "economic eligibility / hold": latest.get("economic_state", "not-evaluated"),
+        }
+    )
+    counts = st.columns(4)
+    counts[0].metric("Analytical candidates", latest.get("analytical_candidate_count", 0))
+    counts[1].metric("Research-only proposals", latest.get("research_only_proposal_count", 0))
+    counts[2].metric("Held candidates", latest.get("held_candidate_count", 0))
+    counts[3].metric("Rejected candidates", latest.get("rejected_candidate_count", 0))
+
+    st.subheader("Worker and queue")
+    st.write(
+        {
+            "pending": queue.get("pending_count", 0),
+            "running": queue.get("running_count", 0),
+            "active workers": queue.get("active_worker_count", 0),
+            "queue state": queue.get("state", "unavailable"),
+        }
+    )
+    if catalogue.get("product_count", 0) == 0:
+        st.info(
+            "No verified product artifact exists yet. Keep bookmaker acquisition disabled, "
+            "prepare the existing offline historical/model workflow, import real offered odds "
+            "through the strict operator-input contract when available, and refresh this page."
+        )
+    st.warning(
+        "A held candidate is not a recommendation or a best bet. Model probability and fair "
+        "odds are analytical estimates; a placeable manual proposal requires verified real "
+        "offered odds and all economic evidence gates."
     )
