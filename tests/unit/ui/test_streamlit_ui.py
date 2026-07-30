@@ -507,7 +507,10 @@ def test_streamlit_application_import_and_empty_state_smoke(
     app = AppTest.from_file(str(app_path))
     app.run(timeout=15)
     assert not app.exception
-    assert any("No valid typed analysis or backtest artifacts" in item.value for item in app.info)
+    assert any("Sports Analytics Local" in item.value for item in app.title)
+    assert not any(
+        "No valid typed analysis or backtest artifacts" in item.value for item in app.info
+    )
 
 
 def _two_leg_rules() -> CombinationRules:

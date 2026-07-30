@@ -45,7 +45,9 @@ See [the coherent football product](docs/football-product.md),
 
 ## Current status
 
-This repository is in **pre-alpha** state.
+This repository is the **local v1.0.0 release**. It is a single-operator,
+localhost-only, read-only website with manual placement and strict offline
+operator input for real offered odds. It does not claim profitability.
 
 Implemented now:
 
@@ -100,6 +102,51 @@ Python **3.12** or newer is required.
 - Python 3.12+
 - `pip` and the standard library `venv` module
 - Git
+
+## Local v1 first run
+
+The supported Windows path is:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\sports-analytics-v1.exe --initialize
+.venv\Scripts\sports-analytics-v1.exe --doctor
+.venv\Scripts\sports-analytics-v1.exe
+```
+
+The repository-compatible alternative is:
+
+```powershell
+.venv\Scripts\python.exe launch_v1.py --initialize
+.venv\Scripts\python.exe launch_v1.py --doctor
+.venv\Scripts\python.exe launch_v1.py
+```
+
+The website is printed once and served only at
+`http://127.0.0.1:8501`. Press `Ctrl+C` in the operator terminal to stop the
+worker and website cleanly. `--worker-once` processes at most one available job
+and intentionally skips the temporary UI.
+
+Initialization is idempotent and applies packaged migrations `0001`–`0005`.
+Doctor is strictly read-only: `ready` and `degraded` return success,
+`not-initialized` returns exit code 3, and invalid software/configuration returns
+exit code 2. An absent champion, absent real offered odds, or an expected
+economic-evidence hold may degrade analytical availability without making the
+installation corrupt.
+
+Back up and restore with:
+
+```powershell
+.venv\Scripts\sports-analytics-v1.exe --backup C:\backups\sports-analytics-v1-2026-07-30
+.venv\Scripts\sports-analytics-v1.exe --restore C:\backups\sports-analytics-v1-2026-07-30
+```
+
+Restore is fail-closed and only accepts absent or empty configured persistent
+destinations. It never force-overwrites operational state. See the
+[v1 operator runbook](docs/v1-operator-runbook.md) and
+[v1 release notes](docs/release-v1.md).
 
 ## Setup
 

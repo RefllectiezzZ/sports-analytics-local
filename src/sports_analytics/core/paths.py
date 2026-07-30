@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,23 +26,17 @@ class RuntimePaths:
 
 
 def _resolve_path(path: Path, base_directory: Path) -> Path:
-    """Resolve a configured path against ``base_directory`` when relative."""
-    if path.is_absolute():
-        return path.resolve()
-    return (base_directory / path).resolve()
+    """Make a configured path absolute without following symlink components."""
+    return Path(os.path.abspath(path if path.is_absolute() else base_directory / path))
 
 
 def resolve_paths(settings: Settings, base_directory: Path | str) -> RuntimePaths:
-    """Resolve configured storage paths to absolute normalized locations.
+    """Make configured storage paths absolute without following symlinks.
 
     This function is pure: it does not create files or directories and does not
     change the process working directory.
     """
-    base = Path(base_directory)
-    if not base.is_absolute():
-        base = base.resolve()
-    else:
-        base = base.resolve()
+    base = Path(os.path.abspath(base_directory))
 
     storage = settings.storage
     return RuntimePaths(
