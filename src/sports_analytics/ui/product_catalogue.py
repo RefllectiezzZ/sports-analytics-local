@@ -111,6 +111,17 @@ def _validate_read_model(artifact: AnalyticalArtifact) -> None:
         raise ArtifactError("football product must remain manual placement only")
     if product.get("automatic_bookmaker_access") is not False:
         raise ArtifactError("football product read model claims forbidden bookmaker access")
+    eligibility = product.get("eligibility")
+    if not isinstance(eligibility, dict) or set(eligibility) != {
+        "model_artifact_valid",
+        "fair_odds_eligible",
+        "opportunity_analysis_eligible",
+        "bet_proposal_eligible",
+        "promotion_eligible",
+    }:
+        raise ArtifactError("football product eligibility states are not exact")
+    if any(type(value) is not bool for value in eligibility.values()):
+        raise ArtifactError("football product eligibility states must be boolean")
     capabilities = payload["market_capabilities"]
     if not isinstance(capabilities, list) or not capabilities:
         raise ArtifactError("football product capability matrix is absent")

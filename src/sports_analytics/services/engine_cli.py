@@ -7,6 +7,7 @@ import json
 import math
 import sys
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from sports_analytics.core.validation import (
     parse_cli_positive_bounded_int,
 )
 from sports_analytics.data.codec import dumps_canonical_json, ensure_json_value
+from sports_analytics.data.database import connect_database
 from sports_analytics.data.types import JsonValue
 from sports_analytics.evaluation.temporal import TemporalSplitConfig
 from sports_analytics.features.football.specification import (
@@ -68,13 +70,18 @@ from sports_analytics.services.combinations_trusted import (
 )
 from sports_analytics.services.football_product_cli import (
     capability_payload,
-    run_football_product_json,
+)
+from sports_analytics.services.football_product_cli import (
+    run_football_product_json as run_synthetic_contract_football_product_json,
 )
 from sports_analytics.services.historical_analysis import publish_historical_analysis_with_paths
 from sports_analytics.services.operations_cli import (
     add_operational_arguments,
     operational_mode_values,
     run_operational_mode,
+)
+from sports_analytics.services.production_football_product_cli import (
+    run_production_football_product_json,
 )
 from sports_analytics.services.training import (
     FeatureBuildRequest,
@@ -83,6 +90,15 @@ from sports_analytics.services.training import (
     infer_from_feature_row,
     train_football_1x2_model,
     verify_model_artifact,
+)
+from sports_analytics.upcoming_events import (
+    UpcomingEvent,
+    load_upcoming_event_artifact,
+    parse_upcoming_event_csv,
+    parse_upcoming_event_json,
+    upcoming_event_csv_template,
+    upcoming_event_json_template,
+    write_upcoming_event_artifact,
 )
 
 
@@ -204,11 +220,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--run-football-product",
         metavar="JSON_PATH",
         default=None,
-        help=(
-            "Run the bounded offline score-model, fair-odds, operator-quote, "
-            "proposal, and persisted read-model workflow."
-        ),
+        help=("Run production inference from verified events and an active champion."),
     )
+    mode.add_argument(
+        "--run-synthetic-contract-football-product",
+        metavar="JSON_PATH",
+        default=None,
+        help="Run the explicit research-only synthetic contract proof.",
+    )
+    mode.add_argument("--export-upcoming-event-csv-template", action="store_true")
+    mode.add_argument("--export-upcoming-event-json-template", action="store_true")
+    mode.add_argument("--validate-upcoming-event-input", metavar="PATH", default=None)
+    mode.add_argument("--import-upcoming-events", metavar="PATH", default=None)
+    mode.add_argument(
+        "--verify-upcoming-event-artifact",
+        metavar="RELATIVE_DIRECTORY",
+        default=None,
+    )
+    mode.add_argument("--list-upcoming-events", metavar="RELATIVE_DIRECTORY", default=None)
     mode.add_argument(
         "--football-market-capabilities",
         action="store_true",
@@ -266,6 +295,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SHA256",
         help="Optional expected artifact checksum.",
+    )
+    parser.add_argument(
+        "--output-relative",
+        default=None,
+        metavar="RELATIVE_DIRECTORY",
+        help="Safe output directory for an immutable imported artifact.",
     )
     parser.add_argument(
         "--seed",
@@ -404,6 +439,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _publish_historical_analysis(args)
         if args.run_football_product is not None:
             return _run_football_product(args)
+        if args.run_synthetic_contract_football_product is not None:
+            return _run_synthetic_contract_football_product(args)
+        if args.export_upcoming_event_csv_template:
+            print(upcoming_event_csv_template(), end="")
+            return SUCCESS_EXIT
+        if args.export_upcoming_event_json_template:
+            print(upcoming_event_json_template(), end="")
+            return SUCCESS_EXIT
+        if args.validate_upcoming_event_input is not None:
+            return _validate_upcoming_events(args)
+        if args.import_upcoming_events is not None:
+            return _import_upcoming_events(args)
+        if args.verify_upcoming_event_artifact is not None:
+            return _verify_upcoming_events(args, list_rows=False)
+        if args.list_upcoming_events is not None:
+            return _verify_upcoming_events(args, list_rows=True)
         if args.football_market_capabilities:
             print(dumps_canonical_json(capability_payload()))
             return SUCCESS_EXIT
@@ -456,6 +507,13 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.publish_analysis is not None,
         args.publish_historical_analysis is not None,
         args.run_football_product is not None,
+        args.run_synthetic_contract_football_product is not None,
+        args.export_upcoming_event_csv_template,
+        args.export_upcoming_event_json_template,
+        args.validate_upcoming_event_input is not None,
+        args.import_upcoming_events is not None,
+        args.verify_upcoming_event_artifact is not None,
+        args.list_upcoming_events is not None,
         args.football_market_capabilities,
         args.export_current_quote_template,
         args.export_current_quote_json_template,
@@ -488,6 +546,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             args.as_of_utc,
             args.artifact_type,
             args.artifact_schema,
+            args.output_relative,
         )
     )
     if common and (any(engine_modes) or domain_args):
@@ -840,11 +899,117 @@ def _run_football_product(args: argparse.Namespace) -> int:
         config_path=args.config,
         env_file=args.env_file,
     )
-    result = run_football_product_json(
-        path_text=args.run_football_product,
+    with connect_database(runtime.database_path, read_only=True) as connection:
+        result = run_production_football_product_json(
+            path_text=args.run_football_product,
+            connection=connection,
+            exports_root=runtime.paths.exports_directory,
+            model_root=runtime.paths.models_directory,
+        )
+    print(dumps_canonical_json(ensure_json_value(result)))
+    return SUCCESS_EXIT
+
+
+def _run_synthetic_contract_football_product(args: argparse.Namespace) -> int:
+    runtime = bootstrap_runtime(
+        "engine",
+        config_path=args.config,
+        env_file=args.env_file,
+    )
+    result = run_synthetic_contract_football_product_json(
+        path_text=args.run_synthetic_contract_football_product,
         exports_root=runtime.paths.exports_directory,
     )
+    result["execution_mode"] = "synthetic-contract-research-only"
+    result["placement_state"] = "not-authorized-for-placement"
     print(dumps_canonical_json(ensure_json_value(result)))
+    return SUCCESS_EXIT
+
+
+def _upcoming_cutoff(args: argparse.Namespace) -> datetime:
+    if type(args.as_of_utc) is not str or not args.as_of_utc:
+        raise ConfigurationError("--as-of-utc is required for upcoming-event input")
+    from sports_analytics.data.codec import parse_utc_timestamp
+
+    try:
+        return parse_utc_timestamp(args.as_of_utc)
+    except (RepositoryError, ValueError) as exc:
+        raise ConfigurationError("--as-of-utc must be canonical UTC") from exc
+
+
+def _parse_upcoming_path(path_text: str, *, cutoff: datetime) -> tuple[UpcomingEvent, ...]:
+    path = Path(path_text.replace("\\", "/"))
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ConfigurationError("cannot read upcoming-event input") from exc
+    if path.suffix.casefold() == ".csv":
+        return parse_upcoming_event_csv(raw, evaluated_at_utc=cutoff)
+    if path.suffix.casefold() == ".json":
+        return parse_upcoming_event_json(raw, evaluated_at_utc=cutoff)
+    raise ConfigurationError("upcoming-event input must use .csv or .json")
+
+
+def _validate_upcoming_events(args: argparse.Namespace) -> int:
+    events = _parse_upcoming_path(
+        args.validate_upcoming_event_input,
+        cutoff=_upcoming_cutoff(args),
+    )
+    print(
+        dumps_canonical_json(
+            {
+                "state": "valid",
+                "row_count": len(events),
+                "canonical_event_ids": [item.canonical_event_id for item in events],
+            }
+        )
+    )
+    return SUCCESS_EXIT
+
+
+def _import_upcoming_events(args: argparse.Namespace) -> int:
+    cutoff = _upcoming_cutoff(args)
+    if type(args.output_relative) is not str or not args.output_relative:
+        raise ConfigurationError("--output-relative is required for upcoming-event import")
+    runtime = bootstrap_runtime("engine", config_path=args.config, env_file=args.env_file)
+    events = _parse_upcoming_path(args.import_upcoming_events, cutoff=cutoff)
+    artifact = write_upcoming_event_artifact(
+        root=runtime.paths.exports_directory,
+        relative_directory=args.output_relative,
+        events=events,
+        evaluated_at_utc=cutoff,
+    )
+    print(
+        dumps_canonical_json(
+            {
+                "state": "imported",
+                "artifact_id": artifact.artifact_id,
+                "checksum_sha256": artifact.checksum_sha256,
+                "relative_directory": artifact.relative_directory,
+                "row_count": len(events),
+            }
+        )
+    )
+    return SUCCESS_EXIT
+
+
+def _verify_upcoming_events(args: argparse.Namespace, *, list_rows: bool) -> int:
+    relative = args.list_upcoming_events if list_rows else args.verify_upcoming_event_artifact
+    runtime = bootstrap_runtime("engine", config_path=args.config, env_file=args.env_file)
+    artifact, events = load_upcoming_event_artifact(
+        root=runtime.paths.exports_directory,
+        relative_directory=relative,
+        expected_checksum=args.checksum,
+    )
+    result: dict[str, JsonValue] = {
+        "state": "verified",
+        "artifact_id": artifact.artifact_id,
+        "checksum_sha256": artifact.checksum_sha256,
+        "row_count": len(events),
+    }
+    if list_rows:
+        result["events"] = [item.to_json() for item in events]
+    print(dumps_canonical_json(result))
     return SUCCESS_EXIT
 
 

@@ -95,12 +95,22 @@ def run_historical_score_backtest(
     # A 1X2 market settles exactly one outcome.  Historical rows are evaluated
     # independently for calibration, but the normal singles strategy must not
     # stake mutually-exclusive home/draw/away selections from the same quoted
-    # market.  Select the deterministic best candidate per event/provider.
+    # market. Select the deterministic best candidate per complete available
+    # market identity. The contract has no independent decision timestamp; its
+    # historical-closing classification is therefore the decision-time scope.
     accepted: list[Historical1x2Evaluation] = []
     rejected: dict[str, int] = {}
-    qualifying: dict[tuple[str, str], list[Historical1x2Evaluation]] = {}
+    qualifying: dict[tuple[str, str, str, str, str], list[Historical1x2Evaluation]] = {}
     for row in sorted(
-        rows, key=lambda item: (item.canonical_event_id, item.provider_id, item.outcome_key)
+        rows,
+        key=lambda item: (
+            item.competition_id,
+            item.season_id,
+            item.canonical_event_id,
+            item.provider_id,
+            item.quote_classification,
+            item.outcome_key,
+        ),
     ):
         edge = row.model_probability - row.normalized_market_probability
         expected_value = row.model_probability * float(row.offered_decimal_odds) - 1.0
@@ -113,7 +123,16 @@ def run_historical_score_backtest(
             for reason in reasons:
                 rejected[reason] = rejected.get(reason, 0) + 1
         else:
-            qualifying.setdefault((row.canonical_event_id, row.provider_id), []).append(row)
+            qualifying.setdefault(
+                (
+                    row.competition_id,
+                    row.season_id,
+                    row.canonical_event_id,
+                    row.provider_id,
+                    row.quote_classification,
+                ),
+                [],
+            ).append(row)
     for candidates in qualifying.values():
         ranked = sorted(
             candidates,
@@ -189,7 +208,8 @@ def run_historical_score_backtest(
             "closing benchmark is not an executable historical recommendation",
             "one-unit results are diagnostic and do not imply future profitability",
             "only genuinely priced 1X2 selections are evaluated",
-            "at most one outcome is selected per event/provider 1X2 market",
+            "at most one outcome is selected per competition/season/event/provider/"
+            "closing-decision 1X2 market",
         ),
     )
 

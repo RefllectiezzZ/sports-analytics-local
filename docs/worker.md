@@ -1,12 +1,13 @@
 # Worker and job queue
 
-The frozen registry includes `analysis.football-product`. Its payload is the
-same exact bounded JSON document used by `--run-football-product`: typed
-historical match rows, upcoming canonical events, optional canonical operator
-quotes, fixed split/policy configuration, and a safe relative artifact root.
-It cannot select imports, code, scripts, URLs, headers, cookies, tokens,
-selectors, browser profiles, or arbitrary output paths. The handler publishes
-only below the runtime exports root and never accesses a bookmaker network.
+The frozen registry includes the legacy `analysis.football-product` synthetic
+contract job. It is research-only, may use bounded fixture rows, and is not
+authorized for placement or production champion claims. The generic
+`--run-football-product` command is a separate production/operator boundary:
+it accepts verified artifact references, resolves an active champion, and never
+trains. Neither path can select imports, code, scripts, URLs, headers, cookies,
+tokens, selectors, browser profiles, or arbitrary output paths, and neither
+accesses a bookmaker network.
 
 This document describes the durable local job worker introduced for
 `sports-analytics-local`. The worker is SQLite-backed, sequential, and intended

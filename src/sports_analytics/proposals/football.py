@@ -214,6 +214,7 @@ def evaluate_proposed_single(
     candidate_disagreement_too_high: bool = False,
     rho_stable: bool = True,
     player_context_state: str = "not-requested",
+    evidence_hold_reasons: tuple[str, ...] = (),
 ) -> ProposedSingleDecision:
     """Evaluate one selection while preserving fair/offered terminology."""
     rules = policy or FootballOpportunityPolicy()
@@ -250,6 +251,7 @@ def evaluate_proposed_single(
         reasons.append(AbstentionReason.PLAYER_CONTEXT_UNRESOLVED.value)
     elif player_context_state == "train-serve-equivalence-unavailable":
         reasons.append(AbstentionReason.PLAYER_TRAIN_SERVE_EQUIVALENCE_UNAVAILABLE.value)
+    reasons.extend(evidence_hold_reasons)
     if market.fair_decimal_odds is None or market.probability <= 0.0:
         reasons.append(AbstentionReason.SCORE_PROBABILITY_UNPRICED.value)
     if market.residual_tail_mass > rules.maximum_residual_tail_mass:
@@ -343,6 +345,7 @@ def evaluate_catalogue_proposals(
     decision_as_of_utc: datetime,
     policy: FootballOpportunityPolicy | None = None,
     player_context_state: str = "not-requested",
+    evidence_hold_reasons: tuple[str, ...] = (),
 ) -> ProposalRun:
     """Evaluate fair-odds-only or current-price product paths deterministically."""
     rules = policy or FootballOpportunityPolicy()
@@ -370,6 +373,7 @@ def evaluate_catalogue_proposals(
                         decision_as_of_utc=decision_as_of_utc,
                         policy=rules,
                         player_context_state=player_context_state,
+                        evidence_hold_reasons=evidence_hold_reasons,
                     )
                 )
     accepted = tuple(item for item in decisions if item.accepted)

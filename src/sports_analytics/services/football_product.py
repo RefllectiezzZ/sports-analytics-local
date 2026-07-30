@@ -114,7 +114,7 @@ def run_and_publish_football_product(
     exports_root: Path,
     request: FootballProductRequest,
 ) -> PublishedFootballProduct:
-    """Run the bounded local workflow; no network or bookmaker access exists here."""
+    """Run the explicit synthetic-contract research workflow."""
     if not request.upcoming_events:
         raise EvaluationError("football product requires at least one upcoming event")
     if (
@@ -261,6 +261,7 @@ def run_and_publish_football_product(
     )
     read_model_payload: dict[str, JsonValue] = {
         "model_status": {
+            "production_champion_state": "not-claimed",
             "contract_proof_winner_candidate_id": winner_candidate.candidate_id,
             "model_artifact_id": model_artifact.artifact_id,
             "model_family": model.model_family,
@@ -293,9 +294,23 @@ def run_and_publish_football_product(
             ),
         },
         "product_state": {
-            "mode": ("fair-odds-only" if quote_catalogue is None else "current-offered-prices"),
-            "proposal_count": sum(item.accepted for item in proposals.decisions),
-            "accumulator_count": len(proposals.accumulators),
+            "mode": "synthetic-contract-research-only",
+            "authorization_state": "not-authorized-for-placement",
+            "eligibility": {
+                "model_artifact_valid": True,
+                "fair_odds_eligible": False,
+                "opportunity_analysis_eligible": False,
+                "bet_proposal_eligible": False,
+                "promotion_eligible": False,
+            },
+            "proposal_count": 0,
+            "analytical_candidate_count": sum(
+                item.offered_decimal_odds is not None for item in proposals.decisions
+            ),
+            "research_candidate_count": sum(item.accepted for item in proposals.decisions),
+            "research_only_proposal_count": sum(item.accepted for item in proposals.decisions),
+            "placeable_manual_proposal_count": 0,
+            "accumulator_count": 0,
             "placement_state": "manual-only",
             "automatic_bookmaker_access": False,
             "sport_policy": {
@@ -364,6 +379,9 @@ def run_and_publish_football_product(
         proposal_artifact=proposal_artifact,
         read_model_artifact=read_model_artifact,
     )
+
+
+run_synthetic_contract_football_product = run_and_publish_football_product
 
 
 def _player_context_payload(

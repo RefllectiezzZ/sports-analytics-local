@@ -1,19 +1,19 @@
 # Coherent football fair-odds and proposal product
 
-The local end-to-end proof is `synthetic-contract`. Its provisional fold winner
-proves the pipeline contract only and is not a production champion. There is no
-verified real historical football, basketball, or tennis modelling snapshot in
-local storage, so production eligibility remains
-`insufficient-real-evaluation-data`.
+The synthetic end-to-end path is explicitly `synthetic-contract-research-only`.
+Its provisional fold winner proves the pipeline contract only and is never a
+production champion. The production/operator path accepts no historical rows,
+split configuration, candidate configuration, or caller-selected model. It
+resolves exactly one manually promoted active champion from the governance
+registry and strictly reloads its score-model and calibration artifacts.
 
 The primary v1 path is local historical modelling, not direct bookmaker
 acquisition:
 
 ```text
-historical results
--> deterministic data audit
--> leakage-safe chronological model tournament
--> reviewed joint-score champion
+verified upcoming-event artifact
+-> exact active champion registry resolution
+-> strict score-model and calibration reload
 -> bounded P(home goals, away goals)
 -> coherent market probabilities and fair odds
 -> optional strict current offered-quote import
@@ -109,15 +109,30 @@ without one real bookmaker-offered combined-selection price.
 There is no staking, login, bookmaker submission, or automatic placement path.
 Final placement remains manual.
 
+Current production proposal publication is also held by the economic evidence
+state: historical prices are closing-benchmark diagnostics, corrected real
+historical backtests are negative, the compatible historical market-only 1X2
+baseline materially outperforms the score model, and no prospective timestamped
+quote-to-result settlement cycle exists. These holds do not prevent champion
+fair-odds inference, but they do prevent placeable proposals.
+
 ## Commands and UI
 
 ```powershell
+python engine.py --export-upcoming-event-csv-template
+python engine.py --export-upcoming-event-json-template
+python engine.py --validate-upcoming-event-input upcoming.json --as-of-utc 2026-08-01T12:00:00.000000Z
+python engine.py --import-upcoming-events upcoming.json --as-of-utc 2026-08-01T12:00:00.000000Z --output-relative upcoming/batch-1
+python engine.py --verify-upcoming-event-artifact upcoming/batch-1 --checksum SHA256
+python engine.py --list-upcoming-events upcoming/batch-1
 python engine.py --config config/settings.toml --run-football-product request.json
+python engine.py --config config/settings.toml --run-synthetic-contract-football-product fixture.json
 python engine.py --football-market-capabilities
 python engine.py --export-current-quote-template
 ```
 
-The complete workflow publishes tournament, model, probability, quote,
-proposal, and Streamlit read-model artifacts below the configured exports
-root. Streamlit only reads the verified read model; it never trains, scrapes,
-imports, evaluates, or writes on rerun.
+Production publishes probability/fair-odds artifacts only when a compatible
+registered champion exists. With no champion it publishes a truthful
+`no-production-champion` read model. With no quote it publishes fair odds but no
+EV or proposal artifact. Streamlit only reads the verified read model; it never
+trains, scrapes, imports, evaluates, or writes on rerun.

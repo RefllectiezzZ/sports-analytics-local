@@ -50,10 +50,40 @@ def render_football_product(
 
     st.subheader("Model status")
     st.json(model)
+    operational_state = product.get("operational_state")
+    if operational_state == "no-production-champion":
+        st.warning(
+            "Operational evidence hold: no registered active production champion. "
+            "Probabilities, fair odds, opportunities, and proposals are unavailable."
+        )
+    elif operational_state == "economic-evidence-hold":
+        st.warning(
+            "Analytical opportunities are held from proposal publication because "
+            "prospective and economic evidence requirements are not satisfied."
+        )
+    elif operational_state == "fair-odds-only":
+        st.info(
+            "A verified active champion produced fair odds, but no current offered "
+            "quote exists. Opportunity analysis and proposals are unavailable."
+        )
+    elif product.get("mode") == "synthetic-contract-research-only":
+        st.warning("Synthetic contract proof: research-only and not authorized for placement.")
     st.info(
         "Fair odds are model estimates. Offered odds are real imported external "
         "prices. EV and price-based proposals exist only when offered odds are present."
     )
+    eligibility = product.get("eligibility")
+    if isinstance(eligibility, dict):
+        st.subheader("Production eligibility")
+        st.json(eligibility)
+    evidence = product.get("economic_evidence")
+    if isinstance(evidence, dict):
+        st.subheader("Economic evidence")
+        st.warning(
+            "The compatible historical market-only 1X2 baseline materially outperformed "
+            "the score model. Historical closing prices remain diagnostic only."
+        )
+        st.json(evidence)
 
     st.subheader("Market coverage")
     st.dataframe(capabilities, hide_index=True, use_container_width=True)

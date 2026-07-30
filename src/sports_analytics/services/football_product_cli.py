@@ -146,9 +146,16 @@ def run_football_product_document(
         "evaluation_provenance": published.tournament.evaluation_provenance.value,
         "production_eligibility_state": (published.tournament.production_eligibility_state),
         "promotion_state": published.tournament.promotion_state,
-        "accepted_single_count": sum(item.accepted for item in published.proposals.decisions),
-        "accumulator_count": len(published.proposals.accumulators),
+        "accepted_single_count": 0,
+        "research_only_proposal_count": sum(
+            item.accepted for item in published.proposals.decisions
+        ),
+        "placeable_manual_proposal_count": 0,
+        "accumulator_count": 0,
         "placement_state": "manual-only",
+        "execution_mode": "synthetic-contract-research-only",
+        "authorization_state": "not-authorized-for-placement",
+        "production_champion_state": "not-claimed",
         "bookmaker_network_access": False,
     }
 
