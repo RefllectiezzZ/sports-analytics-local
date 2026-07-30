@@ -128,12 +128,26 @@ eligibility policy. Historical closing prices and synthetic contract fixtures
 are diagnostic only: they cannot authorize a proposal. The present runtime has
 no qualifying prospective timestamped quote-to-result settlement population, so
 it remains held. A caller cannot supply an eligibility boolean or raw metrics;
-the product reloads a checksum-bound evidence artifact and independently checks
-its active-champion, competition, market, policy, freshness, and upstream
-lineage. Future qualifying evidence can enable a `placeable-manual-proposal`
-without a source-code change. Test fixtures prove this contract only, not real
-profitability. Placement stays manual-only; this product has no bookmaker access,
-staking, submission, or automatic betting path.
+the evaluator accepts only role-bound references to football probability,
+operator-current-quote, canonical-result, analytical-settlement, and operational
+monitoring artifacts. It invokes each artifact's real strict loader, reconciles
+the exact event/model/time populations, and recomputes counts, proper scores,
+market baselines, calibration, coverage, turnover, profit, ROI, and drawdown.
+Reload repeats that derivation, so rewriting and re-signing a summary metric
+cannot authorize production. Proposal and promotion eligibility are separate:
+proposal economics include realised return and drawdown, while promotion uses
+governance-compatible sample, calibration, proper-score, and all three market
+baseline comparisons. Future qualifying evidence can enable a
+`placeable-manual-proposal` without a source-code change. Test fixtures prove
+this contract only, not real profitability. Placement stays manual-only; this
+product has no bookmaker access, staking, submission, or automatic betting path.
+
+The production participant registry is likewise derived rather than asserted.
+Its build request contains only exact canonical football-ingestion snapshot
+references plus a revision and cutoff. The builder verifies each snapshot
+manifest and Parquet suite, then joins canonical participants, source
+participants, reconciliation rows, competition events, and validity. Production
+registry loads repeat the upstream verification and derivation.
 
 ## Commands and UI
 
@@ -144,6 +158,10 @@ python engine.py --validate-upcoming-event-input upcoming.json --as-of-utc 2026-
 python engine.py --import-upcoming-events upcoming.json --as-of-utc 2026-08-01T12:00:00.000000Z --output-relative upcoming/batch-1
 python engine.py --verify-upcoming-event-artifact upcoming/batch-1 --checksum SHA256
 python engine.py --list-upcoming-events upcoming/batch-1
+python engine.py --build-participant-registry participant-sources.json --output-relative participants/revision-1
+python engine.py --evaluate-football-economic-evidence economic-sources.json
+python engine.py --verify-football-economic-evidence economic/revision-1 --checksum SHA256
+python engine.py --inspect-football-economic-policy
 python engine.py --config config/settings.toml --run-football-product request.json
 python engine.py --config config/settings.toml --run-synthetic-contract-football-product fixture.json
 python engine.py --football-market-capabilities

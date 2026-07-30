@@ -119,6 +119,7 @@ def run_and_publish_production_football_product(
     exports_root: Path,
     model_root: Path,
     request: ProductionFootballProductRequest,
+    snapshots_root: Path | None = None,
 ) -> PublishedProductionFootballProduct:
     """Perform verified inference only; this function contains no training path."""
     base = _safe_relative(request.relative_root)
@@ -130,6 +131,7 @@ def run_and_publish_production_football_product(
     )
     participant_registry = load_participant_registry_artifact(
         root=exports_root,
+        source_root=exports_root if snapshots_root is None else snapshots_root,
         relative_directory=request.participant_registry_relative_directory,
         expected_artifact_id=request.participant_registry_artifact_id,
         expected_checksum=request.participant_registry_checksum_sha256,

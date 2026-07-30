@@ -1,10 +1,11 @@
-"""Fail-closed, immutable economic eligibility evidence for football proposals."""
+"""Typed, derived economic eligibility evidence for football proposals."""
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -13,20 +14,77 @@ from sports_analytics.artifacts import (
     load_analytical_artifact,
     write_analytical_artifact,
 )
+from sports_analytics.bookmakers.operator_quotes import (
+    OPERATOR_QUOTE_ARTIFACT_SCHEMA,
+    OPERATOR_QUOTE_ARTIFACT_TYPE,
+    load_operator_quote_artifact,
+)
 from sports_analytics.core.exceptions import ArtifactError, EvaluationError
 from sports_analytics.data.codec import format_utc_timestamp, parse_utc_timestamp
 from sports_analytics.data.types import JsonValue, validate_sha256_checksum
 from sports_analytics.models.identity import content_addressed_id
+from sports_analytics.monitoring.artifacts import (
+    MONITORING_ARTIFACT_TYPE,
+    load_monitoring_report,
+)
+from sports_analytics.monitoring.contracts import MONITORING_REPORT_SCHEMA_VERSION
+from sports_analytics.predictions.football_scores import (
+    FOOTBALL_PROBABILITY_ARTIFACT_SCHEMA,
+    FOOTBALL_PROBABILITY_ARTIFACT_TYPE,
+    load_football_probability_artifact,
+)
+from sports_analytics.results.snapshots import (
+    RESULT_SNAPSHOT_ARTIFACT_TYPE,
+    RESULT_SNAPSHOT_SCHEMA_VERSION,
+    load_result_snapshot,
+)
+from sports_analytics.settlement.service import (
+    SETTLEMENT_REPORT_SCHEMA_VERSION,
+    SETTLEMENT_REPORT_TYPE,
+    load_settlement_report,
+)
 from sports_analytics.sports.contracts import require_utc
 
 FOOTBALL_ECONOMIC_EVIDENCE_TYPE: Final[str] = "football-economic-evidence"
-FOOTBALL_ECONOMIC_EVIDENCE_SCHEMA: Final[str] = "football-economic-evidence-v1"
+FOOTBALL_ECONOMIC_EVIDENCE_SCHEMA: Final[str] = "football-economic-evidence-v2"
 FOOTBALL_ECONOMIC_POLICY_VERSION: Final[str] = "football-economic-eligibility-policy-v1"
-_MODES: Final[frozenset[str]] = frozenset(
-    {"prospective-operator", "historical-closing-benchmark", "synthetic-contract"}
+FOOTBALL_ECONOMIC_DERIVATION_VERSION: Final[str] = "football-economic-derivation-v2"
+FOOTBALL_ECONOMIC_REQUEST_SCHEMA: Final[str] = "football-economic-evaluation-request-v1"
+
+PREDICTIONS_ROLE: Final[str] = "predictions"
+QUOTES_ROLE: Final[str] = "quotes"
+RESULTS_ROLE: Final[str] = "results"
+SETTLEMENTS_ROLE: Final[str] = "settlements"
+MONITORING_ROLE: Final[str] = "monitoring"
+ECONOMIC_ROLES: Final[tuple[str, ...]] = (
+    PREDICTIONS_ROLE,
+    QUOTES_ROLE,
+    RESULTS_ROLE,
+    SETTLEMENTS_ROLE,
+    MONITORING_ROLE,
 )
-_REFERENCE_FIELDS: Final[frozenset[str]] = frozenset(
-    {"relative_directory", "artifact_id", "checksum_sha256", "artifact_type", "schema_version"}
+_ROLE_CONTRACTS: Final[dict[str, tuple[str, str]]] = {
+    PREDICTIONS_ROLE: (
+        FOOTBALL_PROBABILITY_ARTIFACT_TYPE,
+        FOOTBALL_PROBABILITY_ARTIFACT_SCHEMA,
+    ),
+    QUOTES_ROLE: (OPERATOR_QUOTE_ARTIFACT_TYPE, OPERATOR_QUOTE_ARTIFACT_SCHEMA),
+    RESULTS_ROLE: (RESULT_SNAPSHOT_ARTIFACT_TYPE, RESULT_SNAPSHOT_SCHEMA_VERSION),
+    SETTLEMENTS_ROLE: (SETTLEMENT_REPORT_TYPE, SETTLEMENT_REPORT_SCHEMA_VERSION),
+    MONITORING_ROLE: (MONITORING_ARTIFACT_TYPE, MONITORING_REPORT_SCHEMA_VERSION),
+}
+_REQUEST_REFERENCE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"relative_directory", "artifact_id", "checksum_sha256"}
+)
+_PUBLISHED_REFERENCE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "role",
+        "relative_directory",
+        "artifact_id",
+        "checksum_sha256",
+        "artifact_type",
+        "schema_version",
+    }
 )
 _EVIDENCE_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -71,10 +129,13 @@ _EVIDENCE_FIELDS: Final[frozenset[str]] = frozenset(
         "upstream_artifacts",
     }
 )
+_OUTCOMES: Final[tuple[str, ...]] = ("home", "draw", "away")
+_FINAL_SETTLEMENTS: Final[frozenset[str]] = frozenset({"win", "loss", "push", "void"})
 
 
 @dataclass(frozen=True, slots=True, order=True)
 class EconomicArtifactReference:
+    role: str
     relative_directory: str
     artifact_id: str
     checksum_sha256: str
@@ -83,12 +144,35 @@ class EconomicArtifactReference:
 
     def to_json(self) -> dict[str, JsonValue]:
         return {
+            "role": self.role,
             "relative_directory": self.relative_directory,
             "artifact_id": self.artifact_id,
             "checksum_sha256": self.checksum_sha256,
             "artifact_type": self.artifact_type,
             "schema_version": self.schema_version,
         }
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class EconomicArtifactRequestReference:
+    relative_directory: str
+    artifact_id: str
+    checksum_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicEvaluationRequest:
+    output_relative_directory: str
+    references: tuple[EconomicArtifactReference, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ChampionEconomicIdentity:
+    model_artifact_id: str
+    model_checksum_sha256: str
+    champion_role_revision: int
+    champion_transition_id: str | None
+    market_key: str = "football.score.full-match"
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +275,102 @@ class EconomicEligibilityDecision:
     hold_reasons: tuple[str, ...]
 
 
-def write_football_economic_evidence(
+def parse_economic_evaluation_request(raw: bytes) -> EconomicEvaluationRequest:
+    """Parse a role-bound request that contains no caller-authored metrics."""
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise EvaluationError("economic evaluation request JSON is malformed") from exc
+    if not isinstance(document, dict) or set(document) != {
+        "schema_version",
+        "output_relative_directory",
+        "upstream_artifacts",
+    }:
+        raise EvaluationError("economic evaluation request fields are not exact")
+    if document["schema_version"] != FOOTBALL_ECONOMIC_REQUEST_SCHEMA:
+        raise EvaluationError("economic evaluation request schema is unsupported")
+    output = _safe_relative(document["output_relative_directory"])
+    grouped = document["upstream_artifacts"]
+    if not isinstance(grouped, dict) or set(grouped) != set(ECONOMIC_ROLES):
+        raise EvaluationError("economic evaluation roles are not exact")
+    references: list[EconomicArtifactReference] = []
+    for role in ECONOMIC_ROLES:
+        raw_items = grouped[role]
+        if not isinstance(raw_items, list) or not raw_items:
+            raise EvaluationError(f"economic role {role} must contain references")
+        if role in {QUOTES_ROLE, SETTLEMENTS_ROLE, MONITORING_ROLE} and len(raw_items) != 1:
+            raise EvaluationError(f"economic role {role} must contain exactly one reference")
+        artifact_type, schema = _ROLE_CONTRACTS[role]
+        for raw_item in raw_items:
+            request_reference = _request_reference(raw_item)
+            references.append(
+                EconomicArtifactReference(
+                    role,
+                    request_reference.relative_directory,
+                    request_reference.artifact_id,
+                    request_reference.checksum_sha256,
+                    artifact_type,
+                    schema,
+                )
+            )
+    normalized = tuple(sorted(references))
+    if len(set(normalized)) != len(normalized):
+        raise EvaluationError("economic evaluation references are duplicated")
+    return EconomicEvaluationRequest(output, normalized)
+
+
+def derive_football_economic_evidence(
+    *,
+    root: Path,
+    relative_directory: str,
+    references: tuple[EconomicArtifactReference, ...],
+    champion: ChampionEconomicIdentity,
+    policy: FootballEconomicEligibilityPolicy,
+) -> AnalyticalArtifact:
+    """Load exact typed sources, recompute all metrics, and publish their lineage."""
+    payload = _derive_payload(
+        root=root,
+        references=references,
+        champion=champion,
+        policy_identity=(
+            policy.policy_id,
+            policy.policy_version,
+            policy.configuration_id,
+        ),
+    )
+    return _write_football_economic_evidence(
+        root=root,
+        relative_directory=relative_directory,
+        payload=payload,
+    )
+
+
+def inspect_economic_prediction_scope(
+    *,
+    root: Path,
+    references: tuple[EconomicArtifactReference, ...],
+) -> tuple[str, str]:
+    """Strictly load prediction references and return their one competition/model scope."""
+    _validate_reference_set(references)
+    competitions: set[str] = set()
+    models: set[str] = set()
+    for reference in references:
+        if reference.role != PREDICTIONS_ROLE:
+            continue
+        artifact, distribution = load_football_probability_artifact(
+            root=root,
+            relative_directory=reference.relative_directory,
+            expected_checksum=reference.checksum_sha256,
+        )
+        _require_artifact_identity(artifact, reference)
+        competitions.add(distribution.competition_id)
+        models.add(cast(str, cast(dict[str, Any], artifact.payload)["model_artifact_id"]))
+    if len(competitions) != 1 or len(models) != 1:
+        raise EvaluationError("economic prediction scope is inconsistent")
+    return next(iter(competitions)), next(iter(models))
+
+
+def _write_football_economic_evidence(
     *, root: Path, relative_directory: str, payload: dict[str, JsonValue]
 ) -> AnalyticalArtifact:
     checked = _validate_payload(payload)
@@ -211,6 +390,7 @@ def load_football_economic_evidence(
     expected_artifact_id: str | None = None,
     expected_checksum: str | None = None,
 ) -> FootballEconomicEvidence:
+    """Load evidence and independently re-derive every metric from typed sources."""
     artifact = load_analytical_artifact(
         root=root,
         relative_directory=relative_directory,
@@ -221,18 +401,29 @@ def load_football_economic_evidence(
     )
     try:
         payload = _validate_payload(cast(dict[str, JsonValue], artifact.payload))
-        for raw_reference in cast(list[object], payload["upstream_artifacts"]):
-            reference = _reference(raw_reference)
-            load_analytical_artifact(
-                root=root,
-                relative_directory=reference.relative_directory,
-                expected_artifact_type=reference.artifact_type,
-                expected_schema_version=reference.schema_version,
-                expected_artifact_id=reference.artifact_id,
-                expected_checksum=reference.checksum_sha256,
-            )
-    except (EvaluationError, TypeError) as exc:
+        references = tuple(
+            _published_reference(item) for item in cast(list[object], payload["upstream_artifacts"])
+        )
+        expected = _derive_payload(
+            root=root,
+            references=references,
+            champion=ChampionEconomicIdentity(
+                cast(str, payload["model_artifact_id"]),
+                cast(str, payload["model_checksum_sha256"]),
+                cast(int, payload["champion_role_revision"]),
+                cast(str | None, payload["champion_transition_id"]),
+                cast(str, payload["market_key"]),
+            ),
+            policy_identity=(
+                cast(str, payload["policy_id"]),
+                cast(str, payload["policy_version"]),
+                cast(str, payload["policy_configuration_id"]),
+            ),
+        )
+    except (EvaluationError, TypeError, ValueError, OSError) as exc:
         raise ArtifactError(str(exc)) from exc
+    if expected != payload:
+        raise ArtifactError("economic evidence metrics do not match verified upstream artifacts")
     return FootballEconomicEvidence(artifact=artifact, payload=payload)
 
 
@@ -249,130 +440,453 @@ def evaluate_football_economic_evidence(
     evaluated_at_utc: datetime,
 ) -> EconomicEligibilityDecision:
     p = cast(dict[str, Any], evidence.payload)
-    holds: list[str] = []
+    common: list[str] = []
+    proposal: list[str] = []
+    promotion: list[str] = []
     if p["evaluation_mode"] != "prospective-operator":
-        holds.append(
-            "historical-closing-only-evidence"
-            if p["evaluation_mode"] == "historical-closing-benchmark"
-            else "invalid-economic-evidence-provenance"
+        common.extend(
+            ("invalid-economic-evidence-provenance", "no-prospective-timestamped-evidence")
         )
-    if p["evaluation_mode"] != "prospective-operator":
-        holds.append("no-prospective-timestamped-evidence")
-    if p["evaluation_mode"] == "historical-closing-benchmark":
-        holds.extend(("negative-historical-closing-backtest", "market-baseline-materially-better"))
     if (
         p["model_artifact_id"] != model_artifact_id
         or p["model_checksum_sha256"] != model_checksum_sha256
-    ):
-        holds.append("economic-evidence-model-lineage-mismatch")
-    if p["competition_id"] != competition_id:
-        holds.append("economic-evidence-competition-mismatch")
-    if p["market_key"] != market_key or p["sport_code"] != "football":
-        holds.append("economic-evidence-market-mismatch")
-    if (
-        p["champion_role_revision"] != champion_role_revision
+        or p["champion_role_revision"] != champion_role_revision
         or p["champion_transition_id"] != champion_transition_id
     ):
-        holds.append("economic-evidence-model-lineage-mismatch")
+        common.append("economic-evidence-model-lineage-mismatch")
+    if p["competition_id"] != competition_id:
+        common.append("economic-evidence-competition-mismatch")
+    if p["market_key"] != market_key or p["sport_code"] != "football":
+        common.append("economic-evidence-market-mismatch")
     cutoff = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
     end = _utc(cast(str, p["evidence_window_end_utc"]), "evidence_window_end_utc")
     if cutoff - end > policy.maximum_evidence_age:
-        holds.append("economic-evidence-stale")
+        common.append("economic-evidence-stale")
     if (
         p["policy_id"] != policy.policy_id
         or p["policy_version"] != policy.policy_version
         or p["policy_configuration_id"] != policy.configuration_id
     ):
-        holds.append("invalid-economic-evidence-provenance")
+        common.append("invalid-economic-evidence-provenance")
     if p["prospective_prediction_count"] < policy.minimum_prospective_prediction_count:
-        holds.append("insufficient-prospective-sample")
+        promotion.append("insufficient-prospective-sample")
     if p["timestamped_quote_count"] < policy.minimum_timestamped_quote_count:
-        holds.append("insufficient-timestamped-quote-sample")
+        proposal.append("insufficient-timestamped-quote-sample")
     if p["completed_settlement_count"] < policy.minimum_completed_settlement_count:
-        holds.extend(
+        proposal.extend(
             ("insufficient-completed-settlement-sample", "no-prospective-settlement-cycle")
         )
     if p["settlement_coverage"] < policy.minimum_settlement_coverage:
-        holds.append("insufficient-settlement-coverage")
+        proposal.append("insufficient-settlement-coverage")
     if p["unresolved_settlement_count"] > policy.maximum_unresolved_settlement_count:
-        holds.append("unresolved-settlements-present")
+        proposal.append("unresolved-settlements-present")
     if p["stale_or_invalid_quote_count"] > policy.maximum_stale_or_invalid_quote_count:
-        holds.append("stale-or-invalid-quotes-present")
+        proposal.append("stale-or-invalid-quotes-present")
     if p["calibration_error"] > policy.maximum_calibration_error:
-        holds.append("calibration-threshold-failed")
+        promotion.append("calibration-threshold-failed")
     if (
         p["log_loss"] > policy.maximum_log_loss
         or p["multiclass_brier_score"] > policy.maximum_brier_score
-        or (
-            p["ranked_probability_score"] is not None
-            and p["ranked_probability_score"] > policy.maximum_rps
-        )
+        or p["ranked_probability_score"] > policy.maximum_rps
     ):
-        holds.append("proper-score-threshold-failed")
-    baseline = p["market_baseline_log_loss"]
-    if (
-        baseline is not None
-        and p["log_loss"] > baseline + policy.maximum_market_baseline_degradation
+        promotion.append("proper-score-threshold-failed")
+    baseline_pairs = (
+        ("log_loss", "market_baseline_log_loss"),
+        ("multiclass_brier_score", "market_baseline_brier_score"),
+        ("ranked_probability_score", "market_baseline_rps"),
+    )
+    if any(
+        p[baseline] is None or p[metric] > p[baseline] + policy.maximum_market_baseline_degradation
+        for metric, baseline in baseline_pairs
     ):
-        holds.append("market-baseline-threshold-failed")
+        promotion.append("market-baseline-threshold-failed")
     if policy.require_positive_roi and p["realised_roi"] < policy.minimum_realised_roi:
-        holds.append("economic-return-threshold-failed")
+        proposal.append("economic-return-threshold-failed")
     if p["maximum_drawdown"] > policy.maximum_drawdown:
-        holds.append("drawdown-threshold-failed")
-    canonical = tuple(sorted(set(holds)))
-    proposal = not canonical
-    return EconomicEligibilityDecision(True, proposal, proposal, canonical)
+        proposal.append("drawdown-threshold-failed")
+    proposal_holds = tuple(sorted(set(common + proposal + promotion)))
+    promotion_holds = tuple(sorted(set(common + promotion)))
+    all_holds = tuple(sorted(set(proposal_holds + promotion_holds)))
+    return EconomicEligibilityDecision(
+        opportunity_analysis_eligible=not common,
+        bet_proposal_eligible=not proposal_holds,
+        promotion_eligible=not promotion_holds,
+        hold_reasons=all_holds,
+    )
+
+
+def _derive_payload(
+    *,
+    root: Path,
+    references: tuple[EconomicArtifactReference, ...],
+    champion: ChampionEconomicIdentity,
+    policy_identity: tuple[str, str, str],
+) -> dict[str, JsonValue]:
+    _validate_reference_set(references)
+    predictions: dict[str, tuple[tuple[float, float, float], date]] = {}
+    competition_ids: set[str] = set()
+    model_ids: set[str] = set()
+    quote_probabilities: dict[str, tuple[float, float, float]] = {}
+    quote_times: list[datetime] = []
+    quote_times_by_event: dict[str, list[datetime]] = {}
+    result_outcomes: dict[str, int] = {}
+    result_times: dict[str, datetime] = {}
+    result_snapshot_evidence: dict[str, tuple[str, str]] = {}
+    settlement_rows: list[dict[str, JsonValue]] = []
+    settlement_as_of: datetime | None = None
+    monitoring_start: datetime | None = None
+    monitoring_end: datetime | None = None
+    monitoring_as_of: datetime | None = None
+    monitoring_evidence: set[tuple[str, str]] = set()
+
+    for reference in references:
+        if reference.role == PREDICTIONS_ROLE:
+            artifact, distribution = load_football_probability_artifact(
+                root=root,
+                relative_directory=reference.relative_directory,
+                expected_checksum=reference.checksum_sha256,
+            )
+            _require_artifact_identity(artifact, reference)
+            payload = cast(dict[str, Any], artifact.payload)
+            event_id = cast(str, payload["canonical_event_id"])
+            if event_id in predictions:
+                raise EvaluationError("economic prediction event is duplicated")
+            predictions[event_id] = (
+                _market_probabilities(payload["markets"]),
+                distribution.prediction_cutoff,
+            )
+            competition_ids.add(distribution.competition_id)
+            model_ids.add(cast(str, payload["model_artifact_id"]))
+        elif reference.role == QUOTES_ROLE:
+            artifact = load_operator_quote_artifact(
+                root=root,
+                relative_directory=reference.relative_directory,
+                expected_checksum=reference.checksum_sha256,
+            )
+            _require_artifact_identity(artifact, reference)
+            rows = cast(list[dict[str, Any]], cast(dict[str, Any], artifact.payload)["quotes"])
+            grouped: dict[str, dict[str, float]] = {}
+            for row in rows:
+                if (
+                    row["sport_code"] != "football"
+                    or row["market_family"] != "match-result"
+                    or row["market_period"] != "full-match"
+                ):
+                    continue
+                event_id = cast(str, row["canonical_event_id"])
+                outcome = cast(str, row["outcome_key"])
+                if outcome not in _OUTCOMES or outcome in grouped.setdefault(event_id, {}):
+                    raise EvaluationError("economic quote population is ambiguous")
+                grouped[event_id][outcome] = 1.0 / float(cast(str, row["offered_decimal_odds"]))
+                observed = _utc(cast(str, row["observed_at_utc"]), "observed_at_utc")
+                quote_times.append(observed)
+                quote_times_by_event.setdefault(event_id, []).append(observed)
+            for event_id, values in grouped.items():
+                if set(values) != set(_OUTCOMES):
+                    raise EvaluationError("economic quote market is incomplete")
+                total = sum(values.values())
+                quote_probabilities[event_id] = cast(
+                    tuple[float, float, float],
+                    tuple(values[outcome] / total for outcome in _OUTCOMES),
+                )
+        elif reference.role == RESULTS_ROLE:
+            generic = load_analytical_artifact(
+                root=root,
+                relative_directory=reference.relative_directory,
+                expected_artifact_type=RESULT_SNAPSHOT_ARTIFACT_TYPE,
+                expected_schema_version=RESULT_SNAPSHOT_SCHEMA_VERSION,
+                expected_artifact_id=reference.artifact_id,
+                expected_checksum=reference.checksum_sha256,
+            )
+            _require_artifact_identity(generic, reference)
+            snapshot = load_result_snapshot(
+                root=root,
+                relative_directory=reference.relative_directory,
+                expected_checksum=reference.checksum_sha256,
+            )
+            result = snapshot.result
+            result_snapshot_evidence[snapshot.snapshot_id] = (
+                snapshot.checksum_sha256,
+                result.canonical_result_id,
+            )
+            if result.sport_code != "football" or result.result_timestamp_utc is None:
+                raise EvaluationError("economic result is not a completed football result")
+            roles = {item.role: item.score for item in result.participant_results}
+            if set(roles) != {"home", "away"}:
+                raise EvaluationError("economic result participant roles are incomplete")
+            result_index = (
+                0 if roles["home"] > roles["away"] else 2 if roles["away"] > roles["home"] else 1
+            )
+            if result.canonical_event_id in result_outcomes:
+                raise EvaluationError("economic result event is duplicated")
+            result_outcomes[result.canonical_event_id] = result_index
+            result_times[result.canonical_event_id] = result.result_timestamp_utc
+        elif reference.role == SETTLEMENTS_ROLE:
+            report = load_settlement_report(
+                root=root,
+                relative_directory=reference.relative_directory,
+                expected_checksum=reference.checksum_sha256,
+            )
+            if report.artifact is None:
+                raise EvaluationError("economic settlement artifact is unavailable")
+            _require_artifact_identity(report.artifact, reference)
+            settlement_rows = cast(
+                list[dict[str, JsonValue]],
+                cast(dict[str, JsonValue], report.artifact.payload)["settlements"],
+            )
+            settlement_as_of = report.as_of_utc
+        elif reference.role == MONITORING_ROLE:
+            verified = load_monitoring_report(
+                root=root,
+                relative_directory=reference.relative_directory,
+                expected_checksum=reference.checksum_sha256,
+            )
+            _require_artifact_identity(verified.artifact, reference)
+            monitoring_start = verified.report.window_start_utc
+            monitoring_end = verified.report.window_end_utc
+            monitoring_as_of = verified.report.as_of_utc
+            monitoring_evidence = {
+                (item.evidence_id, item.checksum_sha256) for item in verified.report.evidence
+            }
+
+    if len(competition_ids) != 1 or model_ids != {champion.model_artifact_id}:
+        raise EvaluationError("economic prediction model or competition lineage is inconsistent")
+    prediction_events = set(predictions)
+    if (
+        not prediction_events
+        or set(quote_probabilities) != prediction_events
+        or set(result_outcomes) != prediction_events
+    ):
+        raise EvaluationError("economic event populations are inconsistent")
+    settlement_events: set[str] = set()
+    completed = unresolved = 0
+    turnover = profit = 0.0
+    cumulative = peak = maximum_drawdown_units = 0.0
+    for row in settlement_rows:
+        events = cast(list[str], row["canonical_event_ids"])
+        if len(events) != 1:
+            raise EvaluationError("economic settlement is not an exact single-event population")
+        event_id = events[0]
+        if event_id in settlement_events:
+            raise EvaluationError("economic settlement event is duplicated")
+        settlement_events.add(event_id)
+        evidence_rows = cast(list[dict[str, JsonValue]], row["evidence"])
+        if len(evidence_rows) != 1:
+            raise EvaluationError("economic settlement result evidence is incomplete")
+        for evidence in evidence_rows:
+            snapshot_evidence = result_snapshot_evidence.get(
+                cast(str, evidence["result_snapshot_id"])
+            )
+            if evidence["canonical_event_id"] != event_id or snapshot_evidence != (
+                evidence["result_checksum_sha256"],
+                evidence["canonical_result_id"],
+            ):
+                raise EvaluationError("economic settlement result lineage is inconsistent")
+        status = cast(str, row["status"])
+        if status in _FINAL_SETTLEMENTS:
+            completed += 1
+            stake = float(cast(str, row["stake_units"]))
+            row_profit = float(cast(str, row["profit_units"]))
+            turnover += stake
+            profit += row_profit
+            cumulative += row_profit
+            peak = max(peak, cumulative)
+            maximum_drawdown_units = max(maximum_drawdown_units, peak - cumulative)
+        else:
+            unresolved += 1
+    if settlement_events != prediction_events:
+        raise EvaluationError("economic settlement population is inconsistent")
+    settlement_reference = next(item for item in references if item.role == SETTLEMENTS_ROLE)
+    if (
+        settlement_reference.artifact_id,
+        settlement_reference.checksum_sha256,
+    ) not in monitoring_evidence:
+        raise EvaluationError("economic monitoring lineage omits settlement evidence")
+    if not quote_times or settlement_as_of is None or monitoring_start is None:
+        raise EvaluationError("economic evidence is incomplete")
+    assert monitoring_end is not None and monitoring_as_of is not None
+    if any(
+        datetime.combine(prediction_date, time.min, tzinfo=UTC) > min(quote_times)
+        for _, prediction_date in predictions.values()
+    ):
+        raise EvaluationError("economic predictions are not prospective to quotes")
+    if any(
+        quote_time >= result_times[event_id]
+        for event_id in prediction_events
+        for quote_time in quote_times_by_event[event_id]
+    ):
+        raise EvaluationError("economic quote timing is incompatible with results")
+    if settlement_as_of < max(result_times.values()) or monitoring_as_of < settlement_as_of:
+        raise EvaluationError("economic settlement or monitoring timing is incompatible")
+    if monitoring_start > min(quote_times) or monitoring_end < max(result_times.values()):
+        raise EvaluationError("economic monitoring window excludes the evidence population")
+
+    actual_vectors = [predictions[event][0] for event in sorted(prediction_events)]
+    baseline_vectors = [quote_probabilities[event] for event in sorted(prediction_events)]
+    outcomes = [result_outcomes[event] for event in sorted(prediction_events)]
+    log_loss, brier, rps = _proper_scores(actual_vectors, outcomes)
+    baseline_log_loss, baseline_brier, baseline_rps = _proper_scores(baseline_vectors, outcomes)
+    calibration = sum(
+        abs(max(vector) - (1.0 if vector.index(max(vector)) == outcome else 0.0))
+        for vector, outcome in zip(actual_vectors, outcomes, strict=True)
+    ) / len(outcomes)
+    coverage = completed / len(prediction_events)
+    maximum_drawdown = 0.0 if turnover == 0 else maximum_drawdown_units / turnover
+    evaluated = monitoring_as_of
+    competition_id = next(iter(competition_ids))
+    policy_id, policy_version, policy_configuration_id = policy_identity
+    return {
+        "sport_code": "football",
+        "competition_id": competition_id,
+        "market_key": champion.market_key,
+        "model_artifact_id": champion.model_artifact_id,
+        "model_checksum_sha256": champion.model_checksum_sha256,
+        "champion_role_revision": champion.champion_role_revision,
+        "champion_transition_id": champion.champion_transition_id,
+        "evaluation_mode": "prospective-operator",
+        "evidence_window_start_utc": format_utc_timestamp(monitoring_start),
+        "evidence_window_end_utc": format_utc_timestamp(monitoring_end),
+        "evaluated_at_utc": format_utc_timestamp(evaluated),
+        "prediction_population_id": _population_id(PREDICTIONS_ROLE, references),
+        "quote_population_id": _population_id(QUOTES_ROLE, references),
+        "result_population_id": _population_id(RESULTS_ROLE, references),
+        "settlement_population_id": _population_id(SETTLEMENTS_ROLE, references),
+        "monitoring_population_id": _population_id(MONITORING_ROLE, references),
+        "policy_id": policy_id,
+        "policy_version": policy_version,
+        "policy_configuration_id": policy_configuration_id,
+        "prospective_prediction_count": len(predictions),
+        "timestamped_quote_count": len(quote_times),
+        "completed_settlement_count": completed,
+        "settlement_coverage": coverage,
+        "log_loss": log_loss,
+        "multiclass_brier_score": brier,
+        "ranked_probability_score": rps,
+        "calibration_error": calibration,
+        "market_baseline_log_loss": baseline_log_loss,
+        "market_baseline_brier_score": baseline_brier,
+        "market_baseline_rps": baseline_rps,
+        "realised_turnover": turnover,
+        "realised_profit_loss": profit,
+        "realised_roi": 0.0 if turnover == 0 else profit / turnover,
+        "maximum_drawdown": maximum_drawdown,
+        "unresolved_settlement_count": unresolved,
+        "stale_or_invalid_quote_count": 0,
+        "source_classification": "verified-prospective-operator-artifacts",
+        "evidence_derivation_version": FOOTBALL_ECONOMIC_DERIVATION_VERSION,
+        "upstream_artifacts": [item.to_json() for item in references],
+    }
+
+
+def _market_probabilities(raw: object) -> tuple[float, float, float]:
+    if not isinstance(raw, list):
+        raise EvaluationError("football probability markets are invalid")
+    values: dict[str, float] = {}
+    for item in raw:
+        if (
+            isinstance(item, dict)
+            and item.get("market_family") == "match-result"
+            and item.get("market_key") == "football.match-result.1x2.full-match"
+        ):
+            outcome = item.get("outcome_key")
+            if outcome in values or outcome not in _OUTCOMES:
+                raise EvaluationError("football 1X2 probability outcomes are ambiguous")
+            values[cast(str, outcome)] = float(cast(float, item.get("probability")))
+    if set(values) != set(_OUTCOMES):
+        raise EvaluationError("football 1X2 probability outcomes are incomplete")
+    return cast(tuple[float, float, float], tuple(values[item] for item in _OUTCOMES))
+
+
+def _proper_scores(
+    vectors: list[tuple[float, float, float]], outcomes: list[int]
+) -> tuple[float, float, float]:
+    count = len(outcomes)
+    log_loss = (
+        sum(
+            -math.log(max(vector[outcome], 1e-15))
+            for vector, outcome in zip(vectors, outcomes, strict=True)
+        )
+        / count
+    )
+    brier = (
+        sum(
+            sum(
+                (probability - (1.0 if index == outcome else 0.0)) ** 2
+                for index, probability in enumerate(vector)
+            )
+            for vector, outcome in zip(vectors, outcomes, strict=True)
+        )
+        / count
+    )
+    rps = (
+        sum(
+            sum(
+                (sum(vector[: index + 1]) - (1.0 if outcome <= index else 0.0)) ** 2
+                for index in range(2)
+            )
+            / 2.0
+            for vector, outcome in zip(vectors, outcomes, strict=True)
+        )
+        / count
+    )
+    return log_loss, brier, rps
+
+
+def _population_id(role: str, references: tuple[EconomicArtifactReference, ...]) -> str:
+    return content_addressed_id(
+        identity_type=f"football-economic-{role}-population-v1",
+        payload={"artifacts": [item.to_json() for item in references if item.role == role]},
+    )
+
+
+def _require_artifact_identity(
+    artifact: AnalyticalArtifact, reference: EconomicArtifactReference
+) -> None:
+    expected_type, expected_schema = _ROLE_CONTRACTS[reference.role]
+    if (
+        artifact.artifact_id != reference.artifact_id
+        or artifact.checksum_sha256 != reference.checksum_sha256
+        or artifact.artifact_type != expected_type
+        or artifact.schema_version != expected_schema
+    ):
+        raise EvaluationError("economic upstream artifact identity is inconsistent")
+
+
+def _validate_reference_set(
+    references: tuple[EconomicArtifactReference, ...],
+) -> None:
+    if not references or references != tuple(sorted(references)):
+        raise EvaluationError("economic upstream references are not canonical")
+    roles = {item.role for item in references}
+    if roles != set(ECONOMIC_ROLES):
+        raise EvaluationError("economic upstream roles are incomplete")
+    for role in (QUOTES_ROLE, SETTLEMENTS_ROLE, MONITORING_ROLE):
+        if sum(item.role == role for item in references) != 1:
+            raise EvaluationError(f"economic role {role} must be unique")
+    for reference in references:
+        expected = _ROLE_CONTRACTS.get(reference.role)
+        if expected != (reference.artifact_type, reference.schema_version):
+            raise EvaluationError("economic upstream role contract is unsupported")
 
 
 def _validate_payload(value: object) -> dict[str, JsonValue]:
     if not isinstance(value, dict) or set(value) != _EVIDENCE_FIELDS:
         raise EvaluationError("economic evidence fields are not exact")
     p = cast(dict[str, Any], value)
-    for name in (
-        "sport_code",
-        "competition_id",
-        "market_key",
-        "model_artifact_id",
-        "model_checksum_sha256",
-        "prediction_population_id",
-        "quote_population_id",
-        "result_population_id",
-        "settlement_population_id",
-        "monitoring_population_id",
-        "policy_id",
-        "policy_version",
-        "policy_configuration_id",
-        "source_classification",
-        "evidence_derivation_version",
-    ):
-        if (
-            type(p[name]) is not str
-            or not p[name]
-            or p[name] != p[name].strip()
-            or any(
-                x in p[name].lower()
-                for x in ("http", "cookie", "token", "selector", "<", ">", "\\\\")
-            )
-        ):
-            raise EvaluationError("economic evidence text is invalid")
-    if p["sport_code"] != "football" or p["evaluation_mode"] not in _MODES:
-        raise EvaluationError("economic evidence scope or mode is invalid")
-    for name in ("model_checksum_sha256",):
-        try:
-            validate_sha256_checksum(cast(str, p[name]))
-        except Exception as exc:
-            raise EvaluationError("economic evidence checksum is invalid") from exc
     if (
-        type(p["champion_role_revision"]) is not int
-        or p["champion_role_revision"] < 0
-        or (
-            p["champion_transition_id"] is not None and type(p["champion_transition_id"]) is not str
-        )
+        p["sport_code"] != "football"
+        or p["evaluation_mode"] != "prospective-operator"
+        or p["source_classification"] != "verified-prospective-operator-artifacts"
+        or p["evidence_derivation_version"] != FOOTBALL_ECONOMIC_DERIVATION_VERSION
     ):
-        raise EvaluationError("economic evidence champion lineage is invalid")
+        raise EvaluationError("economic evidence provenance is invalid")
+    try:
+        validate_sha256_checksum(cast(str, p["model_checksum_sha256"]))
+    except Exception as exc:
+        raise EvaluationError("economic evidence checksum is invalid") from exc
     start, end, evaluated = (
-        _utc(cast(str, p[n]), n)
-        for n in ("evidence_window_start_utc", "evidence_window_end_utc", "evaluated_at_utc")
+        _utc(cast(str, p[name]), name)
+        for name in ("evidence_window_start_utc", "evidence_window_end_utc", "evaluated_at_utc")
     )
     if not start < end <= evaluated:
         raise EvaluationError("economic evidence window is invalid")
@@ -383,71 +897,80 @@ def _validate_payload(value: object) -> dict[str, JsonValue]:
         "unresolved_settlement_count",
         "stale_or_invalid_quote_count",
     )
-    if any(type(p[n]) is not int or p[n] < 0 for n in counts):
+    if any(type(p[name]) is not int or p[name] < 0 for name in counts):
         raise EvaluationError("economic evidence counts are invalid")
-    if p["completed_settlement_count"] + p["unresolved_settlement_count"] > min(
-        p["prospective_prediction_count"], p["timestamped_quote_count"]
-    ):
-        raise EvaluationError("economic evidence settlement populations are inconsistent")
-    numbers = (
+    for name in (
         "settlement_coverage",
         "log_loss",
         "multiclass_brier_score",
+        "ranked_probability_score",
         "calibration_error",
+        "market_baseline_log_loss",
+        "market_baseline_brier_score",
+        "market_baseline_rps",
         "realised_turnover",
         "realised_profit_loss",
         "realised_roi",
         "maximum_drawdown",
-    )
-    for n in numbers:
-        if type(p[n]) not in (int, float) or not math.isfinite(float(p[n])):
-            raise EvaluationError("economic evidence metric is invalid")
-    if not 0 <= p["settlement_coverage"] <= 1 or p["settlement_coverage"] != p[
-        "completed_settlement_count"
-    ] / min(p["prospective_prediction_count"], p["timestamped_quote_count"]):
-        raise EvaluationError("economic evidence coverage is inconsistent")
-    for n in (
-        "ranked_probability_score",
-        "market_baseline_log_loss",
-        "market_baseline_brier_score",
-        "market_baseline_rps",
     ):
-        if p[n] is not None and (type(p[n]) not in (int, float) or not math.isfinite(float(p[n]))):
-            raise EvaluationError("economic evidence optional metric is invalid")
+        if type(p[name]) not in (int, float) or not math.isfinite(float(p[name])):
+            raise EvaluationError("economic evidence metric is invalid")
+    if not 0 <= p["settlement_coverage"] <= 1:
+        raise EvaluationError("economic evidence coverage is invalid")
     refs = p["upstream_artifacts"]
-    if not isinstance(refs, list) or not refs:
+    if not isinstance(refs, list):
         raise EvaluationError("economic evidence upstream references are invalid")
-    normalized = [_reference(item) for item in refs]
-    if normalized != sorted(normalized) or len(set(normalized)) != len(normalized):
-        raise EvaluationError("economic evidence upstream references are not canonical")
+    normalized = tuple(_published_reference(item) for item in refs)
+    _validate_reference_set(normalized)
     return cast(dict[str, JsonValue], p)
 
 
-def _reference(value: object) -> EconomicArtifactReference:
-    if not isinstance(value, dict) or set(value) != _REFERENCE_FIELDS:
-        raise EvaluationError("economic evidence reference fields are not exact")
-    vals = [
-        value[n]
-        for n in (
-            "relative_directory",
-            "artifact_id",
-            "checksum_sha256",
-            "artifact_type",
-            "schema_version",
-        )
-    ]
-    if (
-        any(type(x) is not str or not x or x != x.strip() for x in vals)
-        or ".." in cast(str, vals[0]).split("/")
-        or cast(str, vals[0]).startswith("/")
-        or "\\" in cast(str, vals[0])
-    ):
-        raise EvaluationError("economic evidence reference is unsafe")
+def _request_reference(value: object) -> EconomicArtifactRequestReference:
+    if not isinstance(value, dict) or set(value) != _REQUEST_REFERENCE_FIELDS:
+        raise EvaluationError("economic request reference fields are not exact")
+    relative = _safe_relative(value["relative_directory"])
+    artifact_id = _safe_text(value["artifact_id"], "artifact_id")
+    checksum = _safe_text(value["checksum_sha256"], "checksum_sha256")
     try:
-        validate_sha256_checksum(cast(str, vals[2]))
+        validate_sha256_checksum(checksum)
+    except Exception as exc:
+        raise EvaluationError("economic request reference checksum is invalid") from exc
+    return EconomicArtifactRequestReference(relative, artifact_id, checksum)
+
+
+def _published_reference(value: object) -> EconomicArtifactReference:
+    if not isinstance(value, dict) or set(value) != _PUBLISHED_REFERENCE_FIELDS:
+        raise EvaluationError("economic evidence reference fields are not exact")
+    role = _safe_text(value["role"], "role")
+    relative = _safe_relative(value["relative_directory"])
+    artifact_id = _safe_text(value["artifact_id"], "artifact_id")
+    checksum = _safe_text(value["checksum_sha256"], "checksum_sha256")
+    artifact_type = _safe_text(value["artifact_type"], "artifact_type")
+    schema = _safe_text(value["schema_version"], "schema_version")
+    try:
+        validate_sha256_checksum(checksum)
     except Exception as exc:
         raise EvaluationError("economic evidence reference checksum is invalid") from exc
-    return EconomicArtifactReference(*cast(tuple[str, str, str, str, str], tuple(vals)))
+    reference = EconomicArtifactReference(
+        role, relative, artifact_id, checksum, artifact_type, schema
+    )
+    expected = _ROLE_CONTRACTS.get(role)
+    if expected != (artifact_type, schema):
+        raise EvaluationError("economic evidence reference role contract is unsupported")
+    return reference
+
+
+def _safe_relative(value: object) -> str:
+    text = _safe_text(value, "relative_directory")
+    if text.startswith("/") or "\\" in text or ".." in text.split("/"):
+        raise EvaluationError("economic evidence reference is unsafe")
+    return text
+
+
+def _safe_text(value: object, field: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise EvaluationError(f"economic {field} is invalid")
+    return value
 
 
 def _utc(value: str, field: str) -> datetime:

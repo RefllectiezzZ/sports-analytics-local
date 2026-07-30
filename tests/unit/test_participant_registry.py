@@ -1,133 +1,229 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
+import pyarrow as pa
 import pytest
 
-from sports_analytics.artifacts import build_analytical_artifact_document
-from sports_analytics.core.exceptions import ArtifactError, ConfigurationError
-from sports_analytics.data.codec import dumps_canonical_json
+from sports_analytics.core.exceptions import (
+    ArtifactError,
+    ConfigurationError,
+    SnapshotVerificationError,
+)
+from sports_analytics.snapshots.writer import prepare_snapshot_directory
 from sports_analytics.sports.football.participant_registry import (
-    PARTICIPANT_REGISTRY_ARTIFACT_TYPE,
-    PARTICIPANT_REGISTRY_SCHEMA,
+    PARTICIPANT_REGISTRY_INPUT_SCHEMA,
+    PARTICIPANT_SOURCE_ROLE,
+    ParticipantSourceReference,
+    derive_participant_registry_artifact,
     load_participant_registry_artifact,
     parse_participant_registry_json,
     participant_registry_json_template,
-    write_participant_registry_artifact,
+)
+from tests.helpers_snapshots import (
+    build_spec,
+    build_tables,
+    build_verified_participant_registry,
+    database_path,
+    publication_service,
 )
 
-
-def _document():
-    document = json.loads(participant_registry_json_template())
-    second = dict(document["participants"][0])
-    second["canonical_participant_id"] = "22222222-2222-5222-8222-222222222222"
-    second["canonical_display_name"] = "Second Team"
-    second["source_participant_id"] = "verified-team-2"
-    document["participants"].append(second)
-    return document
+NOW = datetime(2026, 8, 1, 12, tzinfo=UTC)
 
 
-def _parsed(document=None):
-    return parse_participant_registry_json(dumps_canonical_json(document or _document()).encode())
-
-
-def test_registry_template_build_reload_and_lookup(tmp_path) -> None:
-    revision, generated, evaluated, participants = _parsed()
-    artifact = write_participant_registry_artifact(
-        root=tmp_path,
-        relative_directory="registry",
-        registry_revision=revision,
-        generated_at_utc=generated,
-        evaluated_at_utc=evaluated,
-        participants=participants,
+def _published_reference(tmp_path, *, mutation=None) -> ParticipantSourceReference:
+    content = (
+        b"Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
+        b"P1,12/08/2023,Northbridge FC,Southport Athletic,2,1,H\n"
     )
+    spec, bundle = build_spec(
+        tmp_path,
+        competition_id="prt-primeira-liga",
+        content=content,
+        raw_subdirectory=f"raw-{uuid.uuid4()}",
+    )
+    tables = build_tables(bundle)
+    if mutation is not None:
+        dataset, transform = mutation
+        rows = tables[dataset].to_pylist()
+        transform(rows)
+        tables[dataset] = pa.Table.from_pylist(rows, schema=tables[dataset].schema)
+    snapshot_id = str(uuid.uuid4())
+    prepared = prepare_snapshot_directory(
+        snapshots_directory=tmp_path,
+        spec=spec,
+        tables=tables,
+        snapshot_id=snapshot_id,
+    )
+    published = publication_service(database_path(tmp_path), tmp_path).publish_or_reuse(
+        prepared, actor="test"
+    )
+    relative = published.snapshot_relative_path.rsplit("/", 1)[0]
+    return ParticipantSourceReference(
+        PARTICIPANT_SOURCE_ROLE,
+        relative,
+        published.snapshot_id,
+        published.manifest_checksum_sha256,
+        published.snapshot_type,
+        published.schema_version,
+    )
+
+
+def _derive(tmp_path, reference, relative="registry"):
+    return derive_participant_registry_artifact(
+        root=tmp_path,
+        source_root=tmp_path,
+        relative_directory=relative,
+        registry_revision="registry-1",
+        evaluated_at_utc=NOW,
+        source_artifacts=(reference,),
+    )
+
+
+def test_reference_only_template_rejects_self_attested_participant_rows() -> None:
+    document = json.loads(participant_registry_json_template())
+    assert document["schema_version"] == PARTICIPANT_REGISTRY_INPUT_SCHEMA
+    assert set(document) == {
+        "schema_version",
+        "registry_revision",
+        "evaluated_at_utc",
+        "source_artifacts",
+    }
+    document["participants"] = [{"canonical_participant_id": str(uuid.uuid4())}]
+    with pytest.raises(ConfigurationError, match="fields are not exact"):
+        parse_participant_registry_json(json.dumps(document).encode())
+
+
+def test_valid_registry_is_derived_and_reverified_from_typed_snapshot(tmp_path) -> None:
+    reference = _published_reference(tmp_path)
+    artifact = _derive(tmp_path, reference)
     registry = load_participant_registry_artifact(
         root=tmp_path,
+        source_root=tmp_path,
         relative_directory="registry",
         expected_artifact_id=artifact.artifact_id,
         expected_checksum=artifact.checksum_sha256,
     )
-    assert registry.participant(participants[0].canonical_participant_id) == participants[0]
-    assert len(registry.participants_for_competition("prt-primeira-liga")) == 2
+    assert len(registry.participants) == 2
+    assert {item.participant_kind for item in registry.participants} == {"club"}
+    assert {item.competition_ids for item in registry.participants} == {("prt-primeira-liga",)}
+    assert registry.source_artifacts == (reference,)
 
 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("sport_code", "tennis", "football"),
-        ("participant_kind", "player", "team"),
-        ("competition_ids", ["unknown-league"], "not registered"),
-        ("reconciliation_state", "unresolved", "downstream safe"),
-        ("reconciliation_state", "probable", "downstream safe"),
-        ("source_lineage_checksum_sha256", "bad", "checksum"),
-        ("valid_until", "2026-01-01", "validity interval"),
+        ("checksum_sha256", "0" * 64, "checksum"),
+        ("artifact_id", str(uuid.uuid4()), "identity"),
+        ("artifact_type", "generic-artifact", "unsupported"),
+        ("schema_version", "self-declared-v1", "unsupported"),
+        ("role", "operator-participant-rows", "unsupported"),
     ],
 )
-def test_registry_rejects_invalid_identity_evidence(field, value, message) -> None:
-    document = _document()
-    document["participants"][0][field] = value
-    with pytest.raises(ConfigurationError, match=message):
-        _parsed(document)
+def test_source_reference_must_match_allowlisted_loaded_artifact(
+    tmp_path, field, value, message
+) -> None:
+    reference = replace(_published_reference(tmp_path), **{field: value})
+    with pytest.raises((ConfigurationError, SnapshotVerificationError), match=message):
+        _derive(tmp_path, reference)
 
 
-def test_registry_rejects_duplicate_and_contradictory_source_identity() -> None:
-    document = _document()
-    document["participants"][1]["canonical_participant_id"] = document["participants"][0][
-        "canonical_participant_id"
-    ]
-    with pytest.raises(ConfigurationError, match="duplicate"):
-        _parsed(document)
-    document = _document()
-    document["participants"][1]["source_participant_id"] = document["participants"][0][
-        "source_participant_id"
-    ]
-    with pytest.raises(ConfigurationError, match="contradictory"):
-        _parsed(document)
-
-
-def test_registry_rejects_checksum_semantic_tamper_and_unexpected_file(tmp_path) -> None:
-    revision, generated, evaluated, participants = _parsed()
-    artifact = write_participant_registry_artifact(
-        root=tmp_path,
-        relative_directory="registry",
-        registry_revision=revision,
-        generated_at_utc=generated,
-        evaluated_at_utc=evaluated,
-        participants=participants,
-    )
-    manifest = tmp_path / "registry" / "manifest.json"
-    manifest.write_text(manifest.read_text().replace("Second Team", "Tampered Team"))
+def test_missing_source_and_post_publication_tampering_fail_closed(tmp_path) -> None:
+    reference = _published_reference(tmp_path)
+    artifact = _derive(tmp_path, reference)
+    missing = replace(reference, relative_directory="missing/source")
+    with pytest.raises(SnapshotVerificationError, match="missing"):
+        _derive(tmp_path, missing, "missing-registry")
+    participant_file = tmp_path / reference.relative_directory / "participants.parquet"
+    participant_file.write_bytes(participant_file.read_bytes() + b"tamper")
     with pytest.raises(ArtifactError, match="checksum"):
-        load_participant_registry_artifact(root=tmp_path, relative_directory="registry")
+        load_participant_registry_artifact(
+            root=tmp_path,
+            source_root=tmp_path,
+            relative_directory=artifact.relative_directory,
+        )
 
-    # Rebuild the content identity and checksum: semantic validation must still fail.
-    payload = dict(artifact.payload)
-    rows = [dict(item) for item in payload["participants"]]
-    rows[0]["reconciliation_state"] = "probable"
-    payload["participants"] = rows
-    document = build_analytical_artifact_document(
-        artifact_type=PARTICIPANT_REGISTRY_ARTIFACT_TYPE,
-        schema_version=PARTICIPANT_REGISTRY_SCHEMA,
-        payload=payload,
-    )
-    text = dumps_canonical_json(document) + "\n"
-    manifest.write_text(text, encoding="utf-8", newline="\n")
-    checksum = hashlib.sha256(text.encode()).hexdigest()
-    (tmp_path / "registry" / "manifest_checksum.sha256").write_text(checksum + "\n")
-    with pytest.raises(ArtifactError, match="downstream safe"):
-        load_participant_registry_artifact(root=tmp_path, relative_directory="registry")
 
-    # Restore through a second directory to exercise strict exact-file validation.
-    write_participant_registry_artifact(
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            (
+                "participant_reconciliations",
+                lambda rows: rows[0].update(
+                    {
+                        "reconciliation_state": "unresolved",
+                        "canonical_participant_id": None,
+                        "reconciliation_confidence": 0.0,
+                        "reason": "ambiguous",
+                    }
+                ),
+            ),
+            "mismatch|unresolved",
+        ),
+        (
+            (
+                "participants",
+                lambda rows: rows[0].update({"sport_code": "tennis"}),
+            ),
+            "sport",
+        ),
+        (
+            (
+                "participants",
+                lambda rows: rows[0].update({"participant_type": "player"}),
+            ),
+            "kind",
+        ),
+        (
+            (
+                "source_participants",
+                lambda rows: rows[0].update({"competition_id": "unknown-league"}),
+            ),
+            "contradictory",
+        ),
+        (
+            (
+                "participant_reconciliations",
+                lambda rows: rows[0].update(
+                    {"canonical_participant_id": rows[1]["canonical_participant_id"]}
+                ),
+            ),
+            "mismatch",
+        ),
+        (
+            (
+                "participant_reconciliations",
+                lambda rows: rows[0].update({"source_participant_id": str(uuid.uuid4())}),
+            ),
+            "absent",
+        ),
+    ],
+)
+def test_semantically_invalid_typed_snapshot_is_rejected(tmp_path, mutation, message) -> None:
+    reference = _published_reference(tmp_path, mutation=mutation)
+    with pytest.raises(ConfigurationError, match=message):
+        _derive(tmp_path, reference)
+
+
+def test_fixture_supports_registered_model_unseen_identity(tmp_path) -> None:
+    home = "11111111-1111-5111-8111-111111111111"
+    away = "22222222-2222-5222-8222-222222222222"
+    _, registry, _ = build_verified_participant_registry(
+        tmp_path,
         root=tmp_path,
-        relative_directory="registry-extra",
-        registry_revision=revision,
-        generated_at_utc=datetime(2026, 8, 1, 12, tzinfo=UTC),
-        evaluated_at_utc=evaluated,
-        participants=participants,
+        canonical_participant_ids=(home, away),
+        relative_directory="registry",
+        evaluated_at_utc=NOW,
     )
-    (tmp_path / "registry-extra" / "unexpected.txt").write_text("unexpected")
-    with pytest.raises(ArtifactError, match="files"):
-        load_participant_registry_artifact(root=tmp_path, relative_directory="registry-extra")
+    assert (
+        registry.require_registered_participant(
+            away,
+            competition_id="prt-primeira-liga",
+            event_date=NOW.date(),
+        ).canonical_participant_id
+        == away
+    )

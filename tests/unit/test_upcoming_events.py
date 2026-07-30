@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -11,11 +11,6 @@ from sports_analytics.artifacts import build_analytical_artifact_document
 from sports_analytics.core.exceptions import ArtifactError, ConfigurationError
 from sports_analytics.data.codec import dumps_canonical_json
 from sports_analytics.services import engine_cli
-from sports_analytics.sports.football.participant_registry import (
-    RegisteredFootballParticipant,
-    load_participant_registry_artifact,
-    write_participant_registry_artifact,
-)
 from sports_analytics.upcoming_events import (
     UPCOMING_EVENT_ARTIFACT_SCHEMA,
     UPCOMING_EVENT_ARTIFACT_TYPE,
@@ -26,49 +21,23 @@ from sports_analytics.upcoming_events import (
     upcoming_event_json_template,
     write_upcoming_event_artifact,
 )
+from tests.helpers_snapshots import build_verified_participant_registry
 
 CUTOFF = datetime(2026, 8, 1, 12, tzinfo=UTC)
 
 
 def _registry(root, events, relative: str = "participants"):
-    participants = tuple(
-        RegisteredFootballParticipant(
-            participant_id,
-            "football",
-            "team",
-            f"Team {index}",
-            ("prt-primeira-liga",),
-            "exact",
-            "verified-football-snapshot",
-            f"source-team-{index}",
-            "verified-source-artifact",
-            "0" * 64,
-            date(2026, 7, 1),
-            None,
-        )
-        for index, participant_id in enumerate(
-            sorted(
-                {
-                    events[0].canonical_home_participant_id,
-                    events[0].canonical_away_participant_id,
-                }
-            )
-        )
-    )
-    artifact = write_participant_registry_artifact(
+    _, registry, _ = build_verified_participant_registry(
+        root,
         root=root,
+        canonical_participant_ids=(
+            events[0].canonical_home_participant_id,
+            events[0].canonical_away_participant_id,
+        ),
         relative_directory=relative,
-        registry_revision="registry-1",
-        generated_at_utc=CUTOFF,
         evaluated_at_utc=CUTOFF,
-        participants=participants,
     )
-    return load_participant_registry_artifact(
-        root=root,
-        relative_directory=relative,
-        expected_artifact_id=artifact.artifact_id,
-        expected_checksum=artifact.checksum_sha256,
-    )
+    return registry
 
 
 def test_exact_templates_valid_import_and_strict_reload(tmp_path) -> None:

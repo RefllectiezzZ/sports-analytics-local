@@ -11,6 +11,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Final, cast
 
+import pyarrow.parquet as pq
+
 from sports_analytics.artifact_strict import require_dict, require_list, require_str
 from sports_analytics.artifacts import (
     AnalyticalArtifact,
@@ -20,6 +22,8 @@ from sports_analytics.artifacts import (
 from sports_analytics.core.exceptions import ArtifactError, ConfigurationError
 from sports_analytics.data.codec import format_utc_timestamp, parse_utc_timestamp
 from sports_analytics.data.types import JsonValue, validate_identifier, validate_sha256_checksum
+from sports_analytics.snapshots.paths import resolve_snapshot_file
+from sports_analytics.snapshots.reader import SnapshotVerificationResult, verify_snapshot_directory
 from sports_analytics.sources.football_data_co_uk.catalog import get_competition
 from sports_analytics.sports.contracts import (
     DOWNSTREAM_SAFE_RECONCILIATION_STATES,
@@ -28,10 +32,26 @@ from sports_analytics.sports.contracts import (
     require_utc,
     validate_display_name,
 )
+from sports_analytics.sports.football.contracts import (
+    FOOTBALL_CANONICAL_SCHEMA_VERSION,
+    FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+)
+from sports_analytics.sports.football.schemas import football_snapshot_suite
 
 PARTICIPANT_REGISTRY_ARTIFACT_TYPE: Final[str] = "canonical-football-participant-registry"
-PARTICIPANT_REGISTRY_SCHEMA: Final[str] = "canonical-football-participant-registry-v1"
-PARTICIPANT_REGISTRY_INPUT_SCHEMA: Final[str] = "canonical-football-participant-registry-input-v1"
+PARTICIPANT_REGISTRY_SCHEMA: Final[str] = "canonical-football-participant-registry-v2"
+PARTICIPANT_REGISTRY_INPUT_SCHEMA: Final[str] = "canonical-football-participant-registry-request-v2"
+PARTICIPANT_SOURCE_ROLE: Final[str] = "football_ingestion_snapshot"
+_REFERENCE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "role",
+        "relative_directory",
+        "artifact_id",
+        "checksum_sha256",
+        "artifact_type",
+        "schema_version",
+    }
+)
 PARTICIPANT_REGISTRY_ROW_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "canonical_participant_id",
@@ -55,6 +75,26 @@ _PROHIBITED = re.compile(
     r"(?i)(?:https?://|www\.|authorization|cookie|token|selector|script|"
     r"<[a-z][^>]*>|(?:^|[\\/])[A-Za-z]:[\\/]|(?:^|[\\/])Users[\\/])"
 )
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class ParticipantSourceReference:
+    role: str
+    relative_directory: str
+    artifact_id: str
+    checksum_sha256: str
+    artifact_type: str
+    schema_version: str
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "role": self.role,
+            "relative_directory": self.relative_directory,
+            "artifact_id": self.artifact_id,
+            "checksum_sha256": self.checksum_sha256,
+            "artifact_type": self.artifact_type,
+            "schema_version": self.schema_version,
+        }
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -96,6 +136,7 @@ class FootballParticipantRegistry:
     evaluated_at_utc: datetime
     registry_revision: str
     participants: tuple[RegisteredFootballParticipant, ...]
+    source_artifacts: tuple[ParticipantSourceReference, ...]
 
     def participant(self, canonical_participant_id: str) -> RegisteredFootballParticipant | None:
         return next(
@@ -132,27 +173,24 @@ class FootballParticipantRegistry:
 
 
 def participant_registry_json_template() -> str:
+    """Return a safe reference-only production build request."""
     return (
         json.dumps(
             {
                 "schema_version": PARTICIPANT_REGISTRY_INPUT_SCHEMA,
                 "registry_revision": "reviewed-registry-2026-08-01",
-                "generated_at_utc": "2026-08-01T12:00:00.000000Z",
                 "evaluated_at_utc": "2026-08-01T12:00:00.000000Z",
-                "participants": [
+                "source_artifacts": [
                     {
-                        "canonical_participant_id": "11111111-1111-5111-8111-111111111111",
-                        "sport_code": "football",
-                        "participant_kind": "team",
-                        "canonical_display_name": "Reviewed Team",
-                        "competition_ids": ["prt-primeira-liga"],
-                        "reconciliation_state": "exact",
-                        "source_name": "verified-football-snapshot",
-                        "source_participant_id": "verified-team-1",
-                        "source_lineage_artifact_id": "verified-snapshot-artifact",
-                        "source_lineage_checksum_sha256": "0" * 64,
-                        "valid_from": "2026-07-01",
-                        "valid_until": None,
+                        "role": PARTICIPANT_SOURCE_ROLE,
+                        "relative_directory": (
+                            "football-ingestion/football-canonical-v2/"
+                            "prt-primeira-liga/2025-2026/SNAPSHOT_UUID"
+                        ),
+                        "artifact_id": "SNAPSHOT_UUID",
+                        "checksum_sha256": "0" * 64,
+                        "artifact_type": FOOTBALL_INGESTION_SNAPSHOT_TYPE,
+                        "schema_version": FOOTBALL_CANONICAL_SCHEMA_VERSION,
                     }
                 ],
             },
@@ -165,7 +203,8 @@ def participant_registry_json_template() -> str:
 
 def parse_participant_registry_json(
     raw: bytes,
-) -> tuple[str, datetime, datetime, tuple[RegisteredFootballParticipant, ...]]:
+) -> tuple[str, datetime, tuple[ParticipantSourceReference, ...]]:
+    """Parse the reference-only production registry request."""
     try:
         document = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -173,26 +212,47 @@ def parse_participant_registry_json(
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
         "registry_revision",
-        "generated_at_utc",
         "evaluated_at_utc",
-        "participants",
+        "source_artifacts",
     }:
         raise ConfigurationError("participant registry input fields are not exact")
     if document["schema_version"] != PARTICIPANT_REGISTRY_INPUT_SCHEMA:
         raise ConfigurationError("participant registry input schema is unsupported")
     revision = _identifier(document["registry_revision"], "registry_revision")
-    generated = _timestamp(document["generated_at_utc"], "generated_at_utc")
     evaluated = _timestamp(document["evaluated_at_utc"], "evaluated_at_utc")
-    if generated > evaluated:
-        raise ConfigurationError("participant registry generation is after evaluation cutoff")
-    rows = document["participants"]
-    if not isinstance(rows, list) or not rows or len(rows) > 1000:
-        raise ConfigurationError("participant registry participants must be a bounded array")
-    participants = _validate_rows(rows)
-    return revision, generated, evaluated, participants
+    raw_references = document["source_artifacts"]
+    if not isinstance(raw_references, list) or not raw_references or len(raw_references) > 100:
+        raise ConfigurationError("participant source_artifacts must be a bounded array")
+    references = tuple(_source_reference(item) for item in raw_references)
+    if references != tuple(sorted(set(references))):
+        raise ConfigurationError("participant source artifacts are not canonical")
+    return revision, evaluated, references
 
 
-def write_participant_registry_artifact(
+def derive_participant_registry_artifact(
+    *,
+    root: Path,
+    source_root: Path,
+    relative_directory: str,
+    registry_revision: str,
+    evaluated_at_utc: datetime,
+    source_artifacts: tuple[ParticipantSourceReference, ...],
+) -> AnalyticalArtifact:
+    """Derive and publish a registry exclusively from strictly verified snapshots."""
+    evaluated = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
+    participants = _derive_participants(source_root=source_root, references=source_artifacts)
+    return _write_participant_registry_artifact(
+        root=root,
+        relative_directory=relative_directory,
+        registry_revision=registry_revision,
+        generated_at_utc=evaluated,
+        evaluated_at_utc=evaluated,
+        participants=participants,
+        source_artifacts=source_artifacts,
+    )
+
+
+def _write_participant_registry_artifact(
     *,
     root: Path,
     relative_directory: str,
@@ -200,24 +260,22 @@ def write_participant_registry_artifact(
     generated_at_utc: datetime,
     evaluated_at_utc: datetime,
     participants: tuple[RegisteredFootballParticipant, ...],
+    source_artifacts: tuple[ParticipantSourceReference, ...],
 ) -> AnalyticalArtifact:
     generated = require_utc(generated_at_utc, field_name="generated_at_utc")
     evaluated = require_utc(evaluated_at_utc, field_name="evaluated_at_utc")
     checked = _validate_rows([item.to_json() for item in participants])
-    lineage_ids = sorted({item.source_lineage_artifact_id for item in checked})
-    lineage_checksums = sorted({item.source_lineage_checksum_sha256 for item in checked})
     return write_analytical_artifact(
         root=root,
         relative_directory=relative_directory,
         artifact_type=PARTICIPANT_REGISTRY_ARTIFACT_TYPE,
         schema_version=PARTICIPANT_REGISTRY_SCHEMA,
         payload={
-            "source_classification": "verified-reconciled-football-snapshots",
+            "source_classification": "verified-canonical-football-ingestion-snapshots",
             "generated_at_utc": format_utc_timestamp(generated),
             "evaluated_at_utc": format_utc_timestamp(evaluated),
             "registry_revision": _identifier(registry_revision, "registry_revision"),
-            "source_lineage_artifact_ids": cast(JsonValue, lineage_ids),
-            "source_lineage_checksums": cast(JsonValue, lineage_checksums),
+            "source_artifacts": [item.to_json() for item in source_artifacts],
             "row_count": len(checked),
             "participants": [item.to_json() for item in checked],
         },
@@ -230,7 +288,9 @@ def load_participant_registry_artifact(
     relative_directory: str,
     expected_artifact_id: str | None = None,
     expected_checksum: str | None = None,
+    source_root: Path | None = None,
 ) -> FootballParticipantRegistry:
+    """Load a registry and re-derive it from its exact upstream snapshots."""
     artifact = load_analytical_artifact(
         root=root,
         relative_directory=relative_directory,
@@ -245,34 +305,242 @@ def load_participant_registry_artifact(
         "generated_at_utc",
         "evaluated_at_utc",
         "registry_revision",
-        "source_lineage_artifact_ids",
-        "source_lineage_checksums",
+        "source_artifacts",
         "row_count",
         "participants",
     }:
         raise ArtifactError("participant registry payload fields are not exact")
-    if payload["source_classification"] != "verified-reconciled-football-snapshots":
+    if payload["source_classification"] != "verified-canonical-football-ingestion-snapshots":
         raise ArtifactError("participant registry source classification is invalid")
     try:
         participants = _validate_rows(require_list(payload["participants"], field="participants"))
+        references = tuple(
+            _source_reference(item)
+            for item in require_list(payload["source_artifacts"], field="source_artifacts")
+        )
         generated = _timestamp(payload["generated_at_utc"], "generated_at_utc")
         evaluated = _timestamp(payload["evaluated_at_utc"], "evaluated_at_utc")
         revision = _identifier(payload["registry_revision"], "registry_revision")
-    except ConfigurationError as exc:
+        derived = _derive_participants(
+            source_root=root if source_root is None else source_root,
+            references=references,
+        )
+    except (ConfigurationError, Exception) as exc:
+        if isinstance(exc, ArtifactError):
+            raise
         raise ArtifactError(str(exc)) from exc
     if generated > evaluated or payload["row_count"] != len(participants):
         raise ArtifactError("participant registry counts or cutoffs are invalid")
-    ids = [item.source_lineage_artifact_id for item in participants]
-    checksums = [item.source_lineage_checksum_sha256 for item in participants]
-    if payload["source_lineage_artifact_ids"] != sorted(set(ids)):
-        raise ArtifactError("participant registry artifact lineage is inconsistent")
-    if payload["source_lineage_checksums"] != sorted(set(checksums)):
-        raise ArtifactError("participant registry checksum lineage is inconsistent")
-    return FootballParticipantRegistry(artifact, generated, evaluated, revision, participants)
+    if references != tuple(sorted(set(references))):
+        raise ArtifactError("participant registry source references are not canonical")
+    if derived != participants:
+        raise ArtifactError("participant registry rows do not match verified upstream artifacts")
+    return FootballParticipantRegistry(
+        artifact, generated, evaluated, revision, participants, references
+    )
+
+
+def _derive_participants(
+    *,
+    source_root: Path,
+    references: tuple[ParticipantSourceReference, ...],
+) -> tuple[RegisteredFootballParticipant, ...]:
+    if not references:
+        raise ConfigurationError("participant source artifacts are required")
+    derived: dict[str, RegisteredFootballParticipant] = {}
+    source_identities: dict[tuple[str, str], str] = {}
+    for reference in references:
+        verified = _verify_reference(source_root, reference)
+        directory = reference.relative_directory
+        canonical_rows = pq.read_table(
+            resolve_snapshot_file(source_root, f"{directory}/participants.parquet")
+        ).to_pylist()
+        source_rows = pq.read_table(
+            resolve_snapshot_file(source_root, f"{directory}/source_participants.parquet")
+        ).to_pylist()
+        reconciliation_rows = pq.read_table(
+            resolve_snapshot_file(source_root, f"{directory}/participant_reconciliations.parquet")
+        ).to_pylist()
+        event_rows = pq.read_table(
+            resolve_snapshot_file(source_root, f"{directory}/events.parquet")
+        ).to_pylist()
+        canonical = {str(row["canonical_participant_id"]): row for row in canonical_rows}
+        reconciliations = {
+            (str(row["source_name"]), str(row["source_participant_id"])): row
+            for row in reconciliation_rows
+        }
+        if len(reconciliations) != len(reconciliation_rows):
+            raise ConfigurationError("duplicate source identity in participant reconciliation")
+        partition = dict(verified.partition_keys)
+        competition_id = partition.get("competition_id")
+        if competition_id is None:
+            raise ConfigurationError("participant snapshot has no competition partition")
+        try:
+            get_competition(competition_id)
+        except Exception as exc:
+            raise ConfigurationError("participant competition is not registered") from exc
+        event_dates: dict[str, list[date]] = {}
+        for event in event_rows:
+            if event["sport_code"] != "football" or event["competition_id"] != competition_id:
+                raise ConfigurationError("participant snapshot event scope is contradictory")
+            for field in (
+                "home_canonical_participant_id",
+                "away_canonical_participant_id",
+            ):
+                event_dates.setdefault(str(event[field]), []).append(
+                    cast(date, event["event_date"])
+                )
+        for source in source_rows:
+            source_name = str(source["source_name"])
+            source_id = str(source["source_participant_id"])
+            source_key = (source_name, source_id)
+            canonical_id = source["canonical_participant_id"]
+            if canonical_id is None or str(canonical_id) not in canonical:
+                raise ConfigurationError("source participant has no canonical identity")
+            canonical_id = str(canonical_id)
+            reconciliation = reconciliations.get(source_key)
+            if reconciliation is None:
+                raise ConfigurationError("source participant reconciliation is absent")
+            if (
+                reconciliation["source_participant_key"] != source["source_participant_key"]
+                or reconciliation["canonical_participant_id"] != canonical_id
+            ):
+                raise ConfigurationError("source/canonical participant identity mismatch")
+            state = str(reconciliation["reconciliation_state"])
+            if state not in _SAFE_STATES:
+                raise ConfigurationError("participant reconciliation is unresolved or ambiguous")
+            canonical_row = canonical[canonical_id]
+            if canonical_row["sport_code"] != "football":
+                raise ConfigurationError("participant registry sport must be football")
+            if (
+                canonical_row["participant_type"] != ParticipantType.CLUB.value
+                or source["participant_type"] != ParticipantType.CLUB.value
+            ):
+                raise ConfigurationError("participant registry kind must be club")
+            if source["competition_id"] != competition_id:
+                raise ConfigurationError("participant competition membership is contradictory")
+            dates = event_dates.get(canonical_id)
+            if not dates:
+                raise ConfigurationError("participant has no verified competition membership")
+            prior_source = source_identities.setdefault(source_key, canonical_id)
+            if prior_source != canonical_id:
+                raise ConfigurationError("participant source identity is contradictory")
+            candidate = RegisteredFootballParticipant(
+                canonical_id,
+                "football",
+                ParticipantType.CLUB.value,
+                str(canonical_row["display_name"]),
+                (competition_id,),
+                state,
+                source_name,
+                source_id,
+                reference.artifact_id,
+                reference.checksum_sha256,
+                min(dates),
+                None,
+            )
+            prior = derived.get(canonical_id)
+            if prior is None:
+                derived[canonical_id] = candidate
+            elif (
+                prior.sport_code,
+                prior.participant_kind,
+                prior.canonical_display_name,
+                prior.reconciliation_state,
+                prior.source_name,
+                prior.source_participant_id,
+            ) != (
+                candidate.sport_code,
+                candidate.participant_kind,
+                candidate.canonical_display_name,
+                candidate.reconciliation_state,
+                candidate.source_name,
+                candidate.source_participant_id,
+            ):
+                raise ConfigurationError("canonical participant evidence is contradictory")
+            else:
+                derived[canonical_id] = RegisteredFootballParticipant(
+                    prior.canonical_participant_id,
+                    prior.sport_code,
+                    prior.participant_kind,
+                    prior.canonical_display_name,
+                    tuple(sorted(set(prior.competition_ids + candidate.competition_ids))),
+                    prior.reconciliation_state,
+                    prior.source_name,
+                    prior.source_participant_id,
+                    min(prior.source_lineage_artifact_id, candidate.source_lineage_artifact_id),
+                    (
+                        prior.source_lineage_checksum_sha256
+                        if prior.source_lineage_artifact_id <= candidate.source_lineage_artifact_id
+                        else candidate.source_lineage_checksum_sha256
+                    ),
+                    min(prior.valid_from, candidate.valid_from),
+                    None,
+                )
+    return _validate_rows([derived[key].to_json() for key in sorted(derived)])
+
+
+def _verify_reference(
+    source_root: Path, reference: ParticipantSourceReference
+) -> SnapshotVerificationResult:
+    if (
+        reference.role != PARTICIPANT_SOURCE_ROLE
+        or reference.artifact_type != FOOTBALL_INGESTION_SNAPSHOT_TYPE
+        or reference.schema_version != FOOTBALL_CANONICAL_SCHEMA_VERSION
+    ):
+        raise ConfigurationError("participant source role, type, or schema is unsupported")
+    verified = verify_snapshot_directory(
+        snapshots_directory=source_root,
+        relative_manifest_path=f"{reference.relative_directory}/manifest.json",
+        suite=football_snapshot_suite(),
+    )
+    if (
+        verified.snapshot_id != reference.artifact_id
+        or verified.manifest_checksum_sha256 != reference.checksum_sha256
+        or verified.snapshot_type != FOOTBALL_INGESTION_SNAPSHOT_TYPE
+        or verified.schema_version != FOOTBALL_CANONICAL_SCHEMA_VERSION
+    ):
+        raise ConfigurationError("participant source artifact identity or checksum mismatch")
+    return verified
+
+
+def _source_reference(value: object) -> ParticipantSourceReference:
+    if not isinstance(value, dict) or set(value) != _REFERENCE_FIELDS:
+        raise ConfigurationError("participant source reference fields are not exact")
+    values = tuple(
+        value[name]
+        for name in (
+            "role",
+            "relative_directory",
+            "artifact_id",
+            "checksum_sha256",
+            "artifact_type",
+            "schema_version",
+        )
+    )
+    if any(type(item) is not str or not item or item != item.strip() for item in values):
+        raise ConfigurationError("participant source reference text is invalid")
+    relative = cast(str, values[1])
+    if relative.startswith("/") or "\\" in relative or ".." in relative.split("/"):
+        raise ConfigurationError("participant source reference path is unsafe")
+    try:
+        validate_sha256_checksum(cast(str, values[3]))
+    except Exception as exc:
+        raise ConfigurationError("participant source reference checksum is invalid") from exc
+    reference = ParticipantSourceReference(*cast(tuple[str, str, str, str, str, str], values))
+    if (
+        reference.role != PARTICIPANT_SOURCE_ROLE
+        or reference.artifact_type != FOOTBALL_INGESTION_SNAPSHOT_TYPE
+        or reference.schema_version != FOOTBALL_CANONICAL_SCHEMA_VERSION
+    ):
+        raise ConfigurationError("participant source role, type, or schema is unsupported")
+    return reference
 
 
 def _validate_rows(rows: Sequence[object]) -> tuple[RegisteredFootballParticipant, ...]:
     participants = tuple(_parse_row(value, index) for index, value in enumerate(rows))
+    if not participants:
+        raise ConfigurationError("participant registry cannot be empty")
     if tuple(item.canonical_participant_id for item in participants) != tuple(
         sorted(item.canonical_participant_id for item in participants)
     ):
@@ -297,8 +565,8 @@ def _parse_row(value: object, index: int) -> RegisteredFootballParticipant:
     if sport != "football":
         raise ConfigurationError("participant registry sport must be football")
     kind = _identifier(row["participant_kind"], "participant_kind")
-    if kind != ParticipantType.TEAM.value:
-        raise ConfigurationError("participant registry kind must be team")
+    if kind != ParticipantType.CLUB.value:
+        raise ConfigurationError("participant registry kind must be club")
     display = _safe_display(row["canonical_display_name"])
     competitions_raw = row["competition_ids"]
     if not isinstance(competitions_raw, list) or not competitions_raw:

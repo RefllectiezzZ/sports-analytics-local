@@ -438,8 +438,16 @@ def load_operator_quote_artifact(
                     "evaluated_at_utc": payload.get("observed_as_of_utc"),
                     "quotes": [
                         {field: row.get(field) for field in OPERATOR_QUOTE_FIELDS}
-                        for row in rows
-                        if isinstance(row, dict)
+                        for row in sorted(
+                            (item for item in rows if isinstance(item, dict)),
+                            key=lambda item: (
+                                str(item.get("provider_id")),
+                                str(item.get("canonical_event_id")),
+                                str(item.get("market_family")),
+                                str(item.get("outcome_key")),
+                                str(item.get("line_value") or ""),
+                            ),
+                        )
                     ],
                 }
             ).encode("utf-8")

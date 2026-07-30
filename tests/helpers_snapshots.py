@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,6 +22,12 @@ from sports_analytics.sources.types import SOURCE_FOOTBALL_DATA_CO_UK
 from sports_analytics.sports.football.normalization import (
     NormalizedFootballBundle,
     normalize_football_rows,
+)
+from sports_analytics.sports.football.participant_registry import (
+    PARTICIPANT_SOURCE_ROLE,
+    ParticipantSourceReference,
+    derive_participant_registry_artifact,
+    load_participant_registry_artifact,
 )
 from sports_analytics.sports.football.schemas import bundle_to_tables, football_snapshot_suite
 
@@ -207,3 +214,84 @@ def publication_service(
         snapshots_directory=snapshots_directory,
         suite=football_snapshot_suite(),
     )
+
+
+def build_verified_participant_registry(
+    tmp_path: Path,
+    *,
+    root: Path,
+    canonical_participant_ids: tuple[str, str],
+    relative_directory: str,
+    competition_id: str = "prt-primeira-liga",
+    evaluated_at_utc: datetime,
+):
+    """Build a registry fixture through the real canonical snapshot trust boundary."""
+    division = get_competition(competition_id).division_code
+    first, second = sorted(canonical_participant_ids)
+    content = (
+        "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n"
+        f"{division},12/08/2023,Team {first[:8]},Team {second[:8]},2,1,H\n"
+    ).encode()
+    spec, bundle = build_spec(
+        tmp_path,
+        competition_id=competition_id,
+        content=content,
+        raw_subdirectory=f"raw-{first[:8]}-{second[:8]}",
+    )
+    tables = build_tables(bundle)
+    canonical_rows = tables["participants"].to_pylist()
+    old_ids = sorted(str(row["canonical_participant_id"]) for row in canonical_rows)
+    replacements = dict(zip(old_ids, (first, second), strict=True))
+    for dataset in ("participants", "source_participants", "participant_reconciliations"):
+        rows = tables[dataset].to_pylist()
+        for row in rows:
+            current = row.get("canonical_participant_id")
+            if current is not None:
+                row["canonical_participant_id"] = replacements[str(current)]
+        tables[dataset] = pa.Table.from_pylist(rows, schema=tables[dataset].schema)
+    event_rows = tables["events"].to_pylist()
+    for row in event_rows:
+        row["home_canonical_participant_id"] = replacements[
+            str(row["home_canonical_participant_id"])
+        ]
+        row["away_canonical_participant_id"] = replacements[
+            str(row["away_canonical_participant_id"])
+        ]
+    tables["events"] = pa.Table.from_pylist(event_rows, schema=tables["events"].schema)
+    snapshot_id = str(uuid.uuid5(uuid.NAMESPACE_URL, relative_directory))
+    prepared = prepare_snapshot_directory(
+        snapshots_directory=root,
+        spec=spec,
+        tables=tables,
+        snapshot_id=snapshot_id,
+    )
+    database = database_path(tmp_path)
+    published = publication_service(database, root).publish_or_reuse(
+        prepared,
+        actor="test",
+    )
+    source_relative = str(Path(published.snapshot_relative_path).parent).replace("\\", "/")
+    reference = ParticipantSourceReference(
+        PARTICIPANT_SOURCE_ROLE,
+        source_relative,
+        published.snapshot_id,
+        published.manifest_checksum_sha256,
+        published.snapshot_type,
+        published.schema_version,
+    )
+    artifact = derive_participant_registry_artifact(
+        root=root,
+        source_root=root,
+        relative_directory=relative_directory,
+        registry_revision="registry-1",
+        evaluated_at_utc=evaluated_at_utc,
+        source_artifacts=(reference,),
+    )
+    registry = load_participant_registry_artifact(
+        root=root,
+        source_root=root,
+        relative_directory=relative_directory,
+        expected_artifact_id=artifact.artifact_id,
+        expected_checksum=artifact.checksum_sha256,
+    )
+    return artifact, registry, reference

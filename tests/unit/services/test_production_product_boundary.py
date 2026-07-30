@@ -55,17 +55,13 @@ from sports_analytics.services.production_football_product import (
 from sports_analytics.services.production_football_product_cli import (
     run_production_football_product_document,
 )
-from sports_analytics.sports.football.participant_registry import (
-    RegisteredFootballParticipant,
-    load_participant_registry_artifact,
-    write_participant_registry_artifact,
-)
 from sports_analytics.ui.product_catalogue import ProductReadModelEntry, load_product_read_model
 from sports_analytics.upcoming_events import (
     parse_upcoming_event_json,
     upcoming_event_json_template,
     write_upcoming_event_artifact,
 )
+from tests.helpers_snapshots import build_verified_participant_registry
 
 NOW = datetime(2026, 8, 1, 12, tzinfo=UTC)
 MARKET_KEY = "football.score.full-match"
@@ -103,43 +99,15 @@ def _evidence(tmp_path):
     events = parse_upcoming_event_json(
         upcoming_event_json_template().encode(), evaluated_at_utc=NOW
     )
-    registry_rows = tuple(
-        RegisteredFootballParticipant(
-            participant_id,
-            "football",
-            "team",
-            f"Team {index}",
-            ("prt-primeira-liga",),
-            "exact",
-            "verified-football-snapshot",
-            f"source-team-{index}",
-            "verified-source-artifact",
-            "0" * 64,
-            date(2026, 7, 1),
-            None,
-        )
-        for index, participant_id in enumerate(
-            sorted(
-                {
-                    events[0].canonical_home_participant_id,
-                    events[0].canonical_away_participant_id,
-                }
-            )
-        )
-    )
-    registry_artifact = write_participant_registry_artifact(
+    registry_artifact, registry, _ = build_verified_participant_registry(
+        tmp_path,
         root=exports,
+        canonical_participant_ids=(
+            events[0].canonical_home_participant_id,
+            events[0].canonical_away_participant_id,
+        ),
         relative_directory="evidence/participants",
-        registry_revision="registry-1",
-        generated_at_utc=NOW,
         evaluated_at_utc=NOW,
-        participants=registry_rows,
-    )
-    registry = load_participant_registry_artifact(
-        root=exports,
-        relative_directory="evidence/participants",
-        expected_artifact_id=registry_artifact.artifact_id,
-        expected_checksum=registry_artifact.checksum_sha256,
     )
     event_artifact = write_upcoming_event_artifact(
         root=exports,
@@ -410,19 +378,15 @@ def test_product_rejects_mismatched_participant_registry_before_probability(tmp_
     exports, models, events, request = _evidence(tmp_path)
     connection = _connection()
     _register_champion(connection, models, events)
-    original = load_participant_registry_artifact(
+    duplicate, _, _ = build_verified_participant_registry(
+        tmp_path,
         root=exports,
-        relative_directory=request.participant_registry_relative_directory,
-        expected_artifact_id=request.participant_registry_artifact_id,
-        expected_checksum=request.participant_registry_checksum_sha256,
-    )
-    duplicate = write_participant_registry_artifact(
-        root=exports,
+        canonical_participant_ids=(
+            events[0].canonical_home_participant_id,
+            events[0].canonical_away_participant_id,
+        ),
         relative_directory="evidence/participants-copy",
-        registry_revision=original.registry_revision,
-        generated_at_utc=original.generated_at_utc,
-        evaluated_at_utc=original.evaluated_at_utc,
-        participants=original.participants,
+        evaluated_at_utc=NOW,
     )
     with pytest.raises(ArtifactError, match="participant registry lineage mismatch"):
         run_and_publish_production_football_product(

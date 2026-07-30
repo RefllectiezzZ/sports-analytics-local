@@ -24,6 +24,7 @@ def run_production_football_product_json(
     connection: sqlite3.Connection,
     exports_root: Path,
     model_root: Path,
+    snapshots_root: Path | None = None,
 ) -> dict[str, JsonValue]:
     try:
         document = json.loads(Path(path_text.replace("\\", "/")).read_text(encoding="utf-8"))
@@ -36,6 +37,7 @@ def run_production_football_product_json(
         connection=connection,
         exports_root=exports_root,
         model_root=model_root,
+        snapshots_root=snapshots_root,
     )
 
 
@@ -45,6 +47,7 @@ def run_production_football_product_document(
     connection: sqlite3.Connection,
     exports_root: Path,
     model_root: Path,
+    snapshots_root: Path | None = None,
 ) -> dict[str, JsonValue]:
     if not isinstance(document, dict) or set(document) != {
         "relative_root",
@@ -94,6 +97,7 @@ def run_production_football_product_document(
         connection=connection,
         exports_root=exports_root,
         model_root=model_root,
+        snapshots_root=snapshots_root,
         request=ProductionFootballProductRequest(
             upcoming_event_relative_directory=events["relative_directory"],
             upcoming_event_artifact_id=events["artifact_id"],
