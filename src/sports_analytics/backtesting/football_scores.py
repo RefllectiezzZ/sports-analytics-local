@@ -92,9 +92,16 @@ def run_historical_score_backtest(
     if not rows:
         raise BacktestError("historical score backtest requires priced rows")
     rules = policy or HistoricalScoreBacktestPolicy()
+    # A 1X2 market settles exactly one outcome.  Historical rows are evaluated
+    # independently for calibration, but the normal singles strategy must not
+    # stake mutually-exclusive home/draw/away selections from the same quoted
+    # market.  Select the deterministic best candidate per event/provider.
     accepted: list[Historical1x2Evaluation] = []
     rejected: dict[str, int] = {}
-    for row in sorted(rows, key=lambda item: (item.canonical_event_id, item.outcome_key)):
+    qualifying: dict[tuple[str, str], list[Historical1x2Evaluation]] = {}
+    for row in sorted(
+        rows, key=lambda item: (item.canonical_event_id, item.provider_id, item.outcome_key)
+    ):
         edge = row.model_probability - row.normalized_market_probability
         expected_value = row.model_probability * float(row.offered_decimal_odds) - 1.0
         reasons: list[str] = []
@@ -106,7 +113,21 @@ def run_historical_score_backtest(
             for reason in reasons:
                 rejected[reason] = rejected.get(reason, 0) + 1
         else:
-            accepted.append(row)
+            qualifying.setdefault((row.canonical_event_id, row.provider_id), []).append(row)
+    for candidates in qualifying.values():
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                -(item.model_probability * float(item.offered_decimal_odds) - 1.0),
+                -(item.model_probability - item.normalized_market_probability),
+                item.outcome_key,
+            ),
+        )
+        accepted.append(ranked[0])
+        for _ in ranked[1:]:
+            rejected["mutually-exclusive-1x2-selection"] = (
+                rejected.get("mutually-exclusive-1x2-selection", 0) + 1
+            )
     pnl_rows = [
         float(row.offered_decimal_odds) - 1.0 if row.outcome_key == row.observed_outcome else -1.0
         for row in accepted
@@ -168,6 +189,7 @@ def run_historical_score_backtest(
             "closing benchmark is not an executable historical recommendation",
             "one-unit results are diagnostic and do not imply future profitability",
             "only genuinely priced 1X2 selections are evaluated",
+            "at most one outcome is selected per event/provider 1X2 market",
         ),
     )
 

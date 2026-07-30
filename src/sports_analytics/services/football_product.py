@@ -48,7 +48,7 @@ from sports_analytics.models.football_unified_tournament import (
     run_unified_tournament,
     write_unified_tournament_artifact,
 )
-from sports_analytics.players.evidence import player_capability_matrix
+from sports_analytics.players.evidence import PlayerEvidenceBundle, player_capability_matrix
 from sports_analytics.policies.proposal import PublishedProposalPolicy
 from sports_analytics.predictions.football_scores import (
     write_football_probability_artifact,
@@ -89,6 +89,8 @@ class FootballProductRequest:
     evaluation_provenance: EvaluationProvenance = EvaluationProvenance.SYNTHETIC_CONTRACT
     published_proposal_policy: PublishedProposalPolicy | None = None
     published_proposal_policy_artifact_id: str | None = None
+    player_context: PlayerEvidenceBundle | None = None
+    player_context_artifact_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +117,11 @@ def run_and_publish_football_product(
     """Run the bounded local workflow; no network or bookmaker access exists here."""
     if not request.upcoming_events:
         raise EvaluationError("football product requires at least one upcoming event")
+    if (
+        request.player_context is not None
+        and request.player_context.historical_equivalence_state != "player-context-not-trainable"
+    ):
+        raise EvaluationError("football product accepts display-only player context only")
     candidates = (
         ScoreTournamentCandidate(
             candidate_id="dynamic-independent-poisson-v1",
@@ -232,6 +239,11 @@ def run_and_publish_football_product(
             relative_directory=f"{base}/current-quotes",
             catalogue=quote_catalogue,
         )
+    player_context_payload, player_context_state = _player_context_payload(
+        request.player_context,
+        upcoming_events=request.upcoming_events,
+        evaluated_at_utc=request.evaluated_at_utc,
+    )
     proposals = evaluate_catalogue_proposals(
         event_markets=event_markets,
         catalogue=quote_catalogue,
@@ -240,6 +252,7 @@ def run_and_publish_football_product(
         },
         decision_as_of_utc=request.evaluated_at_utc,
         policy=request.opportunity_policy,
+        player_context_state=player_context_state,
     )
     proposal_artifact = write_proposal_artifact(
         root=exports_root,
@@ -274,6 +287,7 @@ def run_and_publish_football_product(
             "probability_artifact_ids": [item.artifact_id for item in probability_artifacts],
             "quote_artifact_id": (None if quote_artifact is None else quote_artifact.artifact_id),
             "proposal_artifact_id": proposal_artifact.artifact_id,
+            "player_context_artifact_id": request.player_context_artifact_id,
             "published_proposal_policy_artifact_id": (
                 request.published_proposal_policy_artifact_id
             ),
@@ -304,10 +318,9 @@ def run_and_publish_football_product(
                 for sport, status in proposals.sport_statuses
             ],
             "player_context": {
-                "display_state": "context-unavailable",
+                **player_context_payload,
                 "model_use_state": "player-context-not-trainable",
                 "historical_equivalence_state": "unavailable",
-                "observations": [],
                 "capabilities": [
                     {"capability": capability, "state": state}
                     for capability, state in player_capability_matrix()
@@ -350,4 +363,40 @@ def run_and_publish_football_product(
         quote_artifact=quote_artifact,
         proposal_artifact=proposal_artifact,
         read_model_artifact=read_model_artifact,
+    )
+
+
+def _player_context_payload(
+    bundle: PlayerEvidenceBundle | None,
+    *,
+    upcoming_events: tuple[UpcomingFootballEvent, ...],
+    evaluated_at_utc: datetime,
+) -> tuple[dict[str, JsonValue], str]:
+    """Project current player evidence for display without entering model inputs."""
+    if bundle is None:
+        return {"display_state": "context-unavailable", "observations": []}, "not-requested"
+    event_ids = {item.canonical_event_id for item in upcoming_events}
+    observations = [
+        item
+        for item in bundle.observations
+        if item.event_id in event_ids and not item.is_stale(evaluated_at_utc)
+    ]
+    rows: list[JsonValue] = [
+        {
+            "observation_id": item.observation_id,
+            "canonical_player_id": item.canonical_player_id,
+            "canonical_team_id": item.canonical_team_id,
+            "event_id": item.event_id,
+            "status": item.status.value,
+            "evidence_type": item.evidence_type.value,
+            "confidence": item.confidence,
+        }
+        for item in sorted(observations, key=lambda item: item.observation_id)
+    ]
+    return (
+        {
+            "display_state": "display-only-current-context",
+            "observations": rows,
+        },
+        "train-serve-equivalence-unavailable",
     )

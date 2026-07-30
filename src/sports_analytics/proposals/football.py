@@ -342,6 +342,7 @@ def evaluate_catalogue_proposals(
     model_artifact_ids: dict[str, str],
     decision_as_of_utc: datetime,
     policy: FootballOpportunityPolicy | None = None,
+    player_context_state: str = "not-requested",
 ) -> ProposalRun:
     """Evaluate fair-odds-only or current-price product paths deterministically."""
     rules = policy or FootballOpportunityPolicy()
@@ -368,6 +369,7 @@ def evaluate_catalogue_proposals(
                         model_artifact_id=model_id,
                         decision_as_of_utc=decision_as_of_utc,
                         policy=rules,
+                        player_context_state=player_context_state,
                     )
                 )
     accepted = tuple(item for item in decisions if item.accepted)

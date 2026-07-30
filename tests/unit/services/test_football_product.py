@@ -17,6 +17,15 @@ from sports_analytics.models.football_tournament import (
     TournamentSplitConfiguration,
     load_tournament_artifact,
 )
+from sports_analytics.players.evidence import (
+    Player,
+    PlayerAvailabilityObservation,
+    PlayerEvidenceBundle,
+    PlayerEvidenceState,
+    PlayerEvidenceType,
+    PlayerRole,
+    PlayerTeamMembership,
+)
 from sports_analytics.policies.proposal import PublishedProposalPolicy
 from sports_analytics.proposals.football import (
     FootballOpportunityPolicy,
@@ -216,3 +225,110 @@ def test_published_policy_controls_product_sports_limits_and_lineage(tmp_path) -
         {"sport_code": "basketball", "status": "sport-model-unavailable"}
     ]
     assert read_model.payload["product_state"]["proposal_limits"]["maximum_uncertainty"] == 0.04
+
+
+def test_display_only_player_context_cannot_change_future_probability_artifacts(tmp_path) -> None:
+    teams = ("a", "b", "c", "d")
+    matches = tuple(
+        ScoreTrainingMatch(
+            canonical_event_id=f"history-{index:03d}",
+            competition_id="league",
+            event_date=date(2024, 1, 1) + timedelta(days=index),
+            home_team_id=teams[index % 4],
+            away_team_id=teams[(index + 1) % 4],
+            home_goals=(index * 7) % 4,
+            away_goals=(index * 5) % 3,
+        )
+        for index in range(52)
+    )
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    upcoming = (
+        UpcomingFootballEvent(
+            canonical_event_id="upcoming-0",
+            competition_id="league",
+            home_team_id="a",
+            away_team_id="b",
+            event_start_utc=now + timedelta(days=1),
+            prediction_cutoff=date(2026, 1, 1),
+        ),
+    )
+    common = dict(
+        historical_matches=matches,
+        upcoming_events=upcoming,
+        operator_quotes=(),
+        registered_provider_ids=frozenset(),
+        evaluated_at_utc=now,
+        score_configuration=ScoreModelConfiguration(minimum_matches=12),
+        split_configuration=TournamentSplitConfiguration(
+            minimum_training_rows=24,
+            calibration_rows=8,
+            test_rows=8,
+            maximum_folds=2,
+        ),
+        opportunity_policy=FootballOpportunityPolicy(
+            minimum_edge=0.0,
+            minimum_expected_value=0.0,
+            safety_margin=0.0,
+        ),
+    )
+    without_context = run_and_publish_football_product(
+        exports_root=tmp_path,
+        request=FootballProductRequest(relative_root="without-context", **common),
+    )
+    player_context = PlayerEvidenceBundle(
+        players=(Player("player-a", "football"),),
+        source_players=(),
+        reconciliations=(),
+        memberships=(
+            PlayerTeamMembership(
+                "player-a", "a", "football", date(2025, 1, 1), None, PlayerRole.ATTACKER
+            ),
+        ),
+        observations=(
+            PlayerAvailabilityObservation(
+                canonical_player_id="player-a",
+                source_player_id="source-a",
+                canonical_team_id="a",
+                sport_code="football",
+                source_name="operator-reviewed",
+                source_observation_id="display-only-a",
+                observed_at_utc=now,
+                event_id="upcoming-0",
+                effective_date=date(2026, 1, 2),
+                event_start_utc=upcoming[0].event_start_utc,
+                status=PlayerEvidenceState.EXPECTED_STARTER,
+                confidence=0.8,
+                evidence_type=PlayerEvidenceType.EXPECTED_LINEUP,
+            ),
+        ),
+    )
+    with_context = run_and_publish_football_product(
+        exports_root=tmp_path,
+        request=FootballProductRequest(
+            relative_root="with-context",
+            player_context=player_context,
+            player_context_artifact_id="player-context-artifact",
+            **common,
+        ),
+    )
+    assert tuple(item.artifact_id for item in with_context.probability_artifacts) == tuple(
+        item.artifact_id for item in without_context.probability_artifacts
+    )
+    assert all(not item.accepted for item in with_context.proposals.decisions)
+    assert all(
+        "player-train-serve-equivalence-unavailable" in item.reason_codes
+        for item in with_context.proposals.decisions
+    )
+    entry = next(
+        item
+        for item in discover_product_read_models(tmp_path)
+        if item.relative_directory == "with-context/read-model"
+    )
+    read_model = load_product_read_model(root=tmp_path, entry=entry)
+    assert read_model.payload["artifact_lineage"]["player_context_artifact_id"] == (
+        "player-context-artifact"
+    )
+    assert read_model.payload["product_state"]["player_context"]["display_state"] == (
+        "display-only-current-context"
+    )
+    assert len(read_model.payload["product_state"]["player_context"]["observations"]) == 1
