@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+
 from sports_analytics.bookmakers.navigation import (
     DisabledStageBNavigationCapability,
     StageBNavigationCapability,
@@ -43,31 +45,127 @@ _VERIFIED_PROFILES: dict[tuple[str, str], ExtractionProfile] = {
     (BETANO_PROVIDER_ID, "football"): BETANO_FOOTBALL_TOPEVENTSV2_PROFILE,
 }
 
-_CURRENT_PROVIDER_SPORTS = frozenset(
-    (provider_id, sport)
-    for provider_id in (BETANO_PROVIDER_ID, BETCLIC_PROVIDER_ID)
-    for sport in ("football", "basketball", "tennis")
+
+@dataclass(frozen=True, slots=True)
+class ProviderSportCapability:
+    """Exact evidence-gated provider/sport capability without fallback."""
+
+    provider_id: str
+    sport: str
+    reviewed_route_id: str | None
+    stage_a_profile_id: str | None
+    stage_a_profile_version: str | None
+    stage_b_enabled: bool
+    detail_response_profile_id: str | None
+    detail_response_profile_version: str | None
+    native_parser_capability: str
+    completeness_mechanism: str
+    reviewed_canonical_mapping_set: tuple[str, ...]
+    evidence_classification: str
+    operational_classification: str
+
+    def as_safe_dict(self) -> dict[str, object]:
+        """Return a deterministic operator-safe representation."""
+        return asdict(self)
+
+
+_CAPABILITIES: dict[tuple[str, str], ProviderSportCapability] = (
+    {
+        (BETANO_PROVIDER_ID, "football"): ProviderSportCapability(
+            provider_id=BETANO_PROVIDER_ID,
+            sport="football",
+            reviewed_route_id="football-prematch",
+            stage_a_profile_id=BETANO_FOOTBALL_TOPEVENTSV2_PROFILE.profile_id,
+            stage_a_profile_version=BETANO_FOOTBALL_TOPEVENTSV2_PROFILE.schema_version,
+            stage_b_enabled=False,
+            detail_response_profile_id=None,
+            detail_response_profile_version=None,
+            native_parser_capability="reviewed-landing-inventory-only",
+            completeness_mechanism="unknown-landing-inventory",
+            reviewed_canonical_mapping_set=(
+                "football-btts",
+                "football-match-result-1x2",
+                "football-total-goals",
+            ),
+            evidence_classification="reviewed-non-exhaustive-landing-inventory",
+            operational_classification="Stage-A-only",
+        ),
+    }
+    | {
+        (BETANO_PROVIDER_ID, sport): ProviderSportCapability(
+            provider_id=BETANO_PROVIDER_ID,
+            sport=sport,
+            reviewed_route_id=f"{sport}-prematch",
+            stage_a_profile_id=None,
+            stage_a_profile_version=None,
+            stage_b_enabled=False,
+            detail_response_profile_id=None,
+            detail_response_profile_version=None,
+            native_parser_capability="unverified",
+            completeness_mechanism="none",
+            reviewed_canonical_mapping_set=(),
+            evidence_classification="no-verified-profile",
+            operational_classification="unsupported/unverified",
+        )
+        for sport in ("basketball", "tennis")
+    }
+    | {
+        (BETCLIC_PROVIDER_ID, sport): ProviderSportCapability(
+            provider_id=BETCLIC_PROVIDER_ID,
+            sport=sport,
+            reviewed_route_id=f"{sport}-prematch",
+            stage_a_profile_id=None,
+            stage_a_profile_version=None,
+            stage_b_enabled=False,
+            detail_response_profile_id=None,
+            detail_response_profile_version=None,
+            native_parser_capability="unverified",
+            completeness_mechanism="none",
+            reviewed_canonical_mapping_set=(),
+            evidence_classification="streaming-transport-verified-profile-unverified",
+            operational_classification="unsupported/unverified",
+        )
+        for sport in ("football", "basketball", "tennis")
+    }
 )
 
 
 def get_verified_extraction_profile(
     provider_id: str,
-    sport: str | None = None,
+    sport: str,
 ) -> ExtractionProfile | None:
-    """Return the exact verified provider/sport profile.
+    """Return only the exact verified provider/sport profile."""
+    return _VERIFIED_PROFILES.get((provider_id, sport))
 
-    ``sport=None`` is retained only for compatibility with PR #11 callers and
-    returns a profile when the provider has exactly one registered sport. New
-    acquisition code always supplies the sport.
-    """
-    if sport is not None:
-        return _VERIFIED_PROFILES.get((provider_id, sport))
-    matches = [
-        profile
-        for (registered_provider, _), profile in _VERIFIED_PROFILES.items()
-        if registered_provider == provider_id
-    ]
-    return matches[0] if len(matches) == 1 else None
+
+def get_provider_sport_capability(
+    provider_id: str,
+    sport: str,
+) -> ProviderSportCapability:
+    """Return one exact capability or an explicit unsupported record."""
+    capability = _CAPABILITIES.get((provider_id, sport))
+    if capability is not None:
+        return capability
+    return ProviderSportCapability(
+        provider_id=provider_id,
+        sport=sport,
+        reviewed_route_id=None,
+        stage_a_profile_id=None,
+        stage_a_profile_version=None,
+        stage_b_enabled=False,
+        detail_response_profile_id=None,
+        detail_response_profile_version=None,
+        native_parser_capability="unverified",
+        completeness_mechanism="none",
+        reviewed_canonical_mapping_set=(),
+        evidence_classification="unsupported-exact-tuple",
+        operational_classification="unsupported/unverified",
+    )
+
+
+def list_provider_sport_capabilities() -> tuple[ProviderSportCapability, ...]:
+    """List the six registered exact tuples in deterministic order."""
+    return tuple(_CAPABILITIES[key] for key in sorted(_CAPABILITIES))
 
 
 def get_stage_b_navigation_capability(
@@ -78,6 +176,8 @@ def get_stage_b_navigation_capability(
 
     No current provider/sport has reviewed event-detail navigation evidence.
     """
-    if (provider_id, sport) not in _CURRENT_PROVIDER_SPORTS:
-        return DisabledStageBNavigationCapability(provider_id=provider_id, sport=sport)
+    capability = get_provider_sport_capability(provider_id, sport)
+    if capability.stage_b_enabled:
+        msg = "enabled Stage-B capability is not installed"
+        raise RuntimeError(msg)
     return DisabledStageBNavigationCapability(provider_id=provider_id, sport=sport)

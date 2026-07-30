@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from sports_analytics.bookmakers import loader as bookmaker_loader
 from sports_analytics.bookmakers.loader import load_bookmaker_snapshot
 from sports_analytics.bookmakers.normalization import normalize_bookmaker_bundles
 from sports_analytics.bookmakers.reconciliation import reconcile_bookmaker_bundles
@@ -44,6 +45,31 @@ from sports_analytics.sources.raw_capture import BookmakerRawCaptureStore
 
 OBSERVED = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "betano"
+
+
+def test_native_v2_loader_rejects_event_only_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    rows = {
+        "provider_native_events": [{"source_event_id": "invented-event"}],
+        "provider_native_markets": [],
+        "provider_native_selections": [],
+    }
+    monkeypatch.setattr(
+        bookmaker_loader,
+        "_read_dataset",
+        lambda _snapshot_dir, dataset_name: rows[dataset_name],
+    )
+
+    with pytest.raises(SnapshotVerificationError, match="non-empty events, markets"):
+        bookmaker_loader._verify_native_inventory(
+            snapshot_dir=tmp_path,
+            provider_id="invented-provider",
+            sport_code="football",
+            capture_checksums=set(),
+            domain_metadata={},
+        )
 
 
 def _provider_status_for_bundle(bundle, *, snapshot_id: str | None):

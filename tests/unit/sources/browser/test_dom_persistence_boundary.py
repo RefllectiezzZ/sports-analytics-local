@@ -262,7 +262,7 @@ def test_raw_page_material_never_crosses_persistable_boundaries(
     _assert_private_values_absent(asdict(betano_bundle))
     _assert_private_values_absent(asdict(betclic_bundle))
     _assert_private_values_absent(caplog.text)
-    assert get_verified_extraction_profile("betclic-pt") is None
+    assert get_verified_extraction_profile("betclic-pt", "football") is None
 
 
 def test_block_signals_are_classified_before_persistable_page_boundary() -> None:

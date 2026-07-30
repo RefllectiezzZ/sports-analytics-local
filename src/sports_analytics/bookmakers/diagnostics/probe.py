@@ -92,6 +92,8 @@ class ProbeResult:
     network_metadata: tuple[dict[str, Any], ...] = ()
     classifications: tuple[str, ...] = ()
     grpc_web_diagnostics: tuple[dict[str, Any], ...] = ()
+    grpc_web_stream_summaries: tuple[dict[str, Any], ...] = ()
+    client_schema_summaries: tuple[dict[str, Any], ...] = ()
 
 
 def probe_bookmaker(
@@ -161,6 +163,12 @@ def probe_bookmaker(
     grpc_web_diagnostics = tuple(
         _grpc_web_diagnostic_payload(item) for item in acquisition.grpc_web_diagnostics
     )
+    grpc_web_stream_summaries = tuple(
+        _grpc_web_stream_summary_payload(item) for item in acquisition.grpc_web_stream_summaries
+    )
+    client_schema_summaries = tuple(
+        _client_schema_summary_payload(item) for item in acquisition.client_schema_summaries
+    )
     result = ProbeResult(
         provider=provider_id,
         sport=sport,
@@ -187,6 +195,8 @@ def probe_bookmaker(
             network_metadata=network_metadata,
         ),
         grpc_web_diagnostics=grpc_web_diagnostics,
+        grpc_web_stream_summaries=grpc_web_stream_summaries,
+        client_schema_summaries=client_schema_summaries,
     )
     return result
 
@@ -208,6 +218,12 @@ def collect_probe_from_acquisition(
     )
     grpc_web_diagnostics = tuple(
         _grpc_web_diagnostic_payload(item) for item in acquisition.grpc_web_diagnostics
+    )
+    grpc_web_stream_summaries = tuple(
+        _grpc_web_stream_summary_payload(item) for item in acquisition.grpc_web_stream_summaries
+    )
+    client_schema_summaries = tuple(
+        _client_schema_summary_payload(item) for item in acquisition.client_schema_summaries
     )
     classifications = _probe_classifications(
         provider_id=provider_id,
@@ -236,6 +252,8 @@ def collect_probe_from_acquisition(
         network_metadata=network_metadata,
         classifications=classifications,
         grpc_web_diagnostics=grpc_web_diagnostics,
+        grpc_web_stream_summaries=grpc_web_stream_summaries,
+        client_schema_summaries=client_schema_summaries,
     )
 
 
@@ -346,6 +364,62 @@ def _grpc_web_diagnostic_payload(item: Any) -> dict[str, Any]:
         "total_framed_payload_bytes": item.total_framed_payload_bytes,
         "malformed_or_truncated": item.malformed_or_truncated,
         "grpc_status": item.grpc_status,
+        "capture_unit": item.capture_unit,
+        "frame_index": item.frame_index,
+        "frame_kind": item.frame_kind,
+        "payload_checksum": item.payload_checksum_sha256,
+        "protobuf_wire_fingerprint": item.protobuf_wire_fingerprint,
+        "source_capture_reference": item.source_capture_reference,
+    }
+
+
+def _grpc_web_stream_summary_payload(item: Any) -> dict[str, Any]:
+    return {
+        "approved_route_id": item.approved_route_id,
+        "page_route_id": item.page_route_id,
+        "hostname": item.hostname,
+        "sanitized_path_hash": item.sanitized_path_hash,
+        "observation_supported": item.observation_supported,
+        "support_reason": item.support_reason,
+        "state": item.state.value,
+        "http_response_completed": item.http_response_completed,
+        "logical_rpc_completed": item.logical_rpc_completed,
+        "data_frame_count": item.data_frame_count,
+        "trailer_frame_count": item.trailer_frame_count,
+        "complete_frame_count": item.complete_frame_count,
+        "retained_byte_count": item.retained_byte_count,
+        "data_chunk_count": item.data_chunk_count,
+        "bounded_rejection_count": item.bounded_rejection_count,
+        "missing_data_event_count": item.missing_data_event_count,
+        "duplicate_data_event_count": item.duplicate_data_event_count,
+        "deduplicated_overlap_byte_count": item.deduplicated_overlap_byte_count,
+        "protobuf_wire_fingerprints": list(item.protobuf_wire_fingerprints),
+    }
+
+
+def _client_schema_summary_payload(item: Any) -> dict[str, Any]:
+    return {
+        "scripts_seen": item.scripts_seen,
+        "scripts_inspected": item.scripts_inspected,
+        "scripts_rejected": item.scripts_rejected,
+        "total_source_chars_inspected": item.total_source_chars_inspected,
+        "rejection_counts": dict(item.rejection_counts),
+        "bounds_hit": list(item.bounds_hit),
+        "inspections": [
+            {
+                "hostname": inspection.hostname,
+                "sanitized_path_hash": inspection.sanitized_path_hash,
+                "source_hash_sha256": inspection.source_hash_sha256,
+                "source_char_count": inspection.source_char_count,
+                "runtime_families": list(inspection.runtime_families),
+                "rpc_symbols": list(inspection.rpc_symbols),
+                "response_type_candidates": list(inspection.response_type_candidates),
+                "method_response_associations": list(inspection.method_response_associations),
+                "field_number_type_sequences": list(inspection.field_number_type_sequences),
+                "descriptor_fingerprints": list(inspection.descriptor_fingerprints),
+            }
+            for inspection in item.inspections
+        ],
     }
 
 
@@ -421,6 +495,12 @@ def _write_probe_artifact(
         "grpc_web_diagnostics": [
             _grpc_web_diagnostic_payload(item) for item in acquisition.grpc_web_diagnostics
         ],
+        "grpc_web_stream_summaries": [
+            _grpc_web_stream_summary_payload(item) for item in acquisition.grpc_web_stream_summaries
+        ],
+        "client_schema_summaries": [
+            _client_schema_summary_payload(item) for item in acquisition.client_schema_summaries
+        ],
         "classifications": list(
             _probe_classifications(
                 provider_id=provider_id,
@@ -467,7 +547,10 @@ def _transport_summary(
         "transport_type_counts": _counts("transport_type"),
         "status_code_counts": _counts("status_code"),
         "body_capture_state_counts": _counts("body_capture_state"),
-        "approved_host_counts": dict(sorted(approved_hosts.items())),
+        "approved_host_counts": [
+            {"hostname": hostname, "count": count}
+            for hostname, count in sorted(approved_hosts.items())
+        ],
         "captured_body_count": sum(bool(item.get("body_captured")) for item in network_metadata),
         "truncated_or_budget_rejected_count": sum(
             item.get("body_capture_state")

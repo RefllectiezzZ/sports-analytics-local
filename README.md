@@ -12,6 +12,31 @@ Provide a localhost-only toolchain that:
 - trains local statistical and machine-learning models;
 - generates auditable sports predictions and betting combinations.
 
+## Primary v1 football product path
+
+The current product path is historical modelling and strict offline price
+input, not direct bookmaker acquisition:
+
+```text
+historical evidence -> rolling tournament -> coherent joint score distribution
+-> multi-market probabilities -> fair odds -> optional real offered-price input
+-> EV/opportunities -> proposed singles/accumulators -> persisted Streamlit state
+```
+
+Independent dynamic Poisson and Dixon–Coles candidates derive the supported
+full-time goal markets from one bounded score matrix. Fair odds are model
+estimates; offered odds are real external prices. Without offered odds, EV and
+proposed price-based bets do not exist.
+
+Direct Betclic/Betano acquisition remains experimental and unsupported where no
+exact profile is installed. No additional live probing is part of the v1 path.
+Current prices can instead use strict canonical CSV/JSON or the shared manual
+validator. Final placement remains manual.
+
+See [the coherent football product](docs/football-product.md),
+[the model tournament](docs/model-tournament.md), and
+[the market capability matrix](docs/market-capabilities.md).
+
 ## Runtime constraints
 
 - Runtime operation does **not** depend on paid APIs.
@@ -131,12 +156,20 @@ adapters never replay discovered endpoints through `requests`, `httpx`,
 Playwright request contexts, copied cURL, cookies, headers, tokens, or forged
 request bodies. Chromium supplies its ordinary browser identity.
 
-## Bookmaker acquisition (PR #12 foundation)
+## Bookmaker acquisition (PR #13 implementation pass)
 
 Architecture is localhost-only: SQLite jobs + Parquet snapshots on the local
-filesystem. Betclic (`betclic-pt`) is the next priority provider integration;
-it is not yet operational because no event transport or extraction profile has
-been verified. Betano (`betano-pt`) remains experimental and lower priority.
+filesystem. Betclic (`betclic-pt`) is the priority provider integration, with
+football first and basketball/tennis inspected sequentially. Passive page-scoped
+Chromium streaming retained complete gRPC-Web data frames for football,
+basketball, and tennis while their HTTP responses remained open. Passive
+inspection of already-loaded approved client scripts established a protobuf-ts
+runtime and distinct `GetPopularV2`/`GetLiveCount` response objects, but did not
+establish the event response field table. A trailer is not required to parse an
+already complete data message; it remains separate evidence for logical RPC
+completion. No event semantics or exhaustive-inventory mechanism was
+established, so no Betclic Stage-A or detail profile is registered. Betano
+(`betano-pt`) remains experimental and lower priority.
 Existing non-bookmaker sources retain their historical and analytical roles;
 they are not current-odds sources. Initial bookmaker scope is football,
 basketball, and tennis pre-match only.
@@ -157,7 +190,8 @@ outcome fallbacks. Existing
 `bookmaker-canonical-v1` snapshots remain loadable without changing their
 contract.
 
-Provider/sport verification is exact. The existing Betano football
+Provider/sport verification is exact, with no provider-only, sport-only, or
+default profile fallback. The existing Betano football
 `topEventsV2` profile is verified only for its reviewed landing inventory and is
 explicitly incapable of proving exhaustive event-detail coverage. Betano
 basketball/tennis and all Betclic sport profiles remain disabled until real
@@ -167,8 +201,11 @@ The provider-neutral Stage-B planner/executor extension is wired into the
 production adapter call chain but disabled for every current provider/sport
 profile. Its end-to-end traversal test uses only a synthetic capability and
 executor; it does not establish operational event-detail extraction.
-This PR establishes the acquisition foundation but does not provide exhaustive
-live provider support.
+This pass adds a bounded passive Chromium streaming path but remains
+foundation-only. Complete transport frames are individually parseable even
+while the HTTP/RPC remains open, but do not by themselves establish a semantic
+event profile, logical RPC completion, or exhaustive inventory; synthetic
+fixtures and static mappings never raise an operational classification.
 
 The default body limit is 2 MiB per response and 16 MiB per cycle. Oversize or
 exhausted-budget responses are explicit partial evidence. Event-detail traversal
@@ -177,6 +214,20 @@ navigation-timeout, zero-retry contract if a reviewed provider profile is later
 enabled; no current profile enables that path. An
 explicit access denial, CAPTCHA, regional refusal, or anti-automation block
 stops the cycle immediately.
+
+For Chromium only, a page-scoped CDP session may passively observe an exact
+approved streaming response without interception, mutation, replay, copied
+request material, or WebSocket frames. Support is detected at runtime;
+unsupported versions retain the finite response path and report
+`streaming-body-observation-unsupported`. Responses, queued observations,
+chunks, bytes, frames, frame payloads, incomplete trailing bytes, first-data
+time, idle time, and total stream lifetime are all bounded independently.
+The same page-scoped session may enable the Debugger domain before navigation
+to inspect only already-loaded scripts from exact approved hosts. Source text is
+ephemeral: diagnostics retain only source/path hashes, bounded presence
+evidence, safe candidate type names, field-number/type sequences, and
+method-to-response associations. No asset is fetched separately and no script
+source is persisted.
 
 Same-bookmaker multiple invariant: a multiple is valid only when every leg uses
 quotes from exactly one bookmaker. Betano-only and Betclic-only totals are
@@ -187,9 +238,14 @@ multiple.
 Useful local commands (with bookmakers enabled in settings):
 
 ```bash
+python scraper.py --list-bookmaker-capabilities
 python -m sports_analytics.bookmakers --help
 python run_local.py --config config/settings.toml
 ```
+
+The probe command remains a bounded diagnostic implementation, but it is not a
+v1 product prerequisite and should not be run as part of the football modelling
+workflow. The supported v1 current-price path is strict offline operator input.
 
 `run_local.py` starts the worker and, when `bookmakers.enabled` is true and not
 `--worker-once`, also starts the bookmaker scheduler. Operator status remains
@@ -607,6 +663,17 @@ See
 [docs/settlement-monitoring-governance.md](docs/settlement-monitoring-governance.md)
 for canonical result evidence, analytical settlement, monitoring, and explicit
 champion–challenger operations.
+See [docs/closed-loop-learning.md](docs/closed-loop-learning.md) for verified
+result projection, training eligibility, periodic challenger evaluation, and
+manual promotion/rollback. See
+[docs/player-evidence.md](docs/player-evidence.md) for the current
+display-only player evidence boundary.
+
+The granular PR #13 operator surface is available with:
+
+```powershell
+python -m sports_analytics.services.lifecycle_cli --help
+```
 
 ## Current limitations
 
@@ -636,7 +703,8 @@ champion–challenger operations.
 - `run_local.py` supervises the worker and optional bookmaker scheduler; it does
   not start Streamlit, which is launched explicitly.
 - Durable handlers include football ingestion, bookmaker current-odds ingestion,
-  deterministic analytical settlement, and persisted-evidence monitoring.
+  deterministic analytical settlement, persisted-evidence monitoring, verified
+  result registration, retraining trigger evaluation, and challenger cycles.
 - `app.py` exposes a read-only interface over verified typed analytical
   artifacts.
 

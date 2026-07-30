@@ -83,6 +83,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="List supported bookmaker sports as JSON.",
     )
     mode.add_argument(
+        "--list-bookmaker-capabilities",
+        action="store_true",
+        help="List exact provider/sport acquisition capabilities as JSON.",
+    )
+    mode.add_argument(
         "--list-bookmaker-markets",
         action="store_true",
         help="List supported bookmaker market definition ids as JSON.",
@@ -239,6 +244,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.list_bookmaker_sports:
             return bookmaker_cli.list_bookmaker_sports()
 
+        if args.list_bookmaker_capabilities:
+            return bookmaker_cli.list_bookmaker_capabilities()
+
         if args.list_bookmaker_markets:
             return bookmaker_cli.list_bookmaker_markets(provider=args.provider)
 
@@ -318,6 +326,7 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.verify_snapshot is not None,
         args.enqueue_football_data,
         args.list_bookmaker_sports,
+        args.list_bookmaker_capabilities,
         args.list_bookmaker_markets,
         args.enqueue_bookmaker_acquisition,
         args.provider_status,

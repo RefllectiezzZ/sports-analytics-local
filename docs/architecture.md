@@ -41,6 +41,26 @@ shared configuration/database CLI modes for regular Python invocation.
 
 ## Domain boundaries
 
+### Coherent football probability and product boundary
+
+The primary football path is persisted-data-first:
+
+`historical results -> rolling tournament -> reviewed joint score distribution
+-> derived market probabilities/fair odds -> optional strict offered quotes ->
+opportunities/proposals -> read-only UI`.
+
+`models.football_scores` owns football scoring assumptions. Shared market and
+artifact contracts do not contain football score rules. Every supported
+full-time goal market is a fixed predicate over one bounded score matrix.
+`bookmakers.operator_quotes` is the offline current offered-price boundary and
+cannot carry URLs, request material, scripts, profiles, or credentials.
+`services.football_product` orchestrates immutable artifacts; the Streamlit
+process reads only the final verified read model.
+
+Basketball and tennis have explicit `model-unavailable` capability rows and do
+not reuse the football generator. First-half, corners, shots, player, and live
+families remain evidence-gated as documented in `market-capabilities.md`.
+
 The code separates four concerns that earlier revisions conflated.
 
 | Package | Responsibility |
@@ -364,10 +384,13 @@ The bookmaker acquisition foundation provides:
   visible presentation modes under identical safety policy.
 - Content-addressed minimized raw captures and immutable
   `current-bookmaker-odds` snapshots (`bookmaker-canonical-v1`).
-- Betclic is the next priority provider integration, but is not operational:
-  no event transport or extraction profile is verified yet. Betano remains
-  experimental and lower priority; its access limitations do not block the
-  remainder of the product workflow.
+- Betclic is the priority provider integration, but is not operational.
+  Passive Chromium streaming retained stable complete data frames for football,
+  basketball, and tennis. The responses remained open. Approved-client
+  inspection established a protobuf-ts runtime and exact reviewed RPC
+  associations, but not the event response field table. No body-derived
+  semantic profile was installed. Betano remains experimental and lower
+  priority.
 - Same-bookmaker multiple invariant; mixed-provider singles comparison is a
   separate type and never a multiple.
 - Explicit fallback: Betclic first; stale last-valid snapshot may be preserved
@@ -395,7 +418,11 @@ Playwright Chromium
 -> provider page naturally generates network activity
 -> page.on("response") observes the response in the active cycle
 -> allowlisted host plus reviewed structural response gate
--> bounded body capture and content checksum
+-> finite path: requestfinished then bounded body capture/checksum
+-> Chromium streaming path: page-scoped passive CDP correlation, bounded queue,
+   incremental framing, and complete-frame capture while HTTP may remain open
+-> passive client path: already-loaded approved-host scripts only, ephemeral
+   source inspection, safe descriptor hashes/type associations only
 -> optional provider-owned Stage-B candidates and reviewed navigation plan
    (disabled for every current provider/sport profile)
 -> provider-native parser
@@ -411,6 +438,8 @@ approved public responses. WebSocket connection metadata is admitted only for
 `wss://` on the exact approved public hostname and retains only the hostname and
 path hash plus acquisition identity and time. Raw WebSocket frames, HTML,
 scripts, complete URLs, queries, fragments, and headers are not persisted.
+No script asset is fetched separately. Script text, source-map URLs, and full
+script URLs remain ephemeral and are never diagnostic fields.
 
 Each retained response is linked to provider, sport, acquisition cycle, and page
 route. It records request method, safe transport type, approved hostname,
@@ -433,7 +462,32 @@ Verification is provider/sport specific. At this implementation point only the
 Betano football landing-inventory profile is registered, and its completeness
 capability is explicitly non-exhaustive. Betano basketball/tennis and Betclic
 football/basketball/tennis remain unverified rather than borrowing the football
-profile or guessed protobuf fields.
+profile or guessed protobuf fields. Registry lookup requires both provider and
+sport; provider-only, sport-only, and default fallback do not exist.
+
+The streaming observer enables the Network domain before navigation and detects
+experimental resource-stream support only when an exact approved candidate is
+seen. It never enables Fetch interception, pauses or modifies a request,
+replays a URL, copies request material, or observes WebSocket frames. CDP
+request IDs and complete URLs remain cycle-local and are excluded from
+diagnostics. Callback handlers only enqueue bounded observations; one consumer
+performs correlation, decoding, raw evidence storage, and cleanup.
+
+The same page-scoped session may enable Debugger before navigation. Script
+inspection is limited by scripts seen/inspected, declared and actual source
+characters, total source characters, matches, field entries, queue size, and
+wall time. Exact host approval happens before `getScriptSource`; cross-provider,
+extension, data, and blob scripts are rejected. Only runtime-family presence,
+safe candidate type names, field-number/type sequences, reviewed
+method-to-response associations, and hashes survive the inspection.
+
+HTTP completion, complete data-frame observation, final trailer observation,
+logical RPC completion, parsing sufficiency, event completeness, and market
+completeness are independent states. A complete frame may be inspected while
+HTTP remains open and does not need a trailer merely to be parsed. Only a valid
+final trailer can establish logical RPC completion for this reviewed transport.
+Neither a 2xx response nor a complete data frame establishes exhaustive
+inventory.
 
 Operators must review current provider terms before enabling
 `bookmakers.enabled`.

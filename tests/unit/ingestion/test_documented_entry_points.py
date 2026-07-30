@@ -108,3 +108,30 @@ def test_documented_scraper_probe_prints_json(isolated_cwd: Path) -> None:
     else:
         assert completed.returncode != 0
         assert "Traceback" not in completed.stderr or "playwright" in completed.stderr.lower()
+
+
+def test_bookmaker_capability_command_lists_exact_safe_matrix(isolated_cwd: Path) -> None:
+    scraper = repository_root() / "scraper.py"
+    completed = subprocess.run(
+        [sys.executable, str(scraper), "--list-bookmaker-capabilities"],
+        cwd=isolated_cwd,
+        env=scrubbed_subprocess_environ(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == SUCCESS_EXIT
+    payload = json.loads(completed.stdout)
+    rows = payload["capabilities"]
+    assert len(rows) == 6
+    assert [(row["provider_id"], row["sport"]) for row in rows] == [
+        ("betano-pt", "basketball"),
+        ("betano-pt", "football"),
+        ("betano-pt", "tennis"),
+        ("betclic-pt", "basketball"),
+        ("betclic-pt", "football"),
+        ("betclic-pt", "tennis"),
+    ]
+    encoded = completed.stdout.casefold()
+    assert "https://" not in encoded
+    assert "www." not in encoded

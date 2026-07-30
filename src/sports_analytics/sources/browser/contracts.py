@@ -112,6 +112,21 @@ class BrowserBodyCaptureState(StrEnum):
     UNSUPPORTED_CONTENT = "unsupported-content"
 
 
+class BrowserStreamingState(StrEnum):
+    """Safe distinction between frame, RPC, and transport completion."""
+
+    DATA_FRAME_COMPLETE = "streaming-data-frame-complete"
+    RPC_COMPLETE = "streaming-rpc-complete"
+    RPC_OPEN = "streaming-rpc-open"
+    FRAME_TRUNCATED = "streaming-frame-truncated"
+    FIRST_DATA_TIMEOUT = "streaming-first-data-timeout"
+    IDLE_TIMEOUT = "streaming-idle-timeout"
+    LIFETIME_TIMEOUT = "streaming-lifetime-timeout"
+    UNSUPPORTED = "streaming-unsupported"
+    TRANSPORT_ERROR = "streaming-transport-error"
+    BOUNDED_REJECTION = "streaming-bounded-rejection"
+
+
 class BrowserRedirectClassification(StrEnum):
     """Safe redirect relationship without retaining redirect URLs."""
 
@@ -570,6 +585,12 @@ class BrowserGrpcWebDiagnostic:
     malformed_or_truncated: bool
     grpc_status: str | None
     newly_created: bool = False
+    capture_unit: str = "finite-complete-response"
+    frame_index: int | None = None
+    frame_kind: str | None = None
+    payload_checksum_sha256: str | None = None
+    protobuf_wire_fingerprint: str | None = None
+    source_capture_reference: str | None = None
 
     def __post_init__(self) -> None:
         validate_identifier(self.capture_kind, field_name="capture_kind")
@@ -597,6 +618,222 @@ class BrowserGrpcWebDiagnostic:
         ):
             msg = "gRPC-web diagnostic counts must be non-negative"
             raise PermanentSourceError(msg)
+        if self.capture_unit not in {
+            "finite-complete-response",
+            "complete-streaming-frame",
+        }:
+            msg = "gRPC-web diagnostic capture unit is not recognized"
+            raise PermanentSourceError(msg)
+        if self.frame_index is not None and self.frame_index < 0:
+            msg = "gRPC-web diagnostic frame index must be non-negative"
+            raise PermanentSourceError(msg)
+        if self.frame_kind not in {None, "data", "trailer"}:
+            msg = "gRPC-web diagnostic frame kind is not recognized"
+            raise PermanentSourceError(msg)
+        for field_name in (
+            "payload_checksum_sha256",
+            "protobuf_wire_fingerprint",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    validate_sha256_checksum(value),
+                )
+        if self.capture_unit == "complete-streaming-frame" and (
+            self.frame_index is None
+            or self.frame_kind is None
+            or self.payload_checksum_sha256 is None
+            or self.source_capture_reference is None
+        ):
+            msg = "streaming frame diagnostics require exact safe provenance"
+            raise PermanentSourceError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserGrpcWebStreamSummary:
+    """Sanitized cycle-local streaming response outcome without request IDs."""
+
+    approved_route_id: str
+    page_route_id: str
+    hostname: str
+    sanitized_path_hash: str
+    observation_supported: bool
+    support_reason: str | None
+    state: BrowserStreamingState
+    http_response_completed: bool
+    logical_rpc_completed: bool
+    data_frame_count: int
+    trailer_frame_count: int
+    complete_frame_count: int
+    retained_byte_count: int
+    data_chunk_count: int
+    bounded_rejection_count: int
+    missing_data_event_count: int = 0
+    duplicate_data_event_count: int = 0
+    deduplicated_overlap_byte_count: int = 0
+    protobuf_wire_fingerprints: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.approved_route_id, field_name="approved_route_id")
+        if not self.page_route_id or len(self.page_route_id) > MAX_PAGE_ROUTE_ID_LENGTH:
+            msg = "stream page route ID must be bounded"
+            raise PermanentSourceError(msg)
+        if (
+            not self.hostname
+            or len(self.hostname) > 253
+            or re.fullmatch(r"(?i)[a-z0-9.-]+", self.hostname) is None
+        ):
+            msg = "stream hostname must be a bounded bare hostname"
+            raise PermanentSourceError(msg)
+        object.__setattr__(
+            self,
+            "sanitized_path_hash",
+            validate_sha256_checksum(self.sanitized_path_hash),
+        )
+        if self.support_reason is not None:
+            validate_identifier(self.support_reason, field_name="support_reason")
+        if not isinstance(self.state, BrowserStreamingState):
+            msg = "stream state must be a BrowserStreamingState"
+            raise PermanentSourceError(msg)
+        counts = (
+            self.data_frame_count,
+            self.trailer_frame_count,
+            self.complete_frame_count,
+            self.retained_byte_count,
+            self.data_chunk_count,
+            self.bounded_rejection_count,
+            self.missing_data_event_count,
+            self.duplicate_data_event_count,
+            self.deduplicated_overlap_byte_count,
+        )
+        if any(isinstance(value, bool) or value < 0 for value in counts):
+            msg = "stream summary counts must be non-negative integers"
+            raise PermanentSourceError(msg)
+        if self.complete_frame_count != self.data_frame_count + self.trailer_frame_count:
+            msg = "stream complete frame count is inconsistent"
+            raise PermanentSourceError(msg)
+        if self.logical_rpc_completed and self.trailer_frame_count != 1:
+            msg = "logical RPC completion requires exactly one trailer"
+            raise PermanentSourceError(msg)
+        object.__setattr__(
+            self,
+            "protobuf_wire_fingerprints",
+            tuple(
+                sorted(
+                    {validate_sha256_checksum(value) for value in self.protobuf_wire_fingerprints}
+                )
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserClientScriptInspection:
+    """Safe structural summary of one already-loaded approved client script."""
+
+    hostname: str
+    sanitized_path_hash: str
+    source_hash_sha256: str
+    source_char_count: int
+    runtime_families: tuple[str, ...] = ()
+    rpc_symbols: tuple[str, ...] = ()
+    response_type_candidates: tuple[str, ...] = ()
+    method_response_associations: tuple[str, ...] = ()
+    field_number_type_sequences: tuple[str, ...] = ()
+    descriptor_fingerprints: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            not self.hostname
+            or len(self.hostname) > 253
+            or re.fullmatch(r"(?i)[a-z0-9.-]+", self.hostname) is None
+        ):
+            msg = "client script hostname must be a bounded bare hostname"
+            raise PermanentSourceError(msg)
+        object.__setattr__(
+            self,
+            "sanitized_path_hash",
+            validate_sha256_checksum(self.sanitized_path_hash),
+        )
+        object.__setattr__(
+            self,
+            "source_hash_sha256",
+            validate_sha256_checksum(self.source_hash_sha256),
+        )
+        if isinstance(self.source_char_count, bool) or self.source_char_count < 1:
+            msg = "client script source_char_count must be positive"
+            raise PermanentSourceError(msg)
+        for field_name in (
+            "runtime_families",
+            "rpc_symbols",
+            "response_type_candidates",
+            "method_response_associations",
+            "field_number_type_sequences",
+        ):
+            values = tuple(sorted(set(getattr(self, field_name))))
+            if len(values) > 128 or any(not value or len(value) > 256 for value in values):
+                msg = f"{field_name} contains unsafe or unbounded values"
+                raise PermanentSourceError(msg)
+            if any(
+                "://" in value
+                or "?" in value
+                or "#" in value
+                or re.fullmatch(r"[A-Za-z0-9_.:,=>-]+", value) is None
+                for value in values
+            ):
+                msg = f"{field_name} contains non-structural content"
+                raise PermanentSourceError(msg)
+            object.__setattr__(self, field_name, values)
+        object.__setattr__(
+            self,
+            "descriptor_fingerprints",
+            tuple(
+                sorted({validate_sha256_checksum(value) for value in self.descriptor_fingerprints})
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserClientSchemaSummary:
+    """Bounded cycle summary for passive loaded-script inspection."""
+
+    scripts_seen: int
+    scripts_inspected: int
+    scripts_rejected: int
+    total_source_chars_inspected: int
+    rejection_counts: tuple[tuple[str, int], ...]
+    bounds_hit: tuple[str, ...]
+    inspections: tuple[BrowserClientScriptInspection, ...]
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.scripts_seen,
+            self.scripts_inspected,
+            self.scripts_rejected,
+            self.total_source_chars_inspected,
+        )
+        if any(isinstance(value, bool) or value < 0 for value in counts):
+            msg = "client schema summary counts must be non-negative integers"
+            raise PermanentSourceError(msg)
+        if self.scripts_inspected != len(self.inspections):
+            msg = "client schema inspected count is inconsistent"
+            raise PermanentSourceError(msg)
+        normalized_rejections = tuple(sorted(self.rejection_counts))
+        if any(
+            not reason or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,95}", reason) is None or count < 1
+            for reason, count in normalized_rejections
+        ):
+            msg = "client schema rejection counts must be positive"
+            raise PermanentSourceError(msg)
+        object.__setattr__(self, "rejection_counts", normalized_rejections)
+        normalized_bounds = tuple(sorted(set(self.bounds_hit)))
+        if any(
+            re.fullmatch(r"[a-z0-9][a-z0-9-]{0,95}", value) is None for value in normalized_bounds
+        ):
+            msg = "client schema bound reasons must be safe identifiers"
+            raise PermanentSourceError(msg)
+        object.__setattr__(self, "bounds_hit", normalized_bounds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,6 +853,8 @@ class BrowserAcquisitionResult:
     cookie_banner_dismissed: bool = False
     network_metadata: tuple[BrowserNetworkMetadata, ...] = ()
     grpc_web_diagnostics: tuple[BrowserGrpcWebDiagnostic, ...] = ()
+    grpc_web_stream_summaries: tuple[BrowserGrpcWebStreamSummary, ...] = ()
+    client_schema_summaries: tuple[BrowserClientSchemaSummary, ...] = ()
 
     def __post_init__(self) -> None:
         validate_identifier(self.provider_id, field_name="provider_id")

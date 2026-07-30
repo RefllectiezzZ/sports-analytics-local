@@ -113,8 +113,8 @@ def test_adapter_contract_fail_closed_on_missing_state() -> None:
 
 
 def test_production_profile_defaults_to_none() -> None:
-    betano_profile = get_verified_extraction_profile(PROVIDER_ID)
+    betano_profile = get_verified_extraction_profile(PROVIDER_ID, "football")
     assert betano_profile is not None
     assert betano_profile.verified is True
-    assert get_verified_extraction_profile(BETCLIC_PROVIDER_ID) is None
+    assert get_verified_extraction_profile(BETCLIC_PROVIDER_ID, "football") is None
     assert EXAMPLE_BETANO_SYNTHETIC_PROFILE.verified is False

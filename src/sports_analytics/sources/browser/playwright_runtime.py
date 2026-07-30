@@ -14,7 +14,7 @@ import logging
 import re
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -32,6 +32,7 @@ from sports_analytics.sources.browser.contracts import (
     BrowserDiagnosticReference,
     BrowserDomCandidate,
     BrowserGrpcWebDiagnostic,
+    BrowserGrpcWebStreamSummary,
     BrowserMode,
     BrowserNetworkMetadata,
     BrowserPageObservation,
@@ -523,6 +524,47 @@ class BetclicGrpcObservationOutcome:
     malformed_or_truncated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingBetclicGrpcResponse:
+    """Ephemeral naturally observed response awaiting post-callback body access."""
+
+    request: object = field(repr=False, compare=False)
+    response: object = field(repr=False, compare=False)
+    response_url: str = field(repr=False, compare=False)
+    content_type: str | None
+    content_length: int | None
+    status_code: int | None
+    resource_type: str | None
+    observed_at_utc: datetime
+    request_method: str
+    transport_type: BrowserTransportType
+    redirect_classification: BrowserRedirectClassification
+    page_route_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingPlaywrightResponse:
+    """Ephemeral response object queued without callback-side inspection."""
+
+    response: object = field(repr=False, compare=False)
+    page_route_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingFinishedRequest:
+    """Ephemeral completion signal queued for the finite body consumer."""
+
+    request: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingWebSocket:
+    """Ephemeral socket object queued for metadata-only processing."""
+
+    socket: object = field(repr=False, compare=False)
+    page_route_id: str
+
+
 def observe_betclic_grpc_response(
     *,
     response: object,
@@ -780,10 +822,17 @@ class PlaywrightBrowserSession:
         network_metadata: list[BrowserNetworkMetadata] = []
         diagnostics: list[BrowserDiagnosticReference] = []
         grpc_web_diagnostics: list[BrowserGrpcWebDiagnostic] = []
+        grpc_web_stream_summaries: list[BrowserGrpcWebStreamSummary] = []
+        client_schema_summaries: list[Any] = []
         warnings: list[str] = []
         block_reason: BrowserBlockReason | None = None
         cookie_banner_dismissed = False
         captured_total_bytes = 0
+        pending_betclic_grpc_responses: list[_PendingBetclicGrpcResponse] = []
+        pending_playwright_responses: list[_PendingPlaywrightResponse] = []
+        pending_finished_requests: list[_PendingFinishedRequest] = []
+        pending_websockets: list[_PendingWebSocket] = []
+        streaming_observer: Any | None = None
 
         current_route_id = "unknown"
         started_at = self._clock()
@@ -814,8 +863,147 @@ class PlaywrightBrowserSession:
                     page = context.new_page()
                     readiness_predicate = readiness_predicate_for_provider(provider_id)
 
-                    def _on_response(response: object) -> None:
-                        nonlocal captured_total_bytes, current_route_id
+                    def _record_betclic_grpc_outcome(
+                        item: _PendingBetclicGrpcResponse,
+                        outcome: BetclicGrpcObservationOutcome,
+                        *,
+                        capture_state: BrowserBodyCaptureState,
+                    ) -> None:
+                        if outcome.diagnostic is not None:
+                            grpc_web_diagnostics.append(outcome.diagnostic)
+                            diagnostics.append(
+                                BrowserDiagnosticReference(
+                                    capture_kind=outcome.diagnostic.capture_kind,
+                                    checksum_sha256=outcome.diagnostic.checksum_sha256,
+                                    relative_path=outcome.diagnostic.relative_path,
+                                    byte_count=outcome.diagnostic.byte_count,
+                                )
+                            )
+                        meta = build_network_metadata(
+                            response_url=item.response_url,
+                            allowed_hostnames=allowed_hostnames,
+                            status_code=item.status_code,
+                            content_type=item.content_type,
+                            resource_type=item.resource_type,
+                            observed_at_utc=item.observed_at_utc,
+                            byte_size=outcome.actual_byte_size or item.content_length,
+                            provider_id=provider_id,
+                            sport=sport,
+                            acquisition_cycle_id=acquisition_cycle_id,
+                            page_route_id=item.page_route_id,
+                            request_method=item.request_method,
+                            transport_type=item.transport_type,
+                            declared_content_length=item.content_length,
+                            redirect_classification=item.redirect_classification,
+                            body_capture_state=capture_state,
+                            grpc_web_envelope_recognized=outcome.envelope_recognized,
+                            grpc_web_failure_code=outcome.failure_code,
+                            grpc_web_body_read=outcome.body_read,
+                            grpc_web_evidence_stored=outcome.evidence_stored,
+                            grpc_web_malformed_or_truncated=outcome.malformed_or_truncated,
+                        )
+                        if meta is not None:
+                            network_metadata.append(meta)
+
+                    def _process_finished_betclic_grpc_response(
+                        item: _PendingBetclicGrpcResponse,
+                    ) -> None:
+                        nonlocal captured_total_bytes
+                        if (
+                            streaming_observer is not None
+                            and streaming_observer.uses_streaming_for_url(item.response_url)
+                        ):
+                            return
+                        remaining_capture_bytes = (
+                            self._maximum_total_capture_bytes - captured_total_bytes
+                        )
+                        if remaining_capture_bytes <= 0:
+                            outcome = BetclicGrpcObservationOutcome(
+                                None,
+                                False,
+                                None,
+                                "total-capture-budget-rejected",
+                                None,
+                                False,
+                                False,
+                                False,
+                            )
+                            capture_state = BrowserBodyCaptureState.TOTAL_BUDGET_REJECTED
+                        else:
+                            outcome = observe_betclic_grpc_response(
+                                response=item.response,
+                                response_url=item.response_url,
+                                content_type=item.content_type,
+                                content_length=item.content_length,
+                                maximum_bytes=min(
+                                    self._maximum_response_bytes,
+                                    remaining_capture_bytes,
+                                ),
+                                diagnostic_directory=diagnostic_directory,
+                            )
+                            capture_state = BrowserBodyCaptureState.METADATA_ONLY
+                            if (
+                                outcome.body_read
+                                and outcome.actual_byte_size is not None
+                                and outcome.actual_byte_size <= remaining_capture_bytes
+                            ):
+                                captured_total_bytes += outcome.actual_byte_size
+                            elif (
+                                outcome.actual_byte_size is not None
+                                and outcome.actual_byte_size > remaining_capture_bytes
+                            ):
+                                capture_state = BrowserBodyCaptureState.TOTAL_BUDGET_REJECTED
+                        _record_betclic_grpc_outcome(
+                            item,
+                            outcome,
+                            capture_state=capture_state,
+                        )
+
+                    def _on_request_finished(request: object) -> None:
+                        if len(pending_finished_requests) >= 512:
+                            warnings.append("playwright-observation-queue-overflow")
+                            return
+                        pending_finished_requests.append(_PendingFinishedRequest(request=request))
+
+                    def _drain_finished_requests() -> None:
+                        pending = tuple(pending_finished_requests)
+                        pending_finished_requests.clear()
+                        for finished in pending:
+                            for index, item in enumerate(pending_betclic_grpc_responses):
+                                if (
+                                    item.request is finished.request
+                                    or item.request == finished.request
+                                ):
+                                    pending_betclic_grpc_responses.pop(index)
+                                    _process_finished_betclic_grpc_response(item)
+                                    break
+
+                    def _flush_pending_betclic_grpc_responses(
+                        *,
+                        incomplete_reason: str = "grpc-web-response-incomplete",
+                    ) -> None:
+                        pending = tuple(pending_betclic_grpc_responses)
+                        pending_betclic_grpc_responses.clear()
+                        for item in pending:
+                            _record_betclic_grpc_outcome(
+                                item,
+                                BetclicGrpcObservationOutcome(
+                                    None,
+                                    False,
+                                    None,
+                                    incomplete_reason,
+                                    None,
+                                    False,
+                                    False,
+                                    False,
+                                ),
+                                capture_state=BrowserBodyCaptureState.METADATA_ONLY,
+                            )
+
+                    def _process_response(item: _PendingPlaywrightResponse) -> None:
+                        nonlocal captured_total_bytes
+                        response = item.response
+                        response_route_id = item.page_route_id
                         try:
                             if self._clock() > deadline:
                                 return
@@ -869,6 +1057,44 @@ class PlaywrightBrowserSession:
                                     str(content_type) if content_type is not None else None
                                 ),
                             )
+
+                            if provider_id == "betclic-pt":
+                                from sports_analytics.sources.betclic.discovery import (
+                                    approve_betclic_response_url,
+                                )
+                                from sports_analytics.sources.betclic.grpc_web import (
+                                    is_recognized_grpc_web_content_type,
+                                )
+
+                                try:
+                                    approved_betclic_response = approve_betclic_response_url(
+                                        response_url
+                                    )
+                                except PermanentSourceError:
+                                    approved_betclic_response = None
+                                if (
+                                    approved_betclic_response is not None
+                                    and content_type is not None
+                                    and request is not None
+                                    and is_recognized_grpc_web_content_type(str(content_type))
+                                ):
+                                    pending_betclic_grpc_responses.append(
+                                        _PendingBetclicGrpcResponse(
+                                            request=request,
+                                            response=response,
+                                            response_url=response_url,
+                                            content_type=str(content_type),
+                                            content_length=content_length,
+                                            status_code=status_code,
+                                            resource_type=resource_type,
+                                            observed_at_utc=self._clock(),
+                                            request_method=request_method,
+                                            transport_type=transport_type,
+                                            redirect_classification=redirect_classification,
+                                            page_route_id=response_route_id,
+                                        )
+                                    )
+                                    return
 
                             hostname_approved = False
                             try:
@@ -955,7 +1181,7 @@ class PlaywrightBrowserSession:
                                                 )
                                                 body_text = body
                                                 captured_total_bytes += encoded_size
-                                                route_id = current_route_id
+                                                route_id = response_route_id
                                                 responses.append(
                                                     BrowserResponseObservation(
                                                         provider_id=provider_id,
@@ -1068,7 +1294,7 @@ class PlaywrightBrowserSession:
                                 provider_id=provider_id,
                                 sport=sport,
                                 acquisition_cycle_id=acquisition_cycle_id,
-                                page_route_id=current_route_id,
+                                page_route_id=response_route_id,
                                 request_method=request_method,
                                 transport_type=transport_type,
                                 declared_content_length=content_length,
@@ -1095,26 +1321,122 @@ class PlaywrightBrowserSession:
                                 type(exc).__name__,
                             )
 
+                    def _on_response(response: object) -> None:
+                        if len(pending_playwright_responses) >= 512:
+                            warnings.append("playwright-observation-queue-overflow")
+                            return
+                        pending_playwright_responses.append(
+                            _PendingPlaywrightResponse(
+                                response=response,
+                                page_route_id=current_route_id,
+                            )
+                        )
+
+                    def _drain_playwright_responses() -> None:
+                        pending = tuple(pending_playwright_responses)
+                        pending_playwright_responses.clear()
+                        for response_item in pending:
+                            _process_response(response_item)
+                        _drain_finished_requests()
+
                     page.on("response", _on_response)
+                    page.on("requestfinished", _on_request_finished)
 
                     def _on_websocket(socket: object) -> None:
-                        """Retain connection metadata only; never read frames."""
-                        try:
-                            socket_url = str(getattr(socket, "url", ""))
-                            meta = build_websocket_metadata(
-                                socket_url=socket_url,
+                        """Queue connection metadata only; never observe frames."""
+                        if len(pending_websockets) >= 512:
+                            warnings.append("playwright-observation-queue-overflow")
+                            return
+                        pending_websockets.append(
+                            _PendingWebSocket(
+                                socket=socket,
+                                page_route_id=current_route_id,
+                            )
+                        )
+
+                    def _drain_websockets() -> None:
+                        pending = tuple(pending_websockets)
+                        pending_websockets.clear()
+                        for socket_item in pending:
+                            try:
+                                socket_url = str(getattr(socket_item.socket, "url", ""))
+                                meta = build_websocket_metadata(
+                                    socket_url=socket_url,
+                                    allowed_hostnames=allowed_hostnames,
+                                    observed_at_utc=self._clock(),
+                                    provider_id=provider_id,
+                                    sport=sport,
+                                    acquisition_cycle_id=acquisition_cycle_id,
+                                    page_route_id=socket_item.page_route_id,
+                                )
+                                network_metadata.append(meta)
+                            except PermanentSourceError:
+                                continue
+
+                    def _drain_playwright_observations() -> None:
+                        _drain_playwright_responses()
+                        _drain_websockets()
+
+                    page.on("websocket", _on_websocket)
+
+                    def _record_streaming_outcomes(
+                        outcomes: tuple[object, ...],
+                    ) -> None:
+                        nonlocal captured_total_bytes
+                        for raw_outcome in outcomes:
+                            from sports_analytics.sources.browser.cdp_streaming import (
+                                StreamingResponseOutcome,
+                            )
+
+                            if not isinstance(raw_outcome, StreamingResponseOutcome):
+                                continue
+                            outcome = raw_outcome
+                            summary = outcome.summary
+                            grpc_web_stream_summaries.append(summary)
+                            for diagnostic in outcome.diagnostics:
+                                grpc_web_diagnostics.append(diagnostic)
+                                diagnostics.append(
+                                    BrowserDiagnosticReference(
+                                        capture_kind=diagnostic.capture_kind,
+                                        checksum_sha256=diagnostic.checksum_sha256,
+                                        relative_path=diagnostic.relative_path,
+                                        byte_count=diagnostic.byte_count,
+                                    )
+                                )
+                            captured_total_bytes += summary.retained_byte_count
+                            complete_frames = summary.complete_frame_count
+                            body_read = summary.data_chunk_count > 0
+                            malformed = (
+                                summary.state.value == "streaming-frame-truncated"
+                                and complete_frames == 0
+                                and body_read
+                            )
+                            network_item = build_network_metadata(
+                                response_url=outcome.response_url,
                                 allowed_hostnames=allowed_hostnames,
+                                status_code=outcome.status_code,
+                                content_type=outcome.content_type,
+                                resource_type=outcome.resource_type,
                                 observed_at_utc=self._clock(),
+                                byte_size=summary.retained_byte_count,
                                 provider_id=provider_id,
                                 sport=sport,
                                 acquisition_cycle_id=acquisition_cycle_id,
-                                page_route_id=current_route_id,
+                                page_route_id=summary.page_route_id,
+                                request_method=outcome.request_method,
+                                transport_type=BrowserTransportType.GRPC_WEB,
+                                actual_captured_byte_length=(
+                                    summary.retained_byte_count if body_read else None
+                                ),
+                                body_capture_state=BrowserBodyCaptureState.METADATA_ONLY,
+                                grpc_web_envelope_recognized=complete_frames > 0,
+                                grpc_web_failure_code=outcome.failure_code,
+                                grpc_web_body_read=body_read,
+                                grpc_web_evidence_stored=outcome.evidence_stored,
+                                grpc_web_malformed_or_truncated=malformed,
                             )
-                            network_metadata.append(meta)
-                        except PermanentSourceError:
-                            return
-
-                    page.on("websocket", _on_websocket)
+                            if network_item is not None:
+                                network_metadata.append(network_item)
 
                     for page_route_id, url in start_urls:
                         if self._clock() > deadline:
@@ -1128,6 +1450,68 @@ class PlaywrightBrowserSession:
                             url,
                             allowed_hostnames=allowed_hostnames,
                         )
+                        streaming_observer = None
+                        client_schema_inspector = None
+                        cdp_session = None
+                        streaming_attach_reason: str | None = None
+                        if provider_id == "betclic-pt":
+                            from sports_analytics.sources.betclic.discovery import (
+                                approve_betclic_response_url,
+                            )
+                            from sports_analytics.sources.browser.cdp_streaming import (
+                                ApprovedStreamingResponse,
+                                PassiveCdpStreamingObserver,
+                            )
+                            from sports_analytics.sources.browser.client_schema import (
+                                PassiveClientSchemaInspector,
+                            )
+
+                            def _classify_streaming_response(
+                                response_url: str,
+                            ) -> ApprovedStreamingResponse:
+                                reviewed = approve_betclic_response_url(response_url)
+                                return ApprovedStreamingResponse(
+                                    hostname=reviewed.hostname,
+                                    sanitized_path_hash=sanitized_path_hash(response_url),
+                                    approved_route_id=reviewed.route_id,
+                                    metadata_only=reviewed.metadata_only,
+                                )
+
+                            def _active_page_route(
+                                route_id: str = current_route_id,
+                            ) -> str:
+                                return route_id
+
+                            try:
+                                cdp_session = context.new_cdp_session(page)
+                                client_schema_inspector = PassiveClientSchemaInspector(
+                                    session=cdp_session,
+                                    allowed_hostnames=allowed_hostnames,
+                                    target_rpc_symbols=("GetLiveCount", "GetPopularV2"),
+                                )
+                                client_schema_inspector.attach()
+                                streaming_observer = PassiveCdpStreamingObserver(
+                                    session=cdp_session,
+                                    classify_response=_classify_streaming_response,
+                                    page_route_id=_active_page_route,
+                                    diagnostic_directory=diagnostic_directory,
+                                    clock=self._clock,
+                                )
+                                streaming_observer.attach()
+                            except Exception:  # noqa: BLE001 - safe feature detection
+                                streaming_observer = None
+                                streaming_attach_reason = "streaming-body-observation-unsupported"
+
+                        def _drain_all_observations(
+                            observer: Any | None = streaming_observer,
+                            inspector: Any | None = client_schema_inspector,
+                        ) -> None:
+                            if inspector is not None:
+                                inspector.drain()
+                            if observer is not None:
+                                observer.drain()
+                            _drain_playwright_observations()
+
                         try:
                             remaining_ms = max(
                                 1,
@@ -1139,9 +1523,11 @@ class PlaywrightBrowserSession:
                                 wait_until="domcontentloaded",
                                 timeout=nav_timeout,
                             )
+                            _drain_all_observations()
                             # Ordinary public cookie consent before readiness wait.
                             if dismiss_cookie_consent(page, provider_id=provider_id):
                                 cookie_banner_dismissed = True
+                            _drain_all_observations()
                             if self._clock() > deadline:
                                 msg = (
                                     "browser acquisition exceeded duration deadline "
@@ -1158,13 +1544,16 @@ class PlaywrightBrowserSession:
                                 page_route_id=page_route_id,
                                 timeout_ms=readiness_timeout_ms,
                             )
+                            _drain_all_observations()
                             self._observe_after_readiness(
                                 page,
                                 deadline=deadline,
                                 observation_window_ms=observation_window_ms,
                                 observation_complete=observation_complete,
                                 network_metadata=network_metadata,
+                                observation_tick=_drain_all_observations,
                             )
+                            _drain_all_observations()
                         except ReadinessBlockedError as exc:
                             block_reason = exc.block_reason
                             pages.append(
@@ -1188,6 +1577,26 @@ class PlaywrightBrowserSession:
                                 f"incomplete page load for {page_route_id}: {type(exc).__name__}"
                             )
                             raise RetryableSourceError(message) from exc
+                        finally:
+                            try:
+                                _drain_all_observations()
+                                if client_schema_inspector is not None:
+                                    client_schema_summaries.append(client_schema_inspector.close())
+                                if streaming_observer is not None:
+                                    _record_streaming_outcomes(streaming_observer.close())
+                                elif cdp_session is not None:
+                                    try:
+                                        cdp_session.detach()
+                                    except Exception:  # noqa: BLE001 - cleanup is best-effort
+                                        pass
+                                _drain_playwright_observations()
+                                _flush_pending_betclic_grpc_responses(
+                                    incomplete_reason=(
+                                        streaming_attach_reason or "grpc-web-response-incomplete"
+                                    )
+                                )
+                            except Exception:  # noqa: BLE001 - preserve primary exception
+                                warnings.append("browser-observation-cleanup-failed")
                         final_url = page.url
                         title = page.title()
                         try:
@@ -1199,6 +1608,12 @@ class PlaywrightBrowserSession:
                         except PlaywrightError:
                             body_text = None
                         detected = classify_readiness_block(page)
+                        _drain_playwright_observations()
+                        _flush_pending_betclic_grpc_responses(
+                            incomplete_reason=(
+                                streaming_attach_reason or "grpc-web-response-incomplete"
+                            )
+                        )
                         page_observation = build_structural_page_observation(
                             provider_id=provider_id,
                             page_route_id=page_route_id,
@@ -1242,6 +1657,8 @@ class PlaywrightBrowserSession:
             cookie_banner_dismissed=cookie_banner_dismissed,
             network_metadata=tuple(network_metadata),
             grpc_web_diagnostics=tuple(grpc_web_diagnostics),
+            grpc_web_stream_summaries=tuple(grpc_web_stream_summaries),
+            client_schema_summaries=tuple(client_schema_summaries),
         )
 
     def _observe_after_readiness(
@@ -1252,6 +1669,7 @@ class PlaywrightBrowserSession:
         observation_window_ms: int | None,
         observation_complete: Callable[[], bool] | None,
         network_metadata: list[BrowserNetworkMetadata],
+        observation_tick: Callable[[], None] | None = None,
     ) -> None:
         """Dwell or poll for network observations within the remaining deadline."""
         remaining_ms = max(
@@ -1264,6 +1682,8 @@ class PlaywrightBrowserSession:
             dwell_ms = min(self._dwell_after_readiness_ms, remaining_ms)
             if dwell_ms > 0:
                 page.wait_for_timeout(dwell_ms)
+                if observation_tick is not None:
+                    observation_tick()
             return
 
         window_end = min(
@@ -1271,6 +1691,8 @@ class PlaywrightBrowserSession:
             self._clock() + timedelta(milliseconds=observation_window_ms),
         )
         while self._clock() < window_end:
+            if observation_tick is not None:
+                observation_tick()
             if any(
                 item.hostname_approved and item.candidate_keys_detected for item in network_metadata
             ):
@@ -1287,6 +1709,8 @@ class PlaywrightBrowserSession:
             if self._clock() >= window_end:
                 return
             page.wait_for_timeout(slice_ms)
+            if observation_tick is not None:
+                observation_tick()
 
 
 class RecordingBrowserSession:
