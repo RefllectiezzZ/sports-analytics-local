@@ -136,6 +136,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(restore_backup(args.restore, paths=paths))
             return SUCCESS_EXIT
 
+        # Normal launch is the primary MVP path. Initialization is deliberately
+        # idempotent and never rewrites operator configuration.
+        initialize_v1(
+            config_path=args.config,
+            env_file=args.env_file,
+            base_directory=Path.cwd(),
+        )
         print(f"http://127.0.0.1:{args.ui_port}", flush=True)
         return LocalSupervisor().run(
             config=args.config,

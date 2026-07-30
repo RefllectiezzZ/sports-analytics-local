@@ -1,4 +1,4 @@
-"""Streamlit application shell and read-only dependency wiring."""
+"""Streamlit application shell for the operator-first local MVP."""
 
 from __future__ import annotations
 
@@ -10,12 +10,14 @@ from sports_analytics import __version__
 from sports_analytics.core.exceptions import ArtifactError, ConfigurationError
 from sports_analytics.core.paths import resolve_paths
 from sports_analytics.core.settings import load_settings
+from sports_analytics.mvp.orchestrator import MVPOrchestrator
 from sports_analytics.release.doctor import inspect_release_readiness
 from sports_analytics.ui.catalogue import (
     ArtifactCatalogueEntry,
     discover_typed_artifacts,
     load_catalogue_artifact,
 )
+from sports_analytics.ui.mvp_pages import MVP_PAGES, render_mvp_page
 from sports_analytics.ui.pages import PAGES, render_page
 from sports_analytics.ui.product_catalogue import (
     ProductReadModelEntry,
@@ -40,7 +42,7 @@ def run_streamlit_app(
     config_path: Path | str | None = None,
     env_file: Path | str | None = None,
 ) -> None:
-    """Render the local read-only artifact browser."""
+    """Render the localhost-only operator workspace."""
     st.set_page_config(
         page_title="Sports analytics workspace",
         page_icon="◫",
@@ -64,6 +66,20 @@ def run_streamlit_app(
             "or database was modified."
         )
         return
+
+    st.sidebar.title("Sports Analytics Local")
+    st.sidebar.caption(f"v{__version__} · localhost-only · manual placement")
+    mvp_page = st.sidebar.radio("Navigation", MVP_PAGES, key="sal_mvp_page")
+    render_mvp_page(
+        mvp_page,
+        orchestrator=MVPOrchestrator(
+            base_directory=repository_base,
+            config_path=config_path,
+            env_file=env_file,
+        ),
+        exports_root=paths.exports_directory,
+    )
+    return
 
     catalogue = discover_typed_artifacts(paths.exports_directory)
     valid = tuple(entry for entry in catalogue if entry.is_valid)

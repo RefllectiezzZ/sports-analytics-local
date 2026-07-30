@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
+from sports_analytics.artifacts import AnalyticalArtifact
 from sports_analytics.core.exceptions import (
     DatabaseIntegrityError,
     GovernanceError,
@@ -27,6 +28,12 @@ from sports_analytics.governance.contracts import (
     ModelRole,
 )
 from sports_analytics.models.artifacts import ModelArtifact
+from sports_analytics.models.football_scores import (
+    FOOTBALL_SCORE_ARTIFACT_SCHEMA,
+    FOOTBALL_SCORE_ARTIFACT_TYPE,
+    FOOTBALL_SCORE_MODEL_VERSION,
+    FootballScoreModel,
+)
 from sports_analytics.models.identity import content_addressed_id
 from sports_analytics.sports.contracts import require_utc
 
@@ -53,16 +60,88 @@ class ModelGovernanceRepository:
         )
         if not isinstance(artifact, ModelArtifact):
             raise GovernanceError("model registration requires a verified ModelArtifact")
-        if role is ModelRole.ARCHIVED:
-            raise GovernanceError("new verified models cannot be registered as archived")
         model_id = str(artifact.document.get("artifact_id", ""))
         if not model_id:
             raise GovernanceError("verified model artifact has no content identity")
+        return self._register_verified_identity(
+            model_artifact_id=model_id,
+            model_checksum_sha256=artifact.checksum_sha256,
+            model_relative_path=relative_path,
+            model_specification_version=artifact.specification.model_specification_version,
+            feature_specification_version=artifact.specification.feature_specification_version,
+            sport_code=artifact.specification.sport_code,
+            market_key=artifact.specification.market_key,
+            registered_at=registered_at,
+            actor=actor,
+            role=role,
+            provenance=provenance,
+        )
+
+    def register_verified_score_model(
+        self,
+        *,
+        artifact: AnalyticalArtifact,
+        model: FootballScoreModel,
+        relative_path: str,
+        market_key: str,
+        registered_at: datetime,
+        actor: str,
+        role: ModelRole = ModelRole.CHALLENGER,
+        provenance: JsonValue,
+    ) -> ModelRegistryEntry:
+        """Register a strictly reloaded football score-model artifact."""
+        if (
+            not isinstance(artifact, AnalyticalArtifact)
+            or artifact.artifact_type != FOOTBALL_SCORE_ARTIFACT_TYPE
+            or artifact.schema_version != FOOTBALL_SCORE_ARTIFACT_SCHEMA
+            or not isinstance(model, FootballScoreModel)
+        ):
+            raise GovernanceError(
+                "score model registration requires a verified score-model artifact"
+            )
+        if not model.diagnostics.converged:
+            raise GovernanceError("unconverged score models cannot enter governance")
+        return self._register_verified_identity(
+            model_artifact_id=artifact.artifact_id,
+            model_checksum_sha256=artifact.checksum_sha256,
+            model_relative_path=relative_path,
+            model_specification_version=FOOTBALL_SCORE_MODEL_VERSION,
+            feature_specification_version="score-history-v1",
+            sport_code="football",
+            market_key=market_key,
+            registered_at=registered_at,
+            actor=actor,
+            role=role,
+            provenance=provenance,
+        )
+
+    def _register_verified_identity(
+        self,
+        *,
+        model_artifact_id: str,
+        model_checksum_sha256: str,
+        model_relative_path: str,
+        model_specification_version: str,
+        feature_specification_version: str,
+        sport_code: str,
+        market_key: str,
+        registered_at: datetime,
+        actor: str,
+        role: ModelRole,
+        provenance: JsonValue,
+    ) -> ModelRegistryEntry:
+        require_active_transaction(
+            self._connection,
+            operation="ModelGovernanceRepository.register_verified_model",
+        )
+        if role is ModelRole.ARCHIVED:
+            raise GovernanceError("new verified models cannot be registered as archived")
+        model_id = model_artifact_id
         existing = self.get_model(model_id)
         if existing is not None:
             if (
-                existing.model_checksum_sha256 != artifact.checksum_sha256
-                or existing.model_relative_path != relative_path
+                existing.model_checksum_sha256 != model_checksum_sha256
+                or existing.model_relative_path != model_relative_path
             ):
                 raise GovernanceError("registered model identity cannot change checksum or path")
             return existing
@@ -84,12 +163,12 @@ class ModelGovernanceRepository:
                 """,
                 (
                     model_id,
-                    artifact.checksum_sha256,
-                    relative_path.replace("\\", "/"),
-                    artifact.specification.model_specification_version,
-                    artifact.specification.feature_specification_version,
-                    artifact.specification.sport_code,
-                    artifact.specification.market_key,
+                    model_checksum_sha256,
+                    model_relative_path.replace("\\", "/"),
+                    model_specification_version,
+                    feature_specification_version,
+                    sport_code,
+                    market_key,
                     role.value,
                     lifecycle.value,
                     format_utc_timestamp(registered),
@@ -271,6 +350,72 @@ class ModelGovernanceRepository:
         except sqlite3.IntegrityError as exc:
             raise DatabaseIntegrityError("promotion could not be applied atomically") from exc
         return transition_id
+
+    def apply_initial_promotion(
+        self,
+        *,
+        decision_id: str,
+        actor: str,
+        occurred_at: datetime,
+    ) -> str:
+        """Apply the first approved promotion through the normal audited transition."""
+        require_active_transaction(
+            self._connection,
+            operation="ModelGovernanceRepository.apply_initial_promotion",
+        )
+        applied = self._connection.execute(
+            """
+            SELECT id FROM model_role_transitions
+            WHERE transition_type = 'promotion' AND decision_id = ?
+            """,
+            (decision_id,),
+        ).fetchone()
+        if applied is not None:
+            return str(applied["id"])
+        decision = self._decision_row(decision_id)
+        if decision is None:
+            raise GovernanceError("promotion decision is not registered")
+        if str(decision["decision"]) != GovernanceDecisionKind.PROMOTE.value:
+            raise GovernanceError("only a verified promote decision can be applied")
+        incumbent = self._require_model(str(decision["champion_model_artifact_id"]))
+        challenger = self._require_model(str(decision["challenger_model_artifact_id"]))
+        if (
+            incumbent.version != int(decision["champion_version"])
+            or challenger.version != int(decision["challenger_version"])
+            or incumbent.role is not ModelRole.CHALLENGER
+            or challenger.role is not ModelRole.CHALLENGER
+            or incumbent.lifecycle_status is not ModelLifecycleStatus.ELIGIBLE
+            or challenger.lifecycle_status is not ModelLifecycleStatus.ELIGIBLE
+            or incumbent.scope != challenger.scope
+        ):
+            raise GovernanceError("initial promotion decision is stale relative to registry state")
+        active = self._connection.execute(
+            """
+            SELECT model_artifact_id FROM model_registry_entries
+            WHERE sport_code = ? AND market_key = ?
+              AND role = 'champion'
+              AND lifecycle_status NOT IN ('archived', 'rejected')
+            """,
+            incumbent.scope,
+        ).fetchone()
+        if active is not None:
+            raise GovernanceError("initial promotion requires an empty champion scope")
+        staged = self._connection.execute(
+            """
+            UPDATE model_registry_entries
+            SET role = 'champion', lifecycle_status = 'promoted'
+            WHERE model_artifact_id = ? AND version = ?
+              AND role = 'challenger' AND lifecycle_status = 'eligible'
+            """,
+            (incumbent.model_artifact_id, incumbent.version),
+        )
+        if staged.rowcount != 1:
+            raise GovernanceError("initial incumbent could not be staged atomically")
+        return self.apply_promotion(
+            decision_id=decision_id,
+            actor=actor,
+            occurred_at=occurred_at,
+        )
 
     def rollback_transition(
         self,
