@@ -333,6 +333,18 @@ one open-market, active, priced native selection with identical odds, reviewed
 outcome semantics, source identities, and admitted capture provenance. Unknown
 markets and unknown, suspended, or unpriced selections remain native and
 non-comparable.
+The native graph itself still requires at least one linked event, market, and
+selection. An event-only Stage-A result is retained in acquisition/capture
+status, not published as `bookmaker-native-v2` and never loaded as a current
+quote catalogue.
+
+No Betclic sport published a live `bookmaker-native-v2` snapshot in the current
+evidence pass. Football, basketball, and tennis produced bounded complete
+transport frames on open RPCs, but no justified semantic Stage-A field profile
+or exhaustive inventory mechanism. A final trailer was not required to inspect
+those complete messages; its absence means logical RPC completion was not
+claimed. Publication and strict reload are therefore `not attempted` for all
+three sports; synthetic round trips do not change that classification.
 
 ## Implementation status
 

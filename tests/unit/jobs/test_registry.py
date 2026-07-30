@@ -38,12 +38,18 @@ def test_duplicate_unknown_and_invalid_job_types_raise_registry_error() -> None:
 def test_default_registry_contains_frozen_system_noop_handler() -> None:
     registry = build_default_registry()
     assert registry.list_job_types() == (
+        "analysis.football-product",
         "ingest.bookmaker-autonomous-cycle",
         "ingest.bookmaker-current-odds",
         "ingest.football-data-csv",
+        "monitoring.refresh",
         "monitoring.run",
+        "results.register-from-snapshot",
         "settlement.settle-analysis",
+        "settlement.settle-new-results",
         SYSTEM_NOOP_JOB_TYPE,
+        "training.evaluate-retraining-trigger",
+        "training.run-challenger-cycle",
     )
     handler = registry.get(SYSTEM_NOOP_JOB_TYPE)
     assert callable(handler)
@@ -51,6 +57,12 @@ def test_default_registry_contains_frozen_system_noop_handler() -> None:
     assert callable(registry.get("ingest.bookmaker-current-odds"))
     assert callable(registry.get("ingest.football-data-csv"))
     assert callable(registry.get("monitoring.run"))
+    assert callable(registry.get("analysis.football-product"))
     assert callable(registry.get("settlement.settle-analysis"))
+    assert callable(registry.get("results.register-from-snapshot"))
+    assert callable(registry.get("settlement.settle-new-results"))
+    assert callable(registry.get("monitoring.refresh"))
+    assert callable(registry.get("training.evaluate-retraining-trigger"))
+    assert callable(registry.get("training.run-challenger-cycle"))
     with pytest.raises(JobRegistryError, match="frozen"):
         registry.register("demo.job", _handler)

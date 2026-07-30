@@ -154,8 +154,12 @@ def store_content_addressed_grpc_evidence(
     body: bytes,
     *,
     directory: Path,
+    suffix: str = ".grpc-web",
 ) -> StoredGrpcWebEvidence:
     """Store bounded raw evidence by digest without logging its content."""
+    if suffix not in {".grpc-web", ".grpc-web-frame"}:
+        msg = "gRPC-web evidence suffix is not approved"
+        raise PermanentSourceError(msg)
     if len(body) > MAX_GRPC_WEB_RESPONSE_BYTES:
         msg = "gRPC-web response exceeds the maximum retained size"
         raise PermanentSourceError(msg)
@@ -168,7 +172,7 @@ def store_content_addressed_grpc_evidence(
     except OSError:
         msg = "gRPC-web evidence directory is unavailable"
         raise PermanentSourceError(msg) from None
-    target = directory / f"{checksum}.grpc-web"
+    target = directory / f"{checksum}{suffix}"
     try:
         if target.is_symlink():
             msg = "gRPC-web evidence target must not be a symlink"

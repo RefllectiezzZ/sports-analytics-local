@@ -37,6 +37,7 @@ from sports_analytics.ui.view_models import (
 
 PAGES: tuple[str, ...] = (
     "Data status",
+    "Football product",
     "Opportunities",
     "Single detail",
     "Accumulator builder",

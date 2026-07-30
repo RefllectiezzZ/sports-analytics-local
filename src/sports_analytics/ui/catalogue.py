@@ -48,7 +48,7 @@ def discover_typed_artifacts(root: Path) -> tuple[ArtifactCatalogueEntry, ...]:
         (
             path
             for path in resolved_root.rglob(ANALYTICAL_MANIFEST_FILENAME)
-            if path.is_file() and not path.is_symlink()
+            if path.is_file() and not path.is_symlink() and _is_typed_manifest_candidate(path)
         ),
         key=lambda path: path.parent.relative_to(resolved_root).as_posix(),
     )
@@ -64,6 +64,15 @@ def discover_typed_artifacts(root: Path) -> tuple[ArtifactCatalogueEntry, ...]:
             ),
         )
     )
+
+
+def _is_typed_manifest_candidate(path: Path) -> bool:
+    """Exclude other strict analytical artifact families from this catalogue."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return True
+    return isinstance(raw, dict) and "artifact_kind" in raw
 
 
 def load_catalogue_artifact(

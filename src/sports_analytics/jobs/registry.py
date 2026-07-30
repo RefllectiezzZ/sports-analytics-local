@@ -16,11 +16,27 @@ from sports_analytics.ingestion.handlers import ingest_football_data_csv_handler
 from sports_analytics.ingestion.types import INGEST_FOOTBALL_DATA_CSV_JOB_TYPE
 from sports_analytics.jobs.handlers import JobHandler, system_noop_handler
 from sports_analytics.jobs.types import SYSTEM_NOOP_JOB_TYPE
+from sports_analytics.learning.jobs import (
+    EVALUATE_RETRAINING_TRIGGER_JOB_TYPE,
+    REFRESH_MONITORING_JOB_TYPE,
+    REGISTER_RESULTS_JOB_TYPE,
+    RUN_CHALLENGER_CYCLE_JOB_TYPE,
+    SETTLE_NEW_RESULTS_JOB_TYPE,
+    evaluate_retraining_trigger_handler,
+    refresh_monitoring_handler,
+    register_results_handler,
+    run_challenger_cycle_handler,
+    settle_new_results_handler,
+)
 from sports_analytics.operations.handlers import (
     RUN_MONITORING_JOB_TYPE,
     SETTLE_ANALYSIS_JOB_TYPE,
     run_monitoring_handler,
     settle_analysis_handler,
+)
+from sports_analytics.services.football_product_jobs import (
+    RUN_FOOTBALL_PRODUCT_JOB_TYPE,
+    run_football_product_handler,
 )
 
 
@@ -88,5 +104,14 @@ def build_default_registry() -> HandlerRegistry:
     )
     registry.register(SETTLE_ANALYSIS_JOB_TYPE, settle_analysis_handler)
     registry.register(RUN_MONITORING_JOB_TYPE, run_monitoring_handler)
+    registry.register(RUN_FOOTBALL_PRODUCT_JOB_TYPE, run_football_product_handler)
+    registry.register(REGISTER_RESULTS_JOB_TYPE, register_results_handler)
+    registry.register(SETTLE_NEW_RESULTS_JOB_TYPE, settle_new_results_handler)
+    registry.register(REFRESH_MONITORING_JOB_TYPE, refresh_monitoring_handler)
+    registry.register(
+        EVALUATE_RETRAINING_TRIGGER_JOB_TYPE,
+        evaluate_retraining_trigger_handler,
+    )
+    registry.register(RUN_CHALLENGER_CYCLE_JOB_TYPE, run_challenger_cycle_handler)
     registry.freeze()
     return registry

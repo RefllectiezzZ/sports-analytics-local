@@ -1,5 +1,31 @@
 # Data contracts
 
+## Coherent football product artifacts
+
+The football score model, rolling tournament, bounded probability surface,
+operator current quotes, proposed bets, and Streamlit read model use the
+existing content-addressed analytical JSON artifact envelope. Each directory is
+immutable, atomically published, checksum verified, canonical JSON, and loaded
+with an exact project-owned semantic validator. No artifact uses pickle or
+joblib.
+
+The probability artifact separates `model_probability` and
+`fair_decimal_odds` from offered-price state. Its fair-odds-only payload carries
+`offered_decimal_odds=null` and `expected_value=null`. Operator quote artifacts
+use `offered_decimal_odds` and `price_semantics=real-offered-odds`.
+
+Canonical operator input fields, in exact order for CSV, are:
+
+`provider_id`, `provider_display_name`, `sport_code`, `canonical_event_id`,
+`market_family`, `outcome_key`, `line_value`, `market_period`,
+`participant_scope`, `canonical_participant_id`, `overtime_scope`,
+`rules_scope`, `offered_decimal_odds`, `observed_at_utc`, `valid_until_utc`,
+`source_kind`, `operator_note`, `import_batch_id`.
+
+Timestamps are canonical UTC. Decimal prices and lines are strings at JSON/CSV
+boundaries. The input contains no URL, request header, cookie, token, selector,
+script, or browser profile field.
+
 Canonical analytical contracts for `sports-analytics-local`. The contracts are
 sport-agnostic; football is the only sport with a production ingestion adapter in
 this release.
@@ -601,6 +627,36 @@ Implemented now:
   selection policy, same-bookmaker multiples, and `current-bookmaker-odds`
   snapshots.
 
+Bookmaker operational capability is an exact provider/sport tuple. The six
+registered Betano/Betclic football, basketball, and tennis records independently
+declare the reviewed route ID, Stage-A profile/version, Stage-B state, detail
+profile/version, native parser state, completeness mechanism, canonical mapping
+set, and evidence classification. An unknown tuple produces an explicit
+unsupported record; there is no provider-only, sport-only, or default fallback.
+Static mappings and synthetic conformance fixtures are contract evidence, not
+operational provider evidence.
+
+Streaming gRPC-Web evidence uses the smallest reproducible unit: one complete
+decoded transport frame, including its five-byte frame header. Each ignored raw
+unit is content-addressed and linked by checksum to a safe frame diagnostic.
+The diagnostic distinguishes finite complete responses from complete streaming
+frames and records frame index/kind, bounded length, compression state, safe
+trailer status, structural fingerprint, and reviewed response reference.
+Incomplete trailing bytes are never stored as complete evidence and cannot
+contribute to a complete snapshot.
+A final trailer is not a prerequisite for parsing a complete data frame.
+Logical RPC completion, message completeness, and exhaustive inventory
+completeness are separate facts.
+
+Semantic protobuf mappings use a local value-free ledger. Evidence is classified
+as direct client descriptor, provider-owned metadata, strong repeated invariant,
+weak hypothesis, contradicted, or unresolved. Only the first three can enter an
+exact profile; a repeated invariant additionally requires at least two cycles,
+and any contradiction removes production permission. Entries contain response
+profile/type, field-number path, wire types, client operation, cardinality,
+cycle stability, sports, expected type, and safe contradiction codes—never live
+field values.
+
 ### Provider-native bookmaker inventory
 
 `bookmaker-provider-native-inventory-v1`, carried by
@@ -616,6 +672,10 @@ typed outcome key; a provider selection ID is provenance identity, never a
 canonical-outcome fallback. Complete URLs, query strings, headers, cookies,
 tokens, scripts, HTML, and arbitrary nested provider JSON are not members of the
 contract.
+The strict v2 loader requires non-empty, linked event, market, and selection
+datasets. A Stage-A-only event observation therefore remains acquisition/capture
+evidence and cannot masquerade as a current quote catalogue; the contract is
+not weakened merely to publish empty market inventory.
 
 Admission is split into provider inventory, canonical projection, comparison
 catalogue, and exhaustive completeness. A valid unknown market may be admitted

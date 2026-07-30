@@ -14,6 +14,10 @@ from sports_analytics.artifacts import (
     load_analytical_artifact,
     load_typed_analytical_artifact,
 )
+from sports_analytics.bookmakers.operator_quotes import (
+    export_operator_quote_csv_template,
+    export_operator_quote_json_template,
+)
 from sports_analytics.core.cli import CONFIG_ERROR_EXIT, SUCCESS_EXIT, handle_common_modes
 from sports_analytics.core.cli import build_argument_parser as build_common_argument_parser
 from sports_analytics.core.exceptions import (
@@ -61,6 +65,10 @@ from sports_analytics.services.backtesting import (
 )
 from sports_analytics.services.combinations_trusted import (
     build_combinations_from_analysis_artifact,
+)
+from sports_analytics.services.football_product_cli import (
+    capability_payload,
+    run_football_product_json,
 )
 from sports_analytics.services.historical_analysis import publish_historical_analysis_with_paths
 from sports_analytics.services.operations_cli import (
@@ -191,6 +199,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Publish a historical-replay analysis artifact from verified model and "
             "feature artifacts plus quote inputs."
         ),
+    )
+    mode.add_argument(
+        "--run-football-product",
+        metavar="JSON_PATH",
+        default=None,
+        help=(
+            "Run the bounded offline score-model, fair-odds, operator-quote, "
+            "proposal, and persisted read-model workflow."
+        ),
+    )
+    mode.add_argument(
+        "--football-market-capabilities",
+        action="store_true",
+        help="Print the exact sport and market capability matrix.",
+    )
+    mode.add_argument(
+        "--export-current-quote-template",
+        action="store_true",
+        help="Print the exact canonical current offered-quote CSV header.",
+    )
+    mode.add_argument(
+        "--export-current-quote-json-template",
+        action="store_true",
+        help="Print one exact canonical current offered-quote JSON row.",
     )
     parser.add_argument(
         "--snapshot",
@@ -370,6 +402,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _publish_analysis(args)
         if args.publish_historical_analysis is not None:
             return _publish_historical_analysis(args)
+        if args.run_football_product is not None:
+            return _run_football_product(args)
+        if args.football_market_capabilities:
+            print(dumps_canonical_json(capability_payload()))
+            return SUCCESS_EXIT
+        if args.export_current_quote_template:
+            print(export_operator_quote_csv_template().decode("utf-8"), end="")
+            return SUCCESS_EXIT
+        if args.export_current_quote_json_template:
+            print(export_operator_quote_json_template().decode("utf-8"), end="")
+            return SUCCESS_EXIT
 
         parser.error(
             "select an engine mode such as --build-football-1x2-features or --train-football-1x2"
@@ -412,6 +455,10 @@ def _validate_modes(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         args.run_backtest is not None,
         args.publish_analysis is not None,
         args.publish_historical_analysis is not None,
+        args.run_football_product is not None,
+        args.football_market_capabilities,
+        args.export_current_quote_template,
+        args.export_current_quote_json_template,
         *operational_mode_values(args),
     ]
     if sum(1 for enabled in engine_modes if enabled) > 1:
@@ -783,6 +830,20 @@ def _run_json_mode(
             f"JSON input is malformed at line {exc.lineno}, column {exc.colno}"
         ) from exc
     result = operation(payload)
+    print(dumps_canonical_json(ensure_json_value(result)))
+    return SUCCESS_EXIT
+
+
+def _run_football_product(args: argparse.Namespace) -> int:
+    runtime = bootstrap_runtime(
+        "engine",
+        config_path=args.config,
+        env_file=args.env_file,
+    )
+    result = run_football_product_json(
+        path_text=args.run_football_product,
+        exports_root=runtime.paths.exports_directory,
+    )
     print(dumps_canonical_json(ensure_json_value(result)))
     return SUCCESS_EXIT
 

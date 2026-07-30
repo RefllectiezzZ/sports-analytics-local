@@ -1,5 +1,13 @@
 # Worker and job queue
 
+The frozen registry includes `analysis.football-product`. Its payload is the
+same exact bounded JSON document used by `--run-football-product`: typed
+historical match rows, upcoming canonical events, optional canonical operator
+quotes, fixed split/policy configuration, and a safe relative artifact root.
+It cannot select imports, code, scripts, URLs, headers, cookies, tokens,
+selectors, browser profiles, or arbitrary output paths. The handler publishes
+only below the runtime exports root and never accesses a bookmaker network.
+
 This document describes the durable local job worker introduced for
 `sports-analytics-local`. The worker is SQLite-backed, sequential, and intended
 for single-user localhost operation.
@@ -436,6 +444,36 @@ These are load controls, not anti-detection behavior. Explicit
 CAPTCHA, access denial, regional refusal, or anti-automation classification
 stops remaining navigation immediately and preserves last-valid behavior.
 
+Reviewed Betclic gRPC-Web candidates use two mutually exclusive body-retention
+paths.
+Finite responses remain ephemeral until Playwright reports `requestfinished`;
+only then may the bounded complete-body reader run. For Chromium, a page-scoped
+passive CDP observer can also retain complete incremental frames while the HTTP
+response remains open. Runtime feature detection fails safely to
+`streaming-body-observation-unsupported`; it never enables interception or
+replay. When supported CDP capture owns a response, the finite reader does not
+retain it again. Buffered/first-event overlap and duplicate CDP events are
+accounted without doubling bytes. Missing inline `data`, request-ID reuse,
+redirects, and main-page replacement are explicit lifecycle cases. Open, idle,
+truncated, unsupported, transport-error, and logically complete states remain
+explicit and cannot become complete snapshot inventory without the
+corresponding evidence.
+
+Playwright and CDP callbacks perform no body parsing or file I/O. They enqueue
+minimal cycle-local observations into bounded queues. A deterministic consumer
+correlates approved responses, decodes frames, applies byte/chunk/frame/time
+limits, stores complete content-addressed units, and detaches the CDP session
+during cleanup. Queue overflow and every limit breach stop further retention
+for that response while leaving the browser lifecycle intact.
+
+Before navigation, the same page-scoped session may passively enable Debugger
+and observe `scriptParsed`. It calls `getScriptSource` only for already-loaded
+scripts on exact approved hosts and within script/source/match/time limits.
+Source text is inspected in memory and discarded. Only hashes, approved host,
+runtime-family presence, safe type candidates, field-number/type sequences,
+and exact reviewed RPC associations enter the diagnostic summary. It does not
+fetch assets or source maps.
+
 The worker never accepts an endpoint, selector, script, headers, cookies, or
 request body from a job. It does not call an observed provider transport outside
 Chromium. Only responses genuinely received by the active page/cycle can reach
@@ -461,3 +499,16 @@ references plus an explicit as-of timestamp and output directory.
 explicit as-of timestamp and window. Both publish immutable reports before a
 short transactional SQLite registration, verify compatible existing output on
 replay, and reject unknown payload keys.
+
+PR #13 additionally registers:
+
+- `results.register-from-snapshot`
+- `settlement.settle-new-results`
+- `monitoring.refresh`
+- `training.evaluate-retraining-trigger`
+- `training.run-challenger-cycle`
+
+These handlers resolve immutable paths from registered snapshot IDs. Their
+payloads contain exact snapshot IDs/checksums, typed sport/competition scope,
+policy ID, and canonical UTC cutoff. They reject arbitrary paths, URLs, import
+names, scripts, headers, cookies, tokens, and selectors.

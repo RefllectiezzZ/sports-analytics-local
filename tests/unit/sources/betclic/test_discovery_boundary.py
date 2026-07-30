@@ -253,4 +253,4 @@ def test_existing_raw_evidence_is_verified_with_bounded_reads(tmp_path: Path) ->
 
 
 def test_betclic_verified_profile_remains_disabled() -> None:
-    assert get_verified_extraction_profile("betclic-pt") is None
+    assert get_verified_extraction_profile("betclic-pt", "football") is None

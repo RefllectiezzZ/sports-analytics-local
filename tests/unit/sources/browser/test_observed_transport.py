@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from urllib.parse import urlunsplit
 
 import pytest
 
 from sports_analytics.core.exceptions import PermanentSourceError
+from sports_analytics.sources.betclic.catalog import (
+    BETCLIC_CATALOG,
+    OFFERING_RESPONSE_HOSTNAME,
+    OFFERING_RESPONSE_ROUTES,
+)
 from sports_analytics.sources.browser.contracts import (
     BrowserAcquisitionResult,
     BrowserBlockReason,
@@ -46,13 +54,23 @@ class _Request:
 
 
 class _Response:
-    def __init__(self, url: str, body: str, *, declared_length: int | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        body: str,
+        *,
+        declared_length: int | None = None,
+        content_type: str = "application/json",
+        raw_body: bytes | None = None,
+    ) -> None:
         self.url = url
         self.status = 200
         self.request = _Request()
         self._body = body
+        self._raw_body = raw_body if raw_body is not None else body.encode()
         self.text_calls = 0
-        self.headers = {"content-type": "application/json"}
+        self.body_calls = 0
+        self.headers = {"content-type": content_type}
         if declared_length is not None:
             self.headers["content-length"] = str(declared_length)
 
@@ -60,17 +78,27 @@ class _Response:
         self.text_calls += 1
         return self._body
 
+    def body(self) -> bytes:
+        self.body_calls += 1
+        return self._raw_body
+
 
 class _Page:
     def __init__(
         self,
         responses: tuple[_Response, ...],
         websocket_urls: tuple[str, ...] = (),
+        *,
+        finish_requests: bool = True,
+        cdp_session=None,
     ) -> None:
         self._responses = responses
+        self._finish_requests = finish_requests
         self._response_callback = None
+        self._request_finished_callback = None
         self._websocket_callback = None
         self._websocket_urls = websocket_urls
+        self._cdp_session = cdp_session
         self.url = "https://www.betano.pt/sport/futebol/"
         self.goto_calls = 0
 
@@ -78,14 +106,23 @@ class _Page:
         if event == "response":
             self._response_callback = callback
             return
+        if event == "requestfinished":
+            self._request_finished_callback = callback
+            return
         assert event == "websocket"
         self._websocket_callback = callback
 
-    def goto(self, *_args, **_kwargs) -> None:
+    def goto(self, url: str, *_args, **_kwargs) -> None:
         self.goto_calls += 1
+        self.url = url
         assert self._response_callback is not None
+        assert self._request_finished_callback is not None
         for response in self._responses:
+            if self._cdp_session is not None:
+                self._cdp_session.emit_response(response)
             self._response_callback(response)
+            if self._finish_requests:
+                self._request_finished_callback(response.request)
         assert self._websocket_callback is not None
         for socket_url in self._websocket_urls:
             self._websocket_callback(SimpleNamespace(url=socket_url))
@@ -104,32 +141,39 @@ class _Page:
 
 
 class _Context:
-    def __init__(self, page: _Page) -> None:
+    def __init__(self, page: _Page, cdp_session=None) -> None:
         self.page = page
+        self.cdp_session = cdp_session
 
     def new_page(self) -> _Page:
         return self.page
+
+    def new_cdp_session(self, _page):
+        if self.cdp_session is None:
+            raise RuntimeError("synthetic CDP unavailable")
+        return self.cdp_session
 
     def close(self) -> None:
         return None
 
 
 class _Browser:
-    def __init__(self, page: _Page) -> None:
+    def __init__(self, page: _Page, cdp_session=None) -> None:
         self.page = page
+        self.cdp_session = cdp_session
         self.context_kwargs = None
 
     def new_context(self, **kwargs):
         self.context_kwargs = kwargs
-        return _Context(self.page)
+        return _Context(self.page, self.cdp_session)
 
     def close(self) -> None:
         return None
 
 
 class _PlaywrightContext:
-    def __init__(self, page: _Page) -> None:
-        self.browser = _Browser(page)
+    def __init__(self, page: _Page, cdp_session=None) -> None:
+        self.browser = _Browser(page, cdp_session)
         self.playwright = SimpleNamespace(
             chromium=SimpleNamespace(launch=lambda **_kwargs: self.browser)
         )
@@ -148,10 +192,20 @@ def _acquire(
     blocked: bool = False,
     websocket_urls: tuple[str, ...] = (),
     start_urls: tuple[tuple[str, str], ...] | None = None,
+    provider_id: str = "betano-pt",
+    allowed_hostnames: frozenset[str] = frozenset({"www.betano.pt"}),
+    diagnostic_directory=None,
+    finish_requests: bool = True,
+    cdp_session=None,
     **session_kwargs,
 ):
-    page = _Page(responses, websocket_urls)
-    context = _PlaywrightContext(page)
+    page = _Page(
+        responses,
+        websocket_urls,
+        finish_requests=finish_requests,
+        cdp_session=cdp_session,
+    )
+    context = _PlaywrightContext(page, cdp_session)
     monkeypatch.setattr(
         "playwright.sync_api.sync_playwright",
         lambda: context,
@@ -187,15 +241,72 @@ def _acquire(
         **session_kwargs,
     )
     result = session.acquire(
-        provider_id="betano-pt",
+        provider_id=provider_id,
         sport="football",
         acquisition_cycle_id="cycle-browser-observed",
-        allowed_hostnames=frozenset({"www.betano.pt"}),
+        allowed_hostnames=allowed_hostnames,
         start_urls=start_urls or (("football-prematch", "https://www.betano.pt/sport/futebol/"),),
         observed_at_utc=NOW,
         browser_mode=BrowserMode.HEADLESS,
+        diagnostic_directory=diagnostic_directory,
     )
     return result, page, context.browser
+
+
+def _grpc_frame(payload: bytes) -> bytes:
+    return b"\x00" + len(payload).to_bytes(4, "big") + payload
+
+
+class _CdpSession:
+    def __init__(self, streaming_body: bytes) -> None:
+        self._streaming_body = streaming_body
+        self.callbacks = {}
+        self.detached = False
+
+    def send(self, method, _params=None):
+        if method in {
+            "Debugger.disable",
+            "Debugger.enable",
+            "Network.enable",
+            "Page.enable",
+        }:
+            return {}
+        assert method == "Network.streamResourceContent"
+        return {"bufferedData": ""}
+
+    def on(self, event, callback) -> None:
+        self.callbacks[event] = callback
+
+    def emit_response(self, response: _Response) -> None:
+        request_id = "ephemeral-runtime"
+        self.callbacks["Network.requestWillBeSent"](
+            {
+                "requestId": request_id,
+                "request": {"url": response.url, "method": "POST"},
+            }
+        )
+        self.callbacks["Network.responseReceived"](
+            {
+                "requestId": request_id,
+                "type": "Fetch",
+                "response": {
+                    "url": response.url,
+                    "status": response.status,
+                    "mimeType": response.headers["content-type"],
+                },
+            }
+        )
+        self.callbacks["Network.dataReceived"](
+            {
+                "requestId": request_id,
+                "data": base64.b64encode(self._streaming_body).decode(),
+                "timestamp": "1",
+                "encodedDataLength": len(self._streaming_body),
+            }
+        )
+
+    def detach(self) -> None:
+        self.detached = True
 
 
 def test_page_response_callback_retains_only_reviewed_structural_json(monkeypatch) -> None:
@@ -224,6 +335,152 @@ def test_page_response_callback_retains_only_reviewed_structural_json(monkeypatc
     assert result.network_metadata[1].body_capture_state is BrowserBodyCaptureState.NOT_APPROVED
     assert result.network_metadata[1].transport_type is BrowserTransportType.SCRIPT_CONFIGURATION
     assert not result.network_metadata[1].body_captured
+
+
+def test_betclic_grpc_body_is_read_only_after_request_finished(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    popular_path = next(
+        path
+        for path, route_id in OFFERING_RESPONSE_ROUTES.items()
+        if route_id == "betclic-match-service-get-popular-v2"
+    )
+    grpc_response = _Response(
+        urlunsplit(("https", OFFERING_RESPONSE_HOSTNAME, popular_path, "", "")),
+        "",
+        content_type="application/grpc-web",
+        raw_body=_grpc_frame(b"PROTOBUF-FAKE"),
+    )
+    result, _page, _browser = _acquire(
+        monkeypatch,
+        (grpc_response,),
+        provider_id="betclic-pt",
+        allowed_hostnames=BETCLIC_CATALOG.allowed_hostnames,
+        start_urls=BETCLIC_CATALOG.routes_for_sport("football"),
+        diagnostic_directory=tmp_path,
+    )
+    assert grpc_response.body_calls == 1
+    assert len(result.grpc_web_diagnostics) == 1
+    approved = [
+        item
+        for item in result.network_metadata
+        if item.approved_route_id == "betclic-match-service-get-popular-v2"
+    ]
+    assert len(approved) == 1
+    assert approved[0].grpc_web_envelope_recognized is True
+    assert approved[0].grpc_web_evidence_stored is True
+
+
+def test_incomplete_betclic_grpc_response_remains_metadata_only(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    popular_path = next(
+        path
+        for path, route_id in OFFERING_RESPONSE_ROUTES.items()
+        if route_id == "betclic-match-service-get-popular-v2"
+    )
+    grpc_response = _Response(
+        urlunsplit(("https", OFFERING_RESPONSE_HOSTNAME, popular_path, "", "")),
+        "",
+        content_type="application/grpc-web",
+        raw_body=_grpc_frame(b"PROTOBUF-FAKE"),
+    )
+    result, _page, _browser = _acquire(
+        monkeypatch,
+        (grpc_response,),
+        provider_id="betclic-pt",
+        allowed_hostnames=BETCLIC_CATALOG.allowed_hostnames,
+        start_urls=BETCLIC_CATALOG.routes_for_sport("football"),
+        diagnostic_directory=tmp_path,
+        finish_requests=False,
+    )
+    assert grpc_response.body_calls == 0
+    assert result.grpc_web_diagnostics == ()
+    approved = [
+        item
+        for item in result.network_metadata
+        if item.approved_route_id == "betclic-match-service-get-popular-v2"
+    ]
+    assert len(approved) == 1
+    assert approved[0].grpc_web_failure_code == "streaming-body-observation-unsupported"
+    assert approved[0].grpc_web_body_read is False
+
+
+def test_incomplete_http_response_yields_complete_streaming_frame_via_passive_cdp(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    popular_path = next(
+        path
+        for path, route_id in OFFERING_RESPONSE_ROUTES.items()
+        if route_id == "betclic-match-service-get-popular-v2"
+    )
+    grpc_response = _Response(
+        urlunsplit(("https", OFFERING_RESPONSE_HOSTNAME, popular_path, "", "")),
+        "",
+        content_type="application/grpc-web",
+        raw_body=_grpc_frame(b"\x08\x01"),
+    )
+    cdp_session = _CdpSession(_grpc_frame(b"\x08\x01"))
+    result, _page, _browser = _acquire(
+        monkeypatch,
+        (grpc_response,),
+        provider_id="betclic-pt",
+        allowed_hostnames=BETCLIC_CATALOG.allowed_hostnames,
+        start_urls=BETCLIC_CATALOG.routes_for_sport("football"),
+        diagnostic_directory=tmp_path,
+        finish_requests=False,
+        cdp_session=cdp_session,
+    )
+    assert grpc_response.body_calls == 0
+    assert cdp_session.detached is True
+    assert len(result.grpc_web_stream_summaries) == 1
+    summary = result.grpc_web_stream_summaries[0]
+    assert summary.state.value == "streaming-rpc-open"
+    assert summary.data_frame_count == 1
+    assert summary.trailer_frame_count == 0
+    assert summary.http_response_completed is False
+    assert len(summary.protobuf_wire_fingerprints) == 1
+    assert len(result.grpc_web_diagnostics) == 1
+    assert result.grpc_web_diagnostics[0].capture_unit == "complete-streaming-frame"
+    persisted = repr(asdict(result))
+    assert "ephemeral-runtime" not in persisted
+    assert grpc_response.url not in persisted
+
+
+def test_completed_response_is_not_retained_by_finite_and_streaming_paths(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    popular_path = next(
+        path
+        for path, route_id in OFFERING_RESPONSE_ROUTES.items()
+        if route_id == "betclic-match-service-get-popular-v2"
+    )
+    framed = _grpc_frame(b"\x08\x01")
+    grpc_response = _Response(
+        urlunsplit(("https", OFFERING_RESPONSE_HOSTNAME, popular_path, "", "")),
+        "",
+        content_type="application/grpc-web",
+        raw_body=framed,
+    )
+    result, _page, _browser = _acquire(
+        monkeypatch,
+        (grpc_response,),
+        provider_id="betclic-pt",
+        allowed_hostnames=BETCLIC_CATALOG.allowed_hostnames,
+        start_urls=BETCLIC_CATALOG.routes_for_sport("football"),
+        diagnostic_directory=tmp_path,
+        finish_requests=True,
+        cdp_session=_CdpSession(framed),
+    )
+
+    assert grpc_response.body_calls == 0
+    assert len(result.grpc_web_stream_summaries) == 1
+    assert len(result.grpc_web_diagnostics) == 1
+    assert result.grpc_web_diagnostics[0].capture_unit == "complete-streaming-frame"
 
 
 def test_declared_oversize_is_not_read_and_forces_truncation(monkeypatch) -> None:

@@ -46,6 +46,9 @@ from sports_analytics.sources.betclic.catalog import (
     SUPPORTED_MARKET_DEFINITION_IDS as BETCLIC_MARKETS,
 )
 from sports_analytics.sources.bookmaker_catalog import SUPPORTED_BOOKMAKER_SPORTS
+from sports_analytics.sources.bookmaker_extraction.registry import (
+    list_provider_sport_capabilities,
+)
 
 
 def list_bookmaker_sports(*, as_json: bool = True) -> int:
@@ -59,6 +62,26 @@ def list_bookmaker_sports(*, as_json: bool = True) -> int:
     else:
         for sport in SUPPORTED_BOOKMAKER_SPORTS:
             print(sport)
+    return SUCCESS_EXIT
+
+
+def list_bookmaker_capabilities(*, as_json: bool = True) -> int:
+    """Print the exact provider/sport evidence capability matrix."""
+    rows = tuple(item.as_safe_dict() for item in list_provider_sport_capabilities())
+    if as_json:
+        print(json.dumps({"capabilities": rows}, sort_keys=True, separators=(",", ":")))
+    else:
+        for row in rows:
+            print(
+                "\t".join(
+                    (
+                        str(row["provider_id"]),
+                        str(row["sport"]),
+                        str(row["evidence_classification"]),
+                        str(row["operational_classification"]),
+                    )
+                )
+            )
     return SUCCESS_EXIT
 
 

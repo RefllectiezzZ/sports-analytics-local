@@ -176,11 +176,11 @@ def test_label_mismatch_rejects_selection() -> None:
 
 
 def test_verified_profile_registered() -> None:
-    profile = get_verified_extraction_profile(PROVIDER_ID)
+    profile = get_verified_extraction_profile(PROVIDER_ID, "football")
     assert profile is not None
     assert profile.verified is True
     assert profile.profile_id == BETANO_TOPEVENTSV2_PROFILE_ID
-    assert get_verified_extraction_profile("betclic-pt") is None
+    assert get_verified_extraction_profile("betclic-pt", "football") is None
 
 
 def test_pipeline_produces_prematch_events_without_invented_rules() -> None:

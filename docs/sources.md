@@ -52,10 +52,16 @@ Offline synthetic fixtures under `tests/fixtures/betano/` and
 `tests/fixtures/betclic/` drive parser tests without live pages.
 
 Bookmaker structured data is consumed only from responses naturally received by
-the active Playwright page/context. Approved JSON is retained from the
-`page.on("response")` callback after bounded reading and reviewed structural
-classification. Betclic gRPC-Web bodies use the bounded envelope inspector only;
-field decoding remains disabled until real structures are proven. WebSocket
+the active Playwright page/context. Playwright and CDP callbacks enqueue only
+bounded cycle-local observations; they do not parse bodies or write files.
+Approved finite JSON or gRPC-Web responses are consumed after
+`requestfinished`. On Chromium, an exact approved gRPC-Web candidate may also
+use the runtime-detected passive CDP streaming path. It consumes buffered and
+subsequent browser-received bytes without interception, mutation, replay, or
+copied request material. Complete frames may be retained while HTTP remains
+open; frame completion, trailer completion, logical RPC completion, and
+inventory completeness remain distinct. Field decoding stays disabled until
+real structures are proven. WebSocket
 connection metadata is recorded only for `wss://` connections on the exact
 approved provider hostname; query and fragment material are discarded, and only
 the hostname, path hash, acquisition identity, transport, capture state, and
@@ -76,16 +82,18 @@ an undocumented transport, and captured data is not intended for republication.
 
 ## Provider priority and verified capability
 
-Betclic is the next priority provider integration, not an operational current-
-odds source: its football, basketball, and tennis public pages/configuration
-were observed, but none has a verified event transport or extraction profile.
-Basketball and tennis follow after the first verified Betclic football vertical
-slice. Betano remains experimental and lower priority: football has only a
-reviewed, non-exhaustive landing/popular inventory profile and was headless-
-blocked in the tested environment; basketball and tennis have no verified
-profile and were also headless-blocked there. These environment observations do
-not establish permanent provider behavior. Betano limitations must not block
-the rest of the product workflow.
+Betclic is the priority provider integration. Football was inspected first,
+then basketball and tennis sequentially. Repeated football observations
+retained the same two safe wire fingerprints from complete data frames.
+Basketball and a fresh tennis observation retained those same broad transport
+shapes; one earlier basketball observation also contained a distinct small
+shape that was not admitted as event inventory. No observed response completed
+at HTTP or logical RPC level, no final trailer appeared, and the stable large
+frame remained a semantically opaque one-field wrapper. The earlier tennis
+access denial did not repeat, so it is historical provider-denial evidence, not
+the current sport classification. No stable event identity, Stage-A profile,
+or Stage-B evidence was admitted. These observations do not establish permanent
+provider behavior. Betano evidence classifications are unchanged.
 
 This PR establishes a browser-observed acquisition foundation, not exhaustive
 live provider support. Static route declarations and catalogued sports do not
@@ -102,8 +110,45 @@ lookup is keyed by exact provider and sport. The reviewed Betano football
 `topEventsV2` shape is a landing-inventory profile only and cannot prove all
 event markets. Betano basketball/tennis and every Betclic sport remain
 unregistered pending real, sanitized event-detail evidence. Betclic gRPC-web
-inspection remains transport-only; no protobuf field number or meaning is
+inspection remains transport-only. Passive approved-client inspection
+established the protobuf-ts runtime and separate response objects for the
+reviewed RPC methods, but no response field table; no protobuf field meaning is
 guessed.
+
+Because no Betclic sport reached strict `bookmaker-native-v2` publication, it
+is not a v1 price dependency. The coherent football product uses historical
+results for modelling and accepts current prices through the verified snapshot
+boundary or strict offline operator CSV/JSON/manual input. No proposed Betclic
+bet or slip was generated from these diagnostics. Every proposal still
+requires manual placement; login and automatic placement remain forbidden.
+
+No additional live probing is part of the v1 modelling path. The passive CDP,
+gRPC-Web framing, bounded protobuf wire fingerprint, and approved-client schema
+components are retained only as optional, finite diagnostics. They do not
+authorize access, establish market semantics, or gate the fair-odds product.
+The unused semantic-evidence and standalone probe-accounting experiments were
+removed during scope compression.
+
+### Exact provider/sport status matrix
+
+| provider | sport | reviewed public route | Stage-A state | Stage-B state | native parser state | snapshot publication state | strict reload state | cycles completed | completeness mechanism | canonical mapping level | operational classification | limitation reason |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `betclic-pt` | football | `football-prematch` | unverified; stable complete transport frames and RPC association only | disabled | unverified | not attempted | not attempted | 3 transport; 0 Stage-A | none | none | `unsupported/unverified` | response field table, event semantics, and inventory denominator unresolved |
+| `betclic-pt` | basketball | `basketball-prematch` | unverified; complete transport frames and RPC association only | disabled | unverified | not attempted | not attempted | 2 transport; 0 Stage-A | none | none | `unsupported/unverified` | sport-specific message semantics and inventory denominator unresolved |
+| `betclic-pt` | tennis | `tennis-prematch` | unverified; fresh public route and complete transport frames | disabled | unverified | not attempted | not attempted | 1 transport; 0 Stage-A | none | none | `unsupported/unverified` | earlier access denial did not repeat; semantic profile remains unresolved |
+| `betano-pt` | football | `football-prematch` | reviewed non-exhaustive landing inventory | disabled | reviewed landing parser | native-v2 contract available; no pass probe | strict contract verified offline | not probed | unknown landing inventory | reviewed football subset | `Stage-A-only` | no reviewed detail navigation or completeness denominator |
+| `betano-pt` | basketball | `basketball-prematch` | unverified | disabled | unverified | not attempted | not attempted | not probed | none | none | `unsupported/unverified` | no verified exact profile |
+| `betano-pt` | tennis | `tennis-prematch` | unverified | disabled | unverified | not attempted | not attempted | not probed | none | none | `unsupported/unverified` | no verified exact profile |
+
+The safe capability command is:
+
+```bash
+python scraper.py --list-bookmaker-capabilities
+```
+
+It prints only exact tuple metadata and never prints provider URLs, event or
+participant names, market or selection labels, odds, headers, cookies, tokens,
+or response bodies.
 
 `scraper.py --list-sources` prints one tab-separated descriptor line per adapter
 with no database or network access:
