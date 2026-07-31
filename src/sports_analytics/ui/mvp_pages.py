@@ -70,6 +70,11 @@ def render_dashboard(orchestrator: MVPOrchestrator) -> None:
     @st.fragment(run_every="5s")
     def _persisted_status() -> None:
         status = orchestrator.inspect()
+        try:
+            automatic = orchestrator.automatic_status()
+        except (SportsAnalyticsError, OSError, ValueError) as exc:
+            automatic = None
+            st.warning(f"Automatic state is temporarily unavailable: {_safe(exc)}")
         _state_banner(status)
         cards = st.columns(5)
         cards[0].metric("Matches analysed", status.matches_analysed)
@@ -114,6 +119,66 @@ def render_dashboard(orchestrator: MVPOrchestrator) -> None:
             with st.expander("Exact blockers", expanded=status.state != MVPState.FAILED):
                 for blocker in status.blockers:
                     st.markdown(f"- {blocker}")
+        st.subheader("Automatic data service")
+        automatic_columns = st.columns(5)
+        automatic_columns[0].metric(
+            "Automatic mode",
+            (
+                "Enabled"
+                if automatic is not None and automatic.enabled and not automatic.paused
+                else "Paused"
+                if automatic is not None and automatic.paused
+                else "Disabled"
+            ),
+        )
+        automatic_columns[1].metric(
+            "Provider",
+            (automatic.provider_connection_state if automatic is not None else "unavailable"),
+        )
+        automatic_columns[2].metric(
+            "Events reconciled",
+            0 if automatic is None else automatic.events_reconciled,
+        )
+        automatic_columns[3].metric(
+            "Bookmakers observed",
+            0 if automatic is None else automatic.bookmakers_observed,
+        )
+        automatic_columns[4].metric(
+            "Valid current quotes",
+            0 if automatic is None else automatic.valid_current_quote_count,
+        )
+        if automatic is not None:
+            st.caption(
+                "Last successful acquisition: "
+                f"{automatic.last_successful_acquisition or 'Not available'} · "
+                "Next scheduled acquisition: "
+                f"{automatic.next_scheduled_acquisition or 'Not scheduled'} · "
+                "Quota remaining/used/last cost: "
+                f"{automatic.quota_remaining if automatic.quota_remaining is not None else '—'} / "
+                f"{automatic.quota_used if automatic.quota_used is not None else '—'} / "
+                f"{automatic.quota_last_cost if automatic.quota_last_cost is not None else '—'}"
+            )
+            if automatic.last_warning:
+                st.warning(automatic.last_warning)
+            if automatic.last_failure:
+                st.error(automatic.last_failure)
+            actionable = [
+                row
+                for row in automatic.ranked_opportunities
+                if row.get("status") in {"placeable", "analytical"}
+            ]
+            st.subheader("Top risk-adjusted opportunities")
+            if actionable:
+                st.dataframe(
+                    [_automatic_display(row) for row in actionable[:10]],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            else:
+                st.caption(
+                    "No actionable ranked opportunity is available. Held and rejected "
+                    "evidence remains visible on the Bets page."
+                )
 
     _persisted_status()
     status = orchestrator.inspect()
@@ -182,8 +247,9 @@ def render_matches(orchestrator: MVPOrchestrator) -> None:
     """Render registry-backed match upload and manual editing."""
     st.title("Matches")
     st.caption(
-        "Add scheduled matches using verified team names. Canonical identities and "
-        "artifact lineage are derived automatically."
+        "Advanced/Fallback: manual fixture entry is unnecessary while automatic "
+        "acquisition is working. Canonical identities and artifact lineage are "
+        "derived automatically."
     )
     try:
         choices = orchestrator.participant_choices()
@@ -268,8 +334,9 @@ def render_odds(orchestrator: MVPOrchestrator) -> None:
     """Render strict current-offered-odds upload and manual editing."""
     st.title("Odds")
     st.caption(
-        "Enter real offered decimal odds. URLs, headers, cookies, tokens, selectors, "
-        "scripts, and bookmaker login data are not accepted."
+        "Advanced/Fallback: manual odds entry is unnecessary while automatic "
+        "acquisition is working. URLs, headers, cookies, tokens, selectors, scripts, "
+        "and bookmaker login data are not accepted."
     )
     try:
         options = orchestrator.match_options()
@@ -370,6 +437,65 @@ def render_bets(orchestrator: MVPOrchestrator) -> None:
         "Automatically generated analytical candidates. Final bookmaker placement "
         "is always a separate manual action."
     )
+    try:
+        automatic = orchestrator.automatic_status()
+    except (SportsAnalyticsError, OSError, ValueError):
+        automatic = None
+    if automatic is not None and automatic.ranked_opportunities:
+        st.subheader("Ranked risk-adjusted opportunities")
+        rows = list(automatic.ranked_opportunities)
+        bookmaker_options = sorted(
+            {str(row.get("best_bookmaker")) for row in rows if row.get("best_bookmaker")}
+        )
+        competition_options = sorted(
+            {str(row.get("competition")) for row in rows if row.get("competition")}
+        )
+        market_options = sorted({str(row.get("market")) for row in rows if row.get("market")})
+        filters = st.columns(5)
+        bookmaker_filter = filters[0].selectbox(
+            "Bookmaker filter",
+            ("All", *bookmaker_options),
+        )
+        competition_filter = filters[1].selectbox(
+            "Competition filter",
+            ("All", *competition_options),
+        )
+        market_filter = filters[2].selectbox(
+            "Market filter",
+            ("All", *market_options),
+        )
+        risk_filter = filters[3].selectbox(
+            "Risk filter",
+            ("All", "low", "moderate", "high", "insufficient-evidence"),
+        )
+        status_filter = filters[4].selectbox(
+            "Status filter",
+            ("All", "placeable", "analytical", "held", "rejected"),
+        )
+        filtered = [
+            row
+            for row in rows
+            if (bookmaker_filter == "All" or row.get("best_bookmaker") == bookmaker_filter)
+            and (competition_filter == "All" or row.get("competition") == competition_filter)
+            and (market_filter == "All" or row.get("market") == market_filter)
+            and (risk_filter == "All" or row.get("risk_tier") == risk_filter)
+            and (status_filter == "All" or row.get("status") == status_filter)
+        ]
+        st.dataframe(
+            [_automatic_display(row) for row in filtered],
+            hide_index=True,
+            use_container_width=True,
+        )
+        with st.expander("Current bookmaker price comparison"):
+            for row in filtered:
+                st.markdown(
+                    f"**{row.get('event', 'Event')} · {row.get('selection', 'Selection')}**"
+                )
+                comparisons = _list(row.get("price_comparison"))
+                if comparisons:
+                    st.dataframe(comparisons, hide_index=True, use_container_width=True)
+                else:
+                    st.caption("No complete current comparison is available.")
     proposal = orchestrator.latest_proposals()
     if proposal is None or not isinstance(proposal.payload, dict):
         st.info("No persisted candidate set is available yet.")
@@ -475,6 +601,11 @@ def render_system(orchestrator: MVPOrchestrator, *, exports_root: Path) -> None:
     """Render system state and explicitly advanced audit data."""
     st.title("System")
     status = orchestrator.inspect()
+    try:
+        automatic = orchestrator.automatic_status()
+    except (SportsAnalyticsError, OSError, ValueError) as exc:
+        automatic = None
+        st.error(f"Automatic operation state could not be read: {_safe(exc)}")
     _state_banner(status)
     st.subheader("Runtime")
     st.write(
@@ -483,9 +614,142 @@ def render_system(orchestrator: MVPOrchestrator, *, exports_root: Path) -> None:
             "historical snapshots": status.historical_snapshot_count,
             "verified exports root": str(exports_root),
             "bookmaker placement": "manual-only",
-            "bookmaker network required": False,
+            "bookmaker network": (
+                "worker acquisition only"
+                if automatic is not None and automatic.enabled
+                else "not active"
+            ),
         }
     )
+    st.subheader("Automatic data setup")
+    if automatic is None or not automatic.configured:
+        st.info(
+            "One-time setup validates the key against the exact allowlisted provider, "
+            "prepares governed local state, and queues the first acquisition."
+        )
+        api_key = st.text_input(
+            "The Odds API key",
+            type="password",
+            key="automatic_api_key_setup",
+        )
+        setup_columns = st.columns(2)
+        region = setup_columns[0].selectbox(
+            "Region",
+            ("eu", "uk", "us", "us2", "au"),
+            index=0,
+        )
+        interval = setup_columns[1].number_input(
+            "Refresh interval (minutes)",
+            min_value=5,
+            max_value=60,
+            value=10,
+            step=5,
+        )
+        competitions = st.multiselect(
+            "Supported competitions",
+            ("eng-premier-league",),
+            default=("eng-premier-league",),
+        )
+        markets = st.multiselect(
+            "Supported markets",
+            ("h2h", "totals"),
+            default=("h2h",),
+        )
+        confirmed = st.checkbox(
+            "Enable automatic operation",
+            key="automatic_enable_confirmation",
+        )
+        if st.button(
+            "Enable automatic operation",
+            type="primary",
+            disabled=not confirmed,
+            key="automatic_enable_action",
+        ):
+            try:
+                with st.status("Validating and enabling automatic operation…"):
+                    orchestrator.enable_automatic_operation(
+                        api_key=api_key,
+                        region=region,
+                        competitions=tuple(competitions),
+                        markets=tuple(markets),
+                        refresh_interval_minutes=int(interval),
+                    )
+                st.success("Automatic operation enabled and first acquisition queued.")
+                st.rerun()
+            except (SportsAnalyticsError, OSError, ValueError) as exc:
+                st.error(_safe(exc))
+    else:
+        st.success("Automatic operation is configured. The saved API key is never displayed.")
+        st.write(
+            {
+                "enabled": automatic.enabled,
+                "paused": automatic.paused,
+                "provider connection": automatic.provider_connection_state,
+                "region": automatic.region,
+                "competitions": list(automatic.competitions),
+                "markets": list(automatic.markets),
+                "refresh minutes": automatic.refresh_interval_minutes,
+                "last successful acquisition": automatic.last_successful_acquisition,
+                "next scheduled acquisition": automatic.next_scheduled_acquisition,
+                "quota remaining": automatic.quota_remaining,
+                "quota used": automatic.quota_used,
+                "quota last cost": automatic.quota_last_cost,
+                "last-known-good product": automatic.last_known_good_product_at,
+            }
+        )
+        controls = st.columns(3)
+        if controls[0].button("Run acquisition now", key="automatic_run_now"):
+            try:
+                job_id = orchestrator.run_automatic_acquisition_now()
+                st.success(f"Acquisition queued · {_short(job_id)}")
+            except (SportsAnalyticsError, OSError, ValueError) as exc:
+                st.error(_safe(exc))
+        if automatic.paused:
+            if controls[1].button(
+                "Resume automatic acquisition",
+                key="automatic_resume",
+            ):
+                try:
+                    orchestrator.resume_automatic_operation()
+                    st.rerun()
+                except (SportsAnalyticsError, OSError, ValueError) as exc:
+                    st.error(_safe(exc))
+        elif controls[1].button(
+            "Pause automatic acquisition",
+            key="automatic_pause",
+        ):
+            try:
+                orchestrator.pause_automatic_operation()
+                st.rerun()
+            except (SportsAnalyticsError, OSError, ValueError) as exc:
+                st.error(_safe(exc))
+        if controls[2].button("Replace API key", key="automatic_replace_toggle"):
+            st.session_state["automatic_replace_visible"] = True
+        if st.session_state.get("automatic_replace_visible"):
+            replacement = st.text_input(
+                "Replacement The Odds API key",
+                type="password",
+                key="automatic_replacement_key",
+            )
+            if st.button(
+                "Validate and replace key",
+                type="primary",
+                key="automatic_replace_action",
+            ):
+                try:
+                    orchestrator.replace_automatic_api_key(replacement)
+                    st.session_state["automatic_replace_visible"] = False
+                    st.success("The provider key was replaced and acquisition resumed.")
+                    st.rerun()
+                except (SportsAnalyticsError, OSError, ValueError) as exc:
+                    st.error(_safe(exc))
+        if automatic.unresolved_events:
+            with st.expander("Unresolved provider events", expanded=True):
+                st.dataframe(
+                    automatic.unresolved_events,
+                    hide_index=True,
+                    use_container_width=True,
+                )
     st.subheader("Allowlisted historical ingestion")
     st.info(
         "Football-Data ingestion remains the only historical download path. "
@@ -567,6 +831,29 @@ def _single_display(
         ),
         "hold reason": ", ".join(reasons) or "—",
         "updated time": str(row.get("decision_as_of_utc", "")),
+    }
+
+
+def _automatic_display(row: dict[str, object]) -> dict[str, object]:
+    """Project persisted ranked evidence into the primary opportunity table."""
+    return {
+        "event": row.get("event"),
+        "kickoff time": row.get("kickoff_time_utc"),
+        "selection": row.get("selection"),
+        "market": row.get("market"),
+        "line": row.get("line"),
+        "best bookmaker": row.get("best_bookmaker"),
+        "best offered odd": row.get("best_offered_price"),
+        "median odd": row.get("median_available_price"),
+        "fair odd": row.get("fair_odds"),
+        "probability": row.get("model_probability"),
+        "edge": row.get("edge"),
+        "EV": row.get("expected_value"),
+        "risk tier": row.get("risk_tier"),
+        "price age (seconds)": row.get("observed_price_age_seconds"),
+        "bookmaker coverage": row.get("bookmaker_coverage_count"),
+        "status": row.get("status"),
+        "hold reason": row.get("hold_reason"),
     }
 
 

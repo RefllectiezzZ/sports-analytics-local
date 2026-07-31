@@ -490,6 +490,109 @@ class MVPOrchestrator:
         except ArtifactError:
             return None
 
+    def automatic_status(self) -> Any:
+        """Return persisted automatic-operation state without network activity."""
+        from sports_analytics.mvp.automatic_market_data import AutomaticMarketDataController
+
+        return AutomaticMarketDataController(
+            base_directory=self.base_directory,
+            config_path=self.config_path,
+            env_file=self.env_file,
+            clock=self._clock,
+        ).inspect()
+
+    def enable_automatic_operation(
+        self,
+        *,
+        api_key: str,
+        region: str,
+        competitions: tuple[str, ...],
+        markets: tuple[str, ...],
+        refresh_interval_minutes: int,
+    ) -> Any:
+        """Perform the one confirmed, bounded automatic-provider setup."""
+        from sports_analytics.mvp.automatic_market_data import AutomaticMarketDataController
+
+        return AutomaticMarketDataController(
+            base_directory=self.base_directory,
+            config_path=self.config_path,
+            env_file=self.env_file,
+            clock=self._clock,
+        ).enable(
+            api_key=api_key,
+            region=region,
+            competitions=competitions,
+            markets=markets,
+            refresh_interval_minutes=refresh_interval_minutes,
+        )
+
+    def pause_automatic_operation(self) -> Any:
+        """Pause acquisition and cancel equivalent pending jobs."""
+        from sports_analytics.mvp.automatic_market_data import AutomaticMarketDataController
+
+        return AutomaticMarketDataController(
+            base_directory=self.base_directory,
+            config_path=self.config_path,
+            env_file=self.env_file,
+            clock=self._clock,
+        ).pause()
+
+    def resume_automatic_operation(self) -> Any:
+        """Resume acquisition and enqueue one immediate durable job."""
+        from sports_analytics.mvp.automatic_market_data import AutomaticMarketDataController
+
+        return AutomaticMarketDataController(
+            base_directory=self.base_directory,
+            config_path=self.config_path,
+            env_file=self.env_file,
+            clock=self._clock,
+        ).resume()
+
+    def run_automatic_acquisition_now(self) -> str:
+        """Enqueue one immediate allowlisted acquisition."""
+        from sports_analytics.mvp.automatic_market_data import AutomaticMarketDataController
+
+        return AutomaticMarketDataController(
+            base_directory=self.base_directory,
+            config_path=self.config_path,
+            env_file=self.env_file,
+            clock=self._clock,
+        ).run_now()
+
+    def replace_automatic_api_key(self, api_key: str) -> Any:
+        """Validate and atomically replace the stored provider key."""
+        from sports_analytics.mvp.automatic_market_data import AutomaticMarketDataController
+
+        return AutomaticMarketDataController(
+            base_directory=self.base_directory,
+            config_path=self.config_path,
+            env_file=self.env_file,
+            clock=self._clock,
+        ).replace_key(api_key)
+
+    def run_automatic_analysis(
+        self,
+        *,
+        settings: Settings,
+        paths: RuntimePaths,
+        registry: FootballParticipantRegistry,
+        event_artifact: AnalyticalArtifact,
+        events: tuple[UpcomingEvent, ...],
+        provider_quotes: tuple[OperatorQuoteInput, ...],
+        evaluated_at_utc: datetime,
+    ) -> PublishedProductionFootballProduct:
+        """Run the existing production product for verified provider inputs."""
+        return self._run_analysis(
+            paths=paths,
+            registry=registry,
+            event_artifact=event_artifact,
+            events=events,
+            operator_quotes=provider_quotes,
+            evaluated_at_utc=evaluated_at_utc,
+            settings=settings,
+            automatic=True,
+        )
+
     def _run_analysis(
         self,
         *,
@@ -499,7 +602,10 @@ class MVPOrchestrator:
         events: tuple[UpcomingEvent, ...],
         operator_quotes: tuple[OperatorQuoteInput, ...],
         evaluated_at_utc: datetime,
+        settings: Settings | None = None,
+        automatic: bool = False,
     ) -> PublishedProductionFootballProduct:
+        runtime_settings = settings or self._settings_paths()[0]
         competition = events[0].competition_id
         champion = self._champion_for(paths, competition)
         if champion is None:
@@ -513,7 +619,8 @@ class MVPOrchestrator:
             champion_artifact_id=champion[2],
             policy_artifact_id=policy_artifact.artifact_id,
         )
-        base = f"mvp/product-runs/{competition}/{identity}"
+        run_identity = identity[:32] if automatic else identity
+        base = f"mvp/product-runs/{competition}/{run_identity}"
         read_model_relative = f"{base}/read-model"
         try:
             existing = load_analytical_artifact(
@@ -560,10 +667,13 @@ class MVPOrchestrator:
                     proposal_policy_relative_directory=(policy_artifact.relative_directory),
                     proposal_policy_checksum_sha256=(policy_artifact.checksum_sha256),
                     operator_quotes=operator_quotes,
-                    registered_provider_ids=self._provider_ids(self._settings_paths()[0]),
+                    registered_provider_ids=(
+                        self._provider_ids(runtime_settings)
+                        | frozenset(item.provider_id for item in operator_quotes)
+                    ),
                     quote_policy=OperatorQuotePolicy(
                         maximum_age=timedelta(
-                            seconds=self._settings_paths()[0].bookmakers.quote_maximum_age_seconds
+                            seconds=runtime_settings.bookmakers.quote_maximum_age_seconds
                         )
                     ),
                 ),

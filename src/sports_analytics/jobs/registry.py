@@ -28,6 +28,10 @@ from sports_analytics.learning.jobs import (
     run_challenger_cycle_handler,
     settle_new_results_handler,
 )
+from sports_analytics.mvp.automatic_market_data import (
+    AUTOMATIC_MARKET_DATA_JOB_TYPE,
+    automatic_market_data_handler,
+)
 from sports_analytics.operations.handlers import (
     RUN_MONITORING_JOB_TYPE,
     SETTLE_ANALYSIS_JOB_TYPE,
@@ -105,6 +109,7 @@ def build_default_registry() -> HandlerRegistry:
     registry.register(SETTLE_ANALYSIS_JOB_TYPE, settle_analysis_handler)
     registry.register(RUN_MONITORING_JOB_TYPE, run_monitoring_handler)
     registry.register(RUN_FOOTBALL_PRODUCT_JOB_TYPE, run_football_product_handler)
+    registry.register(AUTOMATIC_MARKET_DATA_JOB_TYPE, automatic_market_data_handler)
     registry.register(REGISTER_RESULTS_JOB_TYPE, register_results_handler)
     registry.register(SETTLE_NEW_RESULTS_JOB_TYPE, settle_new_results_handler)
     registry.register(REFRESH_MONITORING_JOB_TYPE, refresh_monitoring_handler)

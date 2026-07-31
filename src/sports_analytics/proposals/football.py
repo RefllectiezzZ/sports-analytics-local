@@ -353,9 +353,23 @@ def evaluate_catalogue_proposals(
     if catalogue is not None:
         for quote in catalogue.quotes:
             key = _quote_match_key(quote)
-            if key in quote_index:
-                raise EvaluationError("validated operator catalogue has ambiguous quote identity")
-            quote_index[key] = quote
+            current = quote_index.get(key)
+            if (
+                current is None
+                or quote.offered_decimal_odds > current.offered_decimal_odds
+                or (
+                    quote.offered_decimal_odds == current.offered_decimal_odds
+                    and (
+                        quote.input.provider_id,
+                        quote.odds_quote.quote_observation_id,
+                    )
+                    < (
+                        current.input.provider_id,
+                        current.odds_quote.quote_observation_id,
+                    )
+                )
+            ):
+                quote_index[key] = quote
     decisions: list[ProposedSingleDecision] = []
     if "football" in rules.sport_policy.allowed_sports:
         for event_id in sorted(event_markets):

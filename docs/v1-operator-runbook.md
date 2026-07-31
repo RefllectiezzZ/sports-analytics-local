@@ -3,11 +3,11 @@
 ## Boundaries
 
 Sports Analytics Local v1.0.0 is a single-operator, localhost-only application.
-The website permits only system preparation, upcoming-match import,
-current-odds import, and product refresh. Final placement is manual-only. The
-supported current price path is `strict-offline-operator-input`: real offered
-odds are supplied through strict CSV/JSON or editable manual tables.
-Bookmaker acquisition is disabled by default and is not required for v1.
+The website permits system preparation, automatic allowlisted provider setup,
+upcoming-match/current-odds fallback import, and product refresh. Final placement
+is manual-only. Automatic mode uses only The Odds API v4 at the exact
+`https://api.the-odds-api.com` host. Strict CSV/JSON and editable manual tables
+remain Advanced/Fallback paths.
 
 There is no login, credential generation, CAPTCHA bypass, automatic betting,
 staking, bankroll management, public bind address, cloud service, or
@@ -20,10 +20,12 @@ profitability claim.
 3. Select **Sports Analytics Local MVP**.
 4. Press **F5**.
 5. Open the printed `http://127.0.0.1:8501` URL.
-6. Confirm and select **Prepare system**.
-7. Add upcoming matches on **Matches**.
-8. Add real offered odds on **Odds**.
-9. Review persisted candidates on **Bets**.
+6. Open **System** and enter the The Odds API key once.
+7. Keep region `eu` or choose another allowlisted region, select supported
+   competitions, and keep `h2h` unless supported totals are needed.
+8. Confirm **Enable automatic operation**.
+9. Leave the durable worker running and review automatically refreshed
+   risk-adjusted opportunities on **Dashboard** and **Bets**.
 10. Place an eligible proposal manually at the bookmaker.
 
 F5 uses the selected repository interpreter and the package-native release
@@ -31,7 +33,7 @@ module. Normal launch initializes the runtime idempotently before supervising
 the durable worker and Streamlit UI. No regular command-line use is required.
 The URL remains loopback-only and the browser is not opened automatically.
 
-Selecting **Prepare system** after checking its confirmation box is the explicit
+Confirmed automatic setup invokes **Prepare system** when needed and is the explicit
 operator authorization for governed initial champion preparation. The action
 reuses verified compatible artifacts where possible, otherwise runs the
 existing verified-historical score tournament and its unchanged production
@@ -50,25 +52,39 @@ training or promotion.
 
 - **Dashboard** shows readiness, matches analysed, awaiting odds, analytical
   candidates, held candidates, placeable manual proposals, active competition,
-  active model, last successful analysis, next action, and worker state.
-- **Matches** accepts human-friendly CSV, JSON, or editable rows. Teams come
+  active model, last successful analysis, automatic connection/quota/sync state,
+  top risk-adjusted opportunities, next action, and worker state.
+- **Matches** is the Advanced/Fallback fixture workflow and accepts human-friendly
+  CSV, JSON, or editable rows. Teams come
   from the verified participant registry; UUIDs, artifact IDs, and checksums
   are derived internally.
-- **Odds** accepts canonical CSV/JSON or editable rows for a registered provider,
-  match, market, outcome, optional line, decimal odd, and visible UTC timestamp.
+- **Odds** is the Advanced/Fallback price workflow and accepts canonical CSV/JSON
+  or editable rows for a registered provider, match, market, outcome, optional
+  line, decimal odd, and visible UTC timestamp.
   It accepts no URL, credential, cookie, token, selector, or script material.
-- **Bets** separates ready-for-manual-placement, analytical, held, and rejected
-  rows. It shows real offered odds, fair odds, model probability, edge, EV,
-  exact reasons, and supported same-provider accumulators.
+- **Bets** applies the persisted status/risk/EV/edge/freshness/coverage ranking,
+  supports bookmaker/competition/market/risk/status filters, and separates
+  ready-for-manual-placement, analytical, held, and rejected rows. It shows
+  best and median real prices, price comparison, fair odds, model probability,
+  edge, EV, risk tier, exact reasons, and same-bookmaker accumulators.
 - **History** summarizes persisted operational state.
-- **System** contains advanced immutable artifact audit information and the
-  explicitly initiated allowlisted Football-Data path.
+- **System** contains one-time masked-key setup, run-now/pause/resume/key
+  replacement controls, unresolved reconciliation findings, quota state,
+  advanced immutable artifact audit, and allowlisted Football-Data history.
 
 Saving valid matches triggers fair-odds analysis when an active champion
 exists. Saving a complete current market automatically validates and publishes
 the quotes, runs production inference, calculates probability/edge/EV, builds
 singles and eligible accumulators, publishes the read model, and refreshes the
 dashboard. Periodic refresh only reads persisted state and never retrains.
+
+Automatic acquisition defaults to every 10 minutes and permits 5 through 60
+minutes. Each changed response publishes or reuses immutable provider/event/quote
+evidence, runs the existing production football product, and updates the ranked
+read model. Identical responses do not duplicate artifacts. Authentication
+failure blocks retries until the key is replaced. The quota reserve pauses new
+requests. Temporary failures, empty responses, stale quotes, unresolved teams,
+and model/economic holds retain the last-known-good product and remain explicit.
 
 ## CLI diagnostics and compatibility
 
@@ -182,9 +198,11 @@ and does not implement down-migrations.
 
 - local machine, one operator, loopback UI only;
 - football product scope already implemented before this release;
-- strict offline real offered-price input is the supported price path;
-- bookmaker browser acquisition remains optional, disabled by default, and not
-  guaranteed;
+- one optional external provider, The Odds API v4, supplies configured pre-match
+  events and bookmaker quotes; coverage is provider-dependent and not universal;
+- API use consumes provider credits; `h2h` is the quota-conserving default;
+- provider data can be temporarily absent, stale, unmatched, or quota-paused;
+- manual fixture and odds entry remains available as Advanced/Fallback;
 - no public web hosting, multi-user operation, login, or access control;
 - no bet placement, automatic transaction, staking, or bankroll workflow;
 - no guarantee of a champion, current odds, economic eligibility, proposal, or
@@ -193,7 +211,5 @@ and does not implement down-migrations.
 - analytical/audit pages remain read-only and require verified persisted
   artifacts.
 
-Direct bookmaker acquisition is not required. Candidate generation is
-automatic after valid operator input, but bookmaker placement is manual.
-Economic holds are expected until prospective evidence exists, and no
-profitability guarantee is made.
+Automatic generation is not bookmaker placement. Economic holds are expected
+until prospective evidence exists, and no profitability guarantee is made.
