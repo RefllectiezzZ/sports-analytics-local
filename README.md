@@ -14,13 +14,14 @@ Provide a localhost-only toolchain that:
 
 ## Primary v1 football product path
 
-The current product path is historical modelling and strict offline price
-input, not direct bookmaker acquisition:
+After one-time local setup, the normal product path uses one allowlisted
+external provider, The Odds API v4:
 
 ```text
-historical evidence -> rolling tournament -> coherent joint score distribution
--> multi-market probabilities -> fair odds -> optional real offered-price input
--> EV/opportunities -> proposed singles/accumulators -> persisted Streamlit state
+Football-Data history -> governed score champion -> The Odds API fixtures/odds
+-> exact participant reconciliation -> verified real offered prices
+-> probabilities/fair odds/edge/EV -> risk assessment and ranking
+-> singles/same-bookmaker accumulators -> persisted Streamlit state
 ```
 
 Independent dynamic Poisson and Dixon–Coles candidates derive the supported
@@ -28,10 +29,11 @@ full-time goal markets from one bounded score matrix. Fair odds are model
 estimates; offered odds are real external prices. Without offered odds, EV and
 proposed price-based bets do not exist.
 
-Direct Betclic/Betano acquisition remains experimental and unsupported where no
-exact profile is installed. No additional live probing is part of the v1 path.
-Current prices can instead use strict canonical CSV/JSON or the shared manual
-validator. Final placement remains manual.
+The provider scope is every pre-match event and valid bookmaker quote returned
+for configured supported competitions, regions, and markets; it is not universal
+global bookmaker coverage. Direct bookmaker scraping and live probing are not
+part of this path. Matches and Odds remain Advanced/Fallback manual workflows.
+Final placement remains manual.
 
 See [the coherent football product](docs/football-product.md),
 [the model tournament](docs/model-tournament.md), and
@@ -39,7 +41,8 @@ See [the coherent football product](docs/football-product.md),
 
 ## Runtime constraints
 
-- Runtime operation does **not** depend on paid APIs.
+- Automatic mode requires an operator-supplied The Odds API key and consumes
+  provider credits. Manual fallback remains available without that provider.
 - Runtime operation does **not** depend on external AI, LLM, or cloud inference services.
 - Development tooling may use AI assistance, but the final application will not require it.
 
@@ -58,19 +61,21 @@ Regular operation does not require terminal commands:
 2. Select **Sports Analytics Local MVP** in Run and Debug.
 3. Press **F5**.
 4. Open the printed `http://127.0.0.1:8501` URL.
-5. Confirm and select **Prepare system**.
-6. Add upcoming matches on **Matches**.
-7. Add real offered odds on **Odds**.
-8. Review automatically generated singles and accumulators on **Bets**.
-9. Place an eligible proposal manually at the bookmaker.
+5. Open **System**, enter a The Odds API key once, select region, competition,
+   and markets, then confirm **Enable automatic operation**.
+6. Leave the durable worker running.
+7. Review automatically refreshed risk-adjusted opportunities on **Dashboard**
+   and **Bets**.
+8. Place an eligible proposal manually at the bookmaker.
 
 F5 uses the selected VS Code Python interpreter, performs safe idempotent
 initialization, starts the durable worker and Streamlit UI, prints the loopback
 URL, and never opens a browser automatically. The CLI remains available for
 diagnostics, backup, restore, and advanced operations.
 
-The confirmed **Prepare system** action is also the explicit authorization for
-the existing governed champion path. For a competition without a champion it
+The confirmed automatic setup invokes **Prepare system** when required and is
+the explicit authorization for the existing governed champion path. For a
+competition without a champion it
 uses only verified historical snapshots, enforces the current tournament and
 production-evidence gates, strictly reloads the selected score model, records
 the champion–challenger policy decision, and applies an atomic promotion only
@@ -83,6 +88,15 @@ Implemented now:
 - SQLite operational persistence with forward-only migrations `0001`–`0005`;
 - durable local job worker infrastructure and a local supervisor that can also
   start the bookmaker scheduler when enabled;
+- a typed The Odds API v4 client restricted to
+  `https://api.the-odds-api.com`, bounded pre-match windows, `h2h` by default,
+  optional supported `totals`, quota telemetry/reserve, sanitized failures, and
+  a separate atomic local secret store;
+- durable immediate/startup/interval acquisition with duplicate suppression,
+  bounded backoff and jitter, pause/resume/key replacement, immutable raw and
+  canonical snapshots, last-known-good retention, and automatic product runs;
+- auditable best-price comparison, risk tiers and reasons, deterministic
+  lexicographic ranking, and top risk-adjusted opportunity views;
 - one Football-Data.co.uk **ingestion adapter** covering two competitions
   (`eng-premier-league`, `prt-primeira-liga`), with allowlisted HTTPS retrieval,
   content-addressed raw storage, and strict CSV parsing;
@@ -173,12 +187,13 @@ destinations. It never force-overwrites operational state. See the
 [v1 operator runbook](docs/v1-operator-runbook.md) and
 [v1 release notes](docs/release-v1.md).
 
-Direct bookmaker acquisition is not required. Current real offered odds can be
-uploaded as canonical CSV/JSON or entered in the editable Odds table. The
-application validates them, calculates probability, fair odds, edge, and EV,
-and generates supported singles and accumulators automatically. Economic holds
-remain visible and truthful; they are not ready for placement. There is no
-profitability guarantee.
+Automatic operation is optional. If the key is absent, authentication fails,
+quota reaches its configured reserve, or data is temporarily unavailable, the
+last verified product is retained and the exact state is shown. Current real
+offered odds can still be uploaded as canonical CSV/JSON or entered in the
+Advanced/Fallback Odds table. Economic holds remain visible and truthful; they
+are not ready for placement. Automatic generation does not place anything, and
+there is no profitability guarantee.
 
 ## Setup
 

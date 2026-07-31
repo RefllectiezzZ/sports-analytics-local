@@ -52,7 +52,7 @@ MAX_UPCOMING_EVENTS: Final[int] = 500
 MAX_INPUT_BYTES: Final[int] = 1_048_576
 MAX_NOTE_LENGTH: Final[int] = 500
 _SOURCE_KINDS: Final[frozenset[str]] = frozenset(
-    {"operator-csv", "operator-json", "operator-reviewed"}
+    {"operator-csv", "operator-json", "operator-reviewed", "provider-api"}
 )
 _UNSAFE_TEXT = re.compile(
     r"(?i)(?:(?:https?|ftp)://|www\.|authorization|cookie|token|selector|"
@@ -174,13 +174,22 @@ def write_upcoming_event_artifact(
     if len(batches) != 1:
         raise ConfigurationError("upcoming-event artifact requires one import batch")
     _validate_registered_event_participants(ordered, participant_registry)
+    source_classification = (
+        "allowlisted-provider-api"
+        if all(item.source_kind == "provider-api" for item in ordered)
+        else "strict-offline-operator-import"
+    )
+    if any(item.source_kind == "provider-api" for item in ordered) and (
+        source_classification != "allowlisted-provider-api"
+    ):
+        raise ConfigurationError("upcoming-event artifact cannot mix provider and operator rows")
     return write_analytical_artifact(
         root=root,
         relative_directory=relative_directory,
         artifact_type=UPCOMING_EVENT_ARTIFACT_TYPE,
         schema_version=UPCOMING_EVENT_ARTIFACT_SCHEMA,
         payload={
-            "source_classification": "strict-offline-operator-import",
+            "source_classification": source_classification,
             "imported_at_utc": format_utc_timestamp(cutoff),
             "evaluated_at_utc": format_utc_timestamp(cutoff),
             "import_batch_id": next(iter(batches)),
@@ -240,8 +249,14 @@ def load_upcoming_event_artifact(
         "events",
     }:
         raise ArtifactError("upcoming-event artifact payload fields are not exact")
-    if payload["source_classification"] != "strict-offline-operator-import":
+    if payload["source_classification"] not in {
+        "strict-offline-operator-import",
+        "allowlisted-provider-api",
+    }:
         raise ArtifactError("upcoming-event source classification is invalid")
+    expected_source = (
+        "provider-api" if payload["source_classification"] == "allowlisted-provider-api" else None
+    )
     _validate_participant_registry_lineage(payload["participant_registry"])
     imported_at = _artifact_timestamp(payload["imported_at_utc"], "imported_at_utc")
     cutoff = _artifact_timestamp(payload["evaluated_at_utc"], "evaluated_at_utc")
@@ -254,6 +269,8 @@ def load_upcoming_event_artifact(
         raise ArtifactError(str(exc)) from exc
     if payload["row_count"] != len(events):
         raise ArtifactError("upcoming-event row count mismatch")
+    if expected_source is not None and any(item.source_kind != expected_source for item in events):
+        raise ArtifactError("upcoming-event provider source classification mismatch")
     if payload["import_batch_id"] != events[0].import_batch_id:
         raise ArtifactError("upcoming-event import batch mismatch")
     if tuple(item.canonical_event_id for item in events) != tuple(

@@ -58,6 +58,12 @@ class JobExecutionContext:
     )
     _sleeper: Sleeper | None = field(default=None, init=False, repr=False, compare=False)
     _clock: Any = field(default=None, init=False, repr=False, compare=False)
+    _runtime_context: RuntimeContext | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _browser_session: BrowserSession | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -89,6 +95,7 @@ class JobExecutionContext:
 
     def bind_runtime(self, runtime: RuntimeContext) -> None:
         """Attach non-connection runtime paths and settings for handler use."""
+        object.__setattr__(self, "_runtime_context", runtime)
         object.__setattr__(self, "_database_path", runtime.database_path)
         object.__setattr__(self, "_raw_directory", runtime.paths.raw_directory)
         object.__setattr__(self, "_snapshots_directory", runtime.paths.snapshots_directory)

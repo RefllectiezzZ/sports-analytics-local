@@ -52,6 +52,43 @@ def test_ui_has_no_forced_model_or_promotion_override() -> None:
         assert prohibited not in source
 
 
+def test_automatic_setup_status_ranking_and_controls_are_visible() -> None:
+    source = inspect.getsource(mvp_pages)
+    for required in (
+        'type="password"',
+        "Enable automatic operation",
+        "Run acquisition now",
+        "Pause automatic acquisition",
+        "Resume automatic acquisition",
+        "Replace API key",
+        "Top risk-adjusted opportunities",
+        "Bookmaker filter",
+        "Competition filter",
+        "Market filter",
+        "Risk filter",
+        "Status filter",
+        "Current bookmaker price comparison",
+        "Advanced/Fallback",
+    ):
+        assert required in source
+    dashboard = inspect.getsource(mvp_pages.render_dashboard)
+    assert "TheOddsApiClient" not in dashboard
+    assert ".get_odds(" not in dashboard
+    assert (
+        "prepare_system()"
+        not in dashboard.split("_persisted_status", 1)[1].split("_persisted_status()", 1)[0]
+    )
+    for prohibited in (
+        "best bet",
+        "safe bet",
+        "sure win",
+        "guaranteed profit",
+        "Place bet",
+        "Stake amount",
+    ):
+        assert prohibited not in source
+
+
 def test_empty_runtime_renders_guided_dashboard(tmp_path: Path, monkeypatch) -> None:
     from tests.helpers import repository_root
 

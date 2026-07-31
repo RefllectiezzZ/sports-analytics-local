@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -180,9 +181,16 @@ def initialize_v1(
     status = get_migration_status(paths.sqlite_path)
     if not status.is_up_to_date or status.current_version != 5 or status.latest_version != 5:
         raise ValueError("initialization did not reach exact migration state 0005")
+    from sports_analytics.mvp.automatic_market_data import ensure_startup_automatic_job
+
+    automatic_job_id = ensure_startup_automatic_job(
+        paths=paths,
+        now=datetime.now(tz=UTC),
+    )
     return {
         "already_existing_directories": sorted(existing),
         "application_version": __version__,
+        "automatic_market_data_job_id": automatic_job_id,
         "bookmakers_enabled": settings.bookmakers.enabled,
         "config_source": (
             str(Path(config_path).resolve())

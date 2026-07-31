@@ -4,6 +4,19 @@ All notable local releases are documented here.
 
 ## Unreleased — operational local MVP
 
+- Added one-time The Odds API v4 setup with masked key entry, atomic local secret
+  storage, allowlisted region/competition/market selection, governed preparation,
+  immediate acquisition, and automatic F5 startup resumption.
+- Added a strict non-redirecting provider client, quota telemetry/reserve,
+  bounded Retry-After-aware backoff with jitter, authentication blocking, sports
+  catalogue caching, raw response lineage, and last-known-good retention.
+- Added explicit `eng-premier-league` / `soccer_epl` mapping, fail-closed team
+  reconciliation, complete per-bookmaker `h2h` and exact-line `totals`
+  translation, multi-bookmaker retention, and content-idempotent publication.
+- Added deterministic best-price selection, persisted risk tiers/reasons and
+  lexicographic ranking, professional automatic dashboard/Bets filters, price
+  comparisons, sync/quota metrics, and run-now/pause/resume/key replacement.
+
 - Completed confirmed UI-only champion preparation through verified historical
   score tournaments, strict artifact reload, persisted governance decisions,
   and atomic audited promotion; non-promote decisions remain recorded without
@@ -25,7 +38,7 @@ All notable local releases are documented here.
 - Added bounded persisted-state refresh and focused MVP/UI/operator integration
   coverage.
 
-Bookmaker login, placement, financial transactions, model-selection bypass,
+Bookmaker login, scraping, placement, financial transactions, model-selection bypass,
 economic-eligibility overrides, and new migrations remain out of scope.
 
 ## 1.0.0 — 2026-07-30
